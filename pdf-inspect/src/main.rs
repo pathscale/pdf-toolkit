@@ -16,6 +16,8 @@ use pdf_core::source::PdfSource;
 use pdf_core::work::ObjectRef;
 use pdf_inspect::{digest_hex, format_number, JsonWriter, Sha256};
 
+mod text;
+
 struct CountingAllocator;
 
 static CURRENT_BYTES: AtomicUsize = AtomicUsize::new(0);
@@ -118,6 +120,20 @@ fn run() -> u8 {
                 1
             }
         },
+        "text" => match parse_single_path(&args) {
+            Some(path) => text::run_text(&path, Limits::default()),
+            None => {
+                print_usage();
+                1
+            }
+        },
+        "receipt" => match parse_single_path(&args) {
+            Some(path) => text::run_receipt(&path, Limits::default()),
+            None => {
+                print_usage();
+                1
+            }
+        },
         "streams" => match parse_single_path(&args) {
             Some(path) => run_streams(&path, Limits::default()),
             None => {
@@ -157,6 +173,7 @@ fn print_usage() {
     eprintln!(
         "usage:\n  pdf-inspect summary FILE [--max-decoded N] [--max-depth N] \
          [--max-prev-chain N] [--max-pages N]\n  pdf-inspect streams FILE\n  \
+         pdf-inspect text FILE\n  pdf-inspect receipt FILE\n  \
          pdf-inspect bench FILE... [--repeat N]\n  \
          pdf-inspect mutate FILE --seed N --count K\n  pdf-inspect check DIR"
     );
@@ -836,8 +853,10 @@ struct BenchSample {
     first_page_ms: f64,
     pages_ms: f64,
     decode_ms: f64,
+    text_ms: f64,
     pages: u64,
     decoded_bytes: u64,
+    glyphs: u64,
     refusal: Option<String>,
 }
 
@@ -865,8 +884,10 @@ fn bench_sample(path: &Path, limits: Limits) -> Result<BenchSample, String> {
     let mut first_page_ms = open_ms;
     let mut pages_ms = 0.0;
     let mut decode_ms = 0.0;
+    let mut text_ms = 0.0;
     let mut pages = Vec::new();
     let mut decoded_bytes = 0u64;
+    let mut glyphs = 0u64;
     let mut refusal = None;
 
     if let Err(error) = &document {
@@ -923,6 +944,10 @@ fn bench_sample(path: &Path, limits: Limits) -> Result<BenchSample, String> {
             }
         }
         decode_ms = decode_start.elapsed().as_secs_f64() * 1000.0;
+
+        let text_start = Instant::now();
+        glyphs = text::scan_text(&document, &pages, &mut refusal);
+        text_ms = text_start.elapsed().as_secs_f64() * 1000.0;
     }
 
     Ok(BenchSample {
@@ -931,8 +956,10 @@ fn bench_sample(path: &Path, limits: Limits) -> Result<BenchSample, String> {
         first_page_ms,
         pages_ms,
         decode_ms,
+        text_ms,
         pages: pages.len() as u64,
         decoded_bytes,
+        glyphs,
         refusal,
     })
 }
@@ -993,7 +1020,9 @@ fn run_bench(paths: &[PathBuf], repeat: usize, limits: Limits) -> u8 {
         let first_page_ms = median_f64(samples.iter().map(|sample| sample.first_page_ms));
         let pages_ms = median_f64(samples.iter().map(|sample| sample.pages_ms));
         let decode_ms = median_f64(samples.iter().map(|sample| sample.decode_ms));
+        let text_ms = median_f64(samples.iter().map(|sample| sample.text_ms));
         let pages = median_u64(samples.iter().map(|sample| sample.pages));
+        let glyphs = median_u64(samples.iter().map(|sample| sample.glyphs));
         let decoded_bytes = median_u64(samples.iter().map(|sample| sample.decoded_bytes));
         let elapsed_seconds = (open_ms + pages_ms) / 1000.0;
         let mb_per_s = if elapsed_seconds > 0.0 {
@@ -1022,6 +1051,10 @@ fn run_bench(paths: &[PathBuf], repeat: usize, limits: Limits) -> u8 {
         json.float(pages_ms);
         json.member("decode_ms");
         json.float(decode_ms);
+        json.member("text_ms");
+        json.float(text_ms);
+        json.member("glyphs");
+        json.number(glyphs);
         json.member("pages");
         json.number(pages);
         json.member("decoded_bytes");
@@ -1272,6 +1305,8 @@ fn run_mutated(bytes: Vec<u8>, limits: Limits) -> Result<(), String> {
         }
     }
 
+    let _ = text::scan_text(&document, &pages, &mut refusal);
+
     match refusal {
         Some(code) => Err(code),
         None => Ok(()),
@@ -1395,6 +1430,7 @@ fn apply_limit_override(limits: &mut Limits, key: &str, value: &str) -> bool {
     };
     match key {
         "limit.max_decoded_bytes" => limits.max_decoded_bytes = number,
+        "limit.max_content_ops" => limits.max_content_ops = number,
         "limit.max_prev_chain" => {
             let Ok(number) = u32::try_from(number) else {
                 return false;
@@ -1484,6 +1520,7 @@ fn actual_fixture_values(
     );
 
     let mut resolver = document.resolver();
+    let mut text_resolver = document.resolver();
     for page in &report.pages {
         let prefix = format!("page.{}", page.index);
         actuals.insert(
@@ -1538,9 +1575,12 @@ fn actual_fixture_values(
                 digest_hex(&hasher.finalize()),
             );
         }
+        let receipt = pdf_text::extract::page_receipt(&mut text_resolver, page);
+        text::fixture_values(&mut actuals, &prefix, &receipt);
     }
 
     append_resolver_warnings(&mut resolver, &mut report.warnings);
+    append_resolver_warnings(&mut text_resolver, &mut report.warnings);
     let warnings = report
         .warnings
         .iter()
