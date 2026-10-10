@@ -137,6 +137,13 @@ fn run() -> u8 {
                 1
             }
         },
+        "repair" => match parse_single_path(&args) {
+            Some(path) => run_repair(&path, Limits::default()),
+            None => {
+                print_usage();
+                1
+            }
+        },
         "semantic" => match parse_single_path(&args) {
             Some(path) => run_semantic(&path, Limits::default()),
             None => {
@@ -830,6 +837,53 @@ fn run_semantic(path: &Path, limits: Limits) -> u8 {
     let mut json = JsonWriter::new();
     write_semantic_document(&mut json, &document);
     println!("{}", json.finish());
+    0
+}
+
+/// Opens with xref repair (only used when the strict open fails) and reports what
+/// the rebuilt document yields: pages walked, extracted glyphs and every warning.
+fn run_repair(path: &Path, limits: Limits) -> u8 {
+    let source = match file::open(path, limits.max_file_bytes) {
+        Ok(source) => source,
+        Err(error) => {
+            eprintln!("{error}");
+            return 3;
+        }
+    };
+    let strict = Document::open(source.clone(), limits).err().map(|error| error.code());
+    let document =
+        match Document::open_with(source, limits, pdf_core::OpenMode::Repair) {
+            Ok(document) => document,
+            Err(error) => {
+                println!("{{\"strict\":{:?},\"repair\":{:?}}}", strict, error.code());
+                return 1;
+            }
+        };
+    let mut resolver = document.resolver();
+    let (mut pages, mut page_errors, mut glyphs) = (0u32, 0u32, 0usize);
+    let walked: Vec<_> = match PageWalk::new(&mut resolver) {
+        Ok(walk) => walk.collect(),
+        Err(_) => Vec::new(),
+    };
+    for item in walked {
+        match item {
+            Ok(page) => {
+                pages += 1;
+                if let Ok(text) = pdf_text::interp::page_text(&mut resolver, &page) {
+                    glyphs += text.glyphs.len();
+                }
+            }
+            Err(_) => page_errors += 1,
+        }
+    }
+    let mut warnings: Vec<&str> = document.warnings().iter().map(|w| w.what).collect();
+    let resolver_warnings = resolver.take_warnings();
+    warnings.extend(resolver_warnings.iter().map(|w| w.what));
+    warnings.dedup();
+    println!(
+        "{{\"strict\":{:?},\"pages\":{pages},\"page_errors\":{page_errors},\"glyphs\":{glyphs},\"warnings\":{:?}}}",
+        strict, warnings
+    );
     0
 }
 
