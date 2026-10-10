@@ -13,6 +13,11 @@ pub enum LimitKind {
     PageTreeDepth,
     ObjStmMembers,
     ContentOps,
+    ImagePixels,
+    Jbig2Segments,
+    Jbig2Symbols,
+    CodecBytes,
+    CodecWork,
 }
 
 impl LimitKind {
@@ -31,6 +36,11 @@ impl LimitKind {
             Self::PageTreeDepth => "page_tree_depth",
             Self::ObjStmMembers => "objstm_members",
             Self::ContentOps => "content_ops",
+            Self::ImagePixels => "image_pixels",
+            Self::Jbig2Segments => "jbig2_segments",
+            Self::Jbig2Symbols => "jbig2_symbols",
+            Self::CodecBytes => "codec_bytes",
+            Self::CodecWork => "codec_work",
         }
     }
 }

@@ -35,6 +35,11 @@ impl DocError {
                 LimitKind::PageTreeDepth => "refused:page_tree_depth",
                 LimitKind::ObjStmMembers => "refused:objstm_members",
                 LimitKind::ContentOps => "refused:content_ops",
+                LimitKind::ImagePixels => "refused:image_pixels",
+                LimitKind::Jbig2Segments => "refused:jbig2_segments",
+                LimitKind::Jbig2Symbols => "refused:jbig2_symbols",
+                LimitKind::CodecBytes => "refused:codec_bytes",
+                LimitKind::CodecWork => "refused:codec_work",
             },
             Self::Encrypted => "encrypted",
             Self::Unsupported { .. } => "unsupported",
@@ -43,6 +48,7 @@ impl DocError {
             Self::WrongType { .. } => "wrong_type",
             Self::Filter(error) => match error {
                 FilterError::OutputLimit { .. } => "filter:output_limit",
+                FilterError::Refused(_) => "filter:refused",
                 FilterError::Unsupported { .. } => "filter:unsupported",
                 FilterError::BadParams { .. } => "filter:bad_params",
                 FilterError::Corrupt { .. } => "filter:corrupt",
@@ -101,6 +107,7 @@ impl From<FilterError> for DocError {
                 requested: limit.saturating_add(1),
                 maximum: limit,
             }),
+            FilterError::Refused(refusal) => Self::Refused(refusal),
             error => Self::Filter(error),
         }
     }

@@ -1,6 +1,6 @@
 use alloc::vec::Vec;
 
-use pdf_core::filter::{Decoded, FilterKind};
+use pdf_core::filter::{decode_image_report, Decoded, FilterKind, ImageParams};
 use pdf_core::{
     DictRef, DocError, LimitKind, Object, ObjectRef, Resolver, Value, ValueRef, Warning,
 };
@@ -155,12 +155,12 @@ fn read_image(
         Some(value) => value.get().as_bool()
             .ok_or_else(|| wrong(object.id(), "ImageMask boolean"))?,
     };
-    let bits_per_component = resolver.resolve_dict_key(dict, b"BitsPerComponent")?
+    let mut bits_per_component = resolver.resolve_dict_key(dict, b"BitsPerComponent")?
         .and_then(|value| value.get().as_i64())
         .and_then(|number| u8::try_from(number).ok())
         .unwrap_or(if image_mask { 1 } else { 0 });
 
-    let color = if image_mask {
+    let mut color = if image_mask {
         ColorSpec::simple(ColorSpace::Gray)
     } else {
         match read_color(resolver, dict) {
@@ -203,7 +203,7 @@ fn read_image(
         data: ImageData::Unsupported("decode"),
         soft_mask: None,
     };
-    let decoded = match decode(resolver, object, budget) {
+    let mut decoded = match decode(resolver, object, budget) {
         Ok(decoded) => decoded,
         Err(error) => {
             recover(resolver, object, error, "image_decode_failed")?;
@@ -212,17 +212,61 @@ fn read_image(
     };
 
     if let Some(codec) = decoded.image {
-        if decoded.truncated {
-            warn(resolver, object, "image_truncated");
+        if matches!(codec, FilterKind::Jbig2 | FilterKind::CcittFax) {
+            let maximum = resolver.document().limits().max_decoded_bytes;
+            SampleLayout::new(width, height, 1, 1, maximum)?;
+            let result = (|| {
+                let params = image_params(
+                    resolver, object, dict, codec, width, height, budget,
+                )?;
+                let mut binary = decode_image_report(
+                    codec, &decoded.bytes, &params, max_pixels,
+                ).map_err(DocError::from)?;
+                check(LimitKind::DecodedBytes, binary.bytes.len() as u64, maximum)?;
+                budget.charge(binary.bytes.len())?;
+                if codec == FilterKind::Jbig2 {
+                    // JBIG2 exposes black bits. PDF gray samples use 0 for
+                    // black, before the image's Decode pairs are applied.
+                    for byte in &mut binary.bytes {
+                        *byte ^= 255;
+                    }
+                }
+                Ok::<_, DocError>(binary)
+            })();
+            let binary = match result {
+                Ok(binary) => binary,
+                Err(error) => {
+                    recover(resolver, object, error, "image_bilevel_decode_failed")?;
+                    image.data = ImageData::Unsupported(
+                        if codec == FilterKind::Jbig2 { "jbig2" } else { "ccitt" },
+                    );
+                    return Ok((image, soft));
+                }
+            };
+            if binary.skipped_refinement {
+                warn(resolver, object, "image_jbig2_refinement_skipped");
+            }
+            if binary.skipped_unsupported {
+                warn(resolver, object, "image_jbig2_segment_unsupported");
+            }
+            decoded.bytes = binary.bytes;
+            decoded.truncated |= binary.truncated;
+            decoded.image = None;
+            color = ColorSpec::simple(ColorSpace::Gray);
+            bits_per_component = 1;
+            image.color_space = ColorSpace::Gray;
+            image.bits_per_component = 1;
+        } else {
+            if decoded.truncated {
+                warn(resolver, object, "image_truncated");
+            }
+            image.data = match codec {
+                FilterKind::Dct => ImageData::Jpeg(decoded.bytes),
+                FilterKind::Jpx => ImageData::Unsupported("jpx"),
+                _ => ImageData::Unsupported("codec"),
+            };
+            return Ok((image, soft));
         }
-        image.data = match codec {
-            FilterKind::Dct => ImageData::Jpeg(decoded.bytes),
-            FilterKind::Jpx => ImageData::Unsupported("jpx"),
-            FilterKind::Jbig2 => ImageData::Unsupported("jbig2"),
-            FilterKind::CcittFax => ImageData::Unsupported("ccitt"),
-            _ => ImageData::Unsupported("codec"),
-        };
-        return Ok((image, soft));
     }
 
     if decoded.truncated {
@@ -309,6 +353,137 @@ fn read_image(
     }
     image.data = ImageData::Pixels { rgba };
     Ok((image, soft))
+}
+
+fn image_params(
+    resolver: &mut Resolver<'_>,
+    object: &Object,
+    dict: DictRef<'_>,
+    codec: FilterKind,
+    width: u32,
+    height: u32,
+    budget: &mut Budget,
+) -> Result<ImageParams, DocError> {
+    let mut params = ImageParams { width, height, ..ImageParams::default() };
+    let filters = resolver.resolve_dict_key(dict, b"Filter")?
+        .ok_or_else(|| wrong(object.id(), "image filter"))?;
+    let mut index = None;
+    if let Some(array) = filters.get().as_array() {
+        for (position, value) in array.iter().enumerate() {
+            let value = resolver.resolve(value)?;
+            let kind = value.get().as_name()
+                .and_then(|name| FilterKind::from_name(name.decoded().as_ref()));
+            if kind.map(FilterKind::is_image_codec).unwrap_or(false) {
+                if kind == Some(codec) {
+                    index = Some(position);
+                }
+                break;
+            }
+        }
+    } else {
+        let kind = filters.get().as_name()
+            .and_then(|name| FilterKind::from_name(name.decoded().as_ref()));
+        if kind == Some(codec) {
+            index = Some(0);
+        }
+    }
+    let index = index.ok_or_else(|| wrong(object.id(), "matching image filter"))?;
+    let Some(value) = resolver.resolve_dict_key(dict, b"DecodeParms")? else {
+        return Ok(params);
+    };
+    let value = if let Some(array) = value.get().as_array() {
+        let Some(value) = array.get(index) else {
+            return Ok(params);
+        };
+        resolver.resolve(value)?
+    } else if index == 0 {
+        value
+    } else {
+        return Ok(params);
+    };
+    if value.get().is_null() {
+        return Ok(params);
+    }
+    let parameters = value.get().as_dict()
+        .ok_or_else(|| wrong(object.id(), "image DecodeParms dictionary"))?;
+    if codec == FilterKind::Jbig2 {
+        if let Some(globals) = resolver.resolve_dict_key(parameters, b"JBIG2Globals")? {
+            if !globals.get().is_null() {
+                let globals_object = globals.object();
+                if !globals_object.is_stream()
+                    || (object.id().is_some() && object.id() == globals_object.id())
+                {
+                    return Err(wrong(object.id(), "JBIG2Globals stream"));
+                }
+                let decoded = decode(resolver, globals_object, budget)?;
+                if decoded.image.is_some() {
+                    return Err(DocError::Unsupported { feature: "JBIG2Globals image codec" });
+                }
+                if decoded.truncated {
+                    warn(resolver, globals_object, "image_jbig2_globals_truncated");
+                }
+                params.globals = Some(decoded.bytes);
+            }
+        }
+        return Ok(params);
+    }
+    params.k = i32::try_from(
+        image_integer(resolver, parameters, b"K", 0, object.id())?,
+    ).map_err(|_| wrong(object.id(), "CCITT K integer"))?;
+    params.columns = u32::try_from(
+        image_integer(resolver, parameters, b"Columns", 1728, object.id())?,
+    ).map_err(|_| wrong(object.id(), "CCITT Columns integer"))?;
+    params.rows = u32::try_from(
+        image_integer(resolver, parameters, b"Rows", 0, object.id())?,
+    ).map_err(|_| wrong(object.id(), "CCITT Rows integer"))?;
+    params.damaged_rows_before_error = u32::try_from(
+        image_integer(
+            resolver, parameters, b"DamagedRowsBeforeError", 0, object.id(),
+        )?,
+    ).map_err(|_| wrong(object.id(), "CCITT damaged row count"))?;
+    params.black_is_1 = image_boolean(
+        resolver, parameters, b"BlackIs1", false, object.id(),
+    )?;
+    params.encoded_byte_align = image_boolean(
+        resolver, parameters, b"EncodedByteAlign", false, object.id(),
+    )?;
+    params.end_of_line = image_boolean(
+        resolver, parameters, b"EndOfLine", false, object.id(),
+    )?;
+    params.end_of_block = image_boolean(
+        resolver, parameters, b"EndOfBlock", true, object.id(),
+    )?;
+    Ok(params)
+}
+
+fn image_integer(
+    resolver: &mut Resolver<'_>,
+    dict: DictRef<'_>,
+    key: &[u8],
+    default: i64,
+    id: Option<ObjectRef>,
+) -> Result<i64, DocError> {
+    match resolver.resolve_dict_key(dict, key)? {
+        None => Ok(default),
+        Some(value) if value.get().is_null() => Ok(default),
+        Some(value) => value.get().as_i64()
+            .ok_or_else(|| wrong(id, "integer image decode parameter")),
+    }
+}
+
+fn image_boolean(
+    resolver: &mut Resolver<'_>,
+    dict: DictRef<'_>,
+    key: &[u8],
+    default: bool,
+    id: Option<ObjectRef>,
+) -> Result<bool, DocError> {
+    match resolver.resolve_dict_key(dict, key)? {
+        None => Ok(default),
+        Some(value) if value.get().is_null() => Ok(default),
+        Some(value) => value.get().as_bool()
+            .ok_or_else(|| wrong(id, "boolean image decode parameter")),
+    }
 }
 
 fn dimension(

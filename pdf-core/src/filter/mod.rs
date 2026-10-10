@@ -2,9 +2,13 @@ use alloc::borrow::Cow;
 use alloc::vec::Vec;
 use core::fmt;
 
+use crate::limits::{LimitKind, Refusal};
+
 mod ascii85;
 mod asciihex;
+pub mod ccitt;
 mod flate;
+pub mod jbig2;
 mod lzw;
 mod predictor;
 mod runlength;
@@ -81,6 +85,150 @@ impl Default for DecodeParams {
     }
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ImageParams {
+    pub width: u32,
+    pub height: u32,
+    pub globals: Option<Vec<u8>>,
+    pub k: i32,
+    pub columns: u32,
+    pub rows: u32,
+    pub black_is_1: bool,
+    pub encoded_byte_align: bool,
+    pub end_of_line: bool,
+    pub end_of_block: bool,
+    pub damaged_rows_before_error: u32,
+}
+
+impl Default for ImageParams {
+    fn default() -> Self {
+        Self {
+            width: 0,
+            height: 0,
+            globals: None,
+            k: 0,
+            columns: 1728,
+            rows: 0,
+            black_is_1: false,
+            encoded_byte_align: false,
+            end_of_line: false,
+            end_of_block: true,
+            damaged_rows_before_error: 0,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ImageDecoded {
+    pub bytes: Vec<u8>,
+    pub truncated: bool,
+    pub skipped_refinement: bool,
+    pub skipped_unsupported: bool,
+}
+
+/// Decodes byte-padded, MSB-first, one-bit image rows.
+///
+/// JBIG2 returns 1 for black. CCITT samples follow `black_is_1`.
+/// The image dimensions must match the decoded bitmap.
+pub fn decode_image(
+    kind: FilterKind,
+    data: &[u8],
+    params: &ImageParams,
+    max_pixels: u64,
+) -> Result<Vec<u8>, FilterError> {
+    decode_image_report(kind, data, params, max_pixels).map(|decoded| decoded.bytes)
+}
+
+/// The reporting form of `decode_image`, for callers that expose warnings.
+pub fn decode_image_report(
+    kind: FilterKind,
+    data: &[u8],
+    params: &ImageParams,
+    max_pixels: u64,
+) -> Result<ImageDecoded, FilterError> {
+    if !matches!(kind, FilterKind::Jbig2 | FilterKind::CcittFax) {
+        return Err(FilterError::Unsupported { filter: kind });
+    }
+    if params.width == 0 || params.height == 0 {
+        return Err(FilterError::BadParams { filter: kind });
+    }
+    let pixels = u64::from(params.width).checked_mul(u64::from(params.height))
+        .ok_or(FilterError::Refused(Refusal {
+            limit: LimitKind::ImagePixels,
+            requested: u64::MAX,
+            maximum: max_pixels,
+        }))?;
+    if pixels > max_pixels {
+        return Err(FilterError::Refused(Refusal {
+            limit: LimitKind::ImagePixels,
+            requested: pixels,
+            maximum: max_pixels,
+        }));
+    }
+    let expected = ((u64::from(params.width) + 7) / 8)
+        .checked_mul(u64::from(params.height))
+        .and_then(|size| usize::try_from(size).ok())
+        .filter(|&size| size <= isize::MAX as usize)
+        .ok_or(FilterError::Refused(Refusal {
+            limit: LimitKind::DecodedBytes,
+            requested: u64::MAX,
+            maximum: isize::MAX as u64,
+        }))?;
+    let decoded = match kind {
+        FilterKind::Jbig2 => {
+            let report = jbig2::decode_jbig2_report(
+                data,
+                params.globals.as_deref(),
+                max_pixels,
+            )?;
+            if report.bitmap.width != params.width || report.bitmap.height != params.height {
+                return Err(FilterError::BadParams { filter: kind });
+            }
+            ImageDecoded {
+                bytes: report.bitmap.data,
+                truncated: report.truncated,
+                skipped_refinement: report.skipped_refinement,
+                skipped_unsupported: report.skipped_unsupported,
+            }
+        }
+        FilterKind::CcittFax => {
+            let rows = if params.rows == 0 { params.height } else { params.rows };
+            if params.columns != params.width || rows != params.height {
+                return Err(FilterError::BadParams { filter: kind });
+            }
+            // Request canonical black bits from lane B, then apply the PDF
+            // sample polarity here, independently of the decoder's defaults.
+            let fax = ccitt::CcittParams {
+                k: params.k,
+                columns: params.columns,
+                rows,
+                black_is_1: true,
+                encoded_byte_align: params.encoded_byte_align,
+                end_of_line: params.end_of_line,
+                end_of_block: params.end_of_block,
+                damaged_rows_before_error: params.damaged_rows_before_error,
+            };
+            let (mut bytes, truncated) = ccitt::decode(data, &fax, max_pixels)?;
+            if !params.black_is_1 {
+                for byte in &mut bytes {
+                    *byte ^= 255;
+                }
+            }
+            ImageDecoded {
+                bytes,
+                truncated,
+                skipped_refinement: false,
+                skipped_unsupported: false,
+            }
+        }
+        _ => return Err(FilterError::Unsupported { filter: kind }),
+    };
+    if decoded.bytes.len() != expected {
+        return Err(FilterError::Corrupt { filter: kind, offset: data.len() as u64 });
+    }
+    Ok(decoded)
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct FilterStep {
     pub kind: FilterKind,
@@ -97,6 +245,7 @@ pub struct Decoded {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum FilterError {
     OutputLimit { limit: u64 },
+    Refused(Refusal),
     Unsupported { filter: FilterKind },
     BadParams { filter: FilterKind },
     Corrupt { filter: FilterKind, offset: u64 },
@@ -106,6 +255,7 @@ impl FilterError {
     pub const fn code(&self) -> &'static str {
         match self {
             Self::OutputLimit { .. } => "output_limit",
+            Self::Refused(refusal) => refusal.limit.code(),
             Self::Unsupported { .. } => "unsupported",
             Self::BadParams { .. } => "bad_params",
             Self::Corrupt { .. } => "corrupt",
@@ -118,6 +268,15 @@ impl fmt::Display for FilterError {
         match self {
             Self::OutputLimit { limit } => {
                 write!(formatter, "decoded output exceeds the {limit} byte limit")
+            }
+            Self::Refused(refusal) => {
+                write!(
+                    formatter,
+                    "{} requested {}, maximum {}",
+                    refusal.limit.code(),
+                    refusal.requested,
+                    refusal.maximum
+                )
             }
             Self::Unsupported { filter } => {
                 write!(formatter, "unsupported filter {}", filter.name())
