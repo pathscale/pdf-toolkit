@@ -1,0 +1,81 @@
+%PDF-1.4
+%‚„œ”
+5 0 obj
+<< /Length 998 >>
+stream
+q 1 0 0 rg 20 400 80 50 re f Q
+q 0.2 0.6 0 0.25 k 130 400 80 50 re f Q
+q 0.25 g 240 400 80 50 re f Q
+q 0 0.6 0.2 RG 10 w 0 J 0 j 20 330 80 40 re S Q
+q 1 0 0 0 K 10 w 0 J 0 j 130 330 80 40 re S Q
+q 0.5 G 10 w 0 J 0 j 240 330 80 40 re S Q
+q 1 0.5 0 rg
+20 170 m
+20 200 40 210 60 210 c
+90 210 100 190 100 170 c
+100 140 80 130 60 130 c
+30 130 20 150 20 170 c
+h
+f Q
+q 1 0 1 rg
+100 300 m
+124 228 l
+62 272 l
+138 272 l
+76 228 l
+h f*
+250 300 m
+274 228 l
+212 272 l
+288 272 l
+226 228 l
+h f
+Q
+q
+340 180 m
+340 202.09139 322.09139 220 300 220 c
+277.90861 220 260 202.09139 260 180 c
+260 157.90861 277.90861 140 300 140 c
+322.09139 140 340 157.90861 340 180 c
+h
+W n
+q 0 0.25 1 rg 240 130 10 100 re f Q
+q 0 0.25 1 rg 260 130 10 100 re f Q
+q 0 0.25 1 rg 280 130 10 100 re f Q
+q 0 0.25 1 rg 300 130 10 100 re f Q
+q 0 0.25 1 rg 320 130 10 100 re f Q
+q 0 0.25 1 rg 340 130 10 100 re f Q
+Q
+q 0 0 0 RG 12 w 0 J [24 12] 0 d 20 100 m 200 100 l S Q
+q 0 0 1 rg 40 20 100 50 re f Q
+q /Half gs
+q 1 0 0 rg 90 40 100 50 re f Q
+Q
+
+endstream
+endobj
+4 0 obj
+<< /Type /Page /Parent 2 0 R /Contents 5 0 R /Resources << /ExtGState << /Half << /Type /ExtGState /ca 0.5 /CA 0.5 >> >> /ProcSet [/PDF] >> /MediaBox [0 0 400 480] /CropBox [0 0 400 480] /Rotate 0 >>
+endobj
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R >>
+endobj
+2 0 obj
+<< /Type /Pages /Kids [4 0 R] /Count 1 /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> /ProcSet [/PDF /Text] >> >>
+endobj
+3 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>
+endobj
+xref
+0 6
+0000000000 65535 f 
+0000001279 00000 n 
+0000001328 00000 n 
+0000001470 00000 n 
+0000001064 00000 n 
+0000000015 00000 n 
+trailer
+<< /Size 6 /Root 1 0 R >>
+startxref
+1540
+%%EOF
