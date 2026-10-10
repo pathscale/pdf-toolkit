@@ -13,6 +13,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo check -p pdf-toolkit-core -p pdf-toolkit-text -p pdf-toolkit-render --no-default-features
+      - run: cargo check -p pdf-toolkit --no-default-features && cargo check -p pdf-toolkit --all-features
 
   fixtures:
     name: Fixtures and round trips

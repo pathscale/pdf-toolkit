@@ -7,6 +7,10 @@ MIT.
 
 ## Crates
 
+Most users want the umbrella crate, `pdf-toolkit`, with features: `text` (default), `render`, `raster`, `write`,
+`edit`; `default-features = false` gives the no_std reader alone. Its modules are the layered crates below, which
+can also be used directly (embedders such as a browser take only the no_std core and text layers).
+
 | Crate | What it does |
 |---|---|
 | `pdf-toolkit-core` (no_std + alloc) | Zero-copy object model over one shared `Arc<[u8]>`; xref tables, xref streams, hybrid files and `/Prev` chains; object streams; filters (Flate, LZW, ASCII85, ASCIIHex, RunLength, PNG/TIFF predictors, CCITT G3/G4, JBIG2); page tree with inheritance; explicit xref repair mode. Every limit is a named refusal. |
@@ -17,17 +21,16 @@ MIT.
 | `pdf-toolkit-edit` | Incremental updates that keep the original bytes, and `pdf-roundtrip`, which checks the writer and editor by reading their output back. |
 | `pdf-toolkit-inspect` | The `pdf-inspect` binary: `summary`, `streams`, `text`, `receipt`, `semantic`, `image`, `render`, `repair`, `bench`, `mutate` (deterministic mutation fuzzing) and `check` (fixture manifests). |
 
-In code the crates are usually renamed on import, for example
-`pdf-core = { package = "pdf-toolkit-core", version = "0.1" }`, which keeps paths short (`pdf_core::Document`).
-
 ## Example
 
 ```rust
 let bytes = std::fs::read("book.pdf")?;
-let source = pdf_core::PdfSource::new(bytes)?;
-let text = pdf_text::extract::extract_text(source, pdf_core::Limits::default())?;
+let source = pdf_toolkit::core::PdfSource::new(bytes)?;
+let text = pdf_toolkit::text::extract::extract_text(source, pdf_toolkit::core::Limits::default())?;
 println!("{}", text.text);
 ```
+
+The viewer application built on this library lives in its own repository.
 
 ## Checking
 

@@ -37,7 +37,7 @@ jobs:
           set -eu
           version=$(cargo metadata --no-deps --format-version 1 | jq -er '.packages[] | select(.name == "pdf-toolkit-core") | .version')
           for crate in pdf-toolkit-core pdf-toolkit-text pdf-toolkit-render pdf-toolkit-raster \
-                       pdf-toolkit-write pdf-toolkit-edit pdf-toolkit-inspect; do
+                       pdf-toolkit-write pdf-toolkit-edit pdf-toolkit-inspect pdf-toolkit; do
             if cargo info --registry crates-io "$crate@$version" > /dev/null 2>&1; then
               echo "$crate $version is already on crates.io"
             else

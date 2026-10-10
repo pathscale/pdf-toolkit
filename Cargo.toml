@@ -8,7 +8,7 @@ members = [
     "pdf-inspect",
     "pdf-write",
     "pdf-edit",
-    "pdf-gui",
+    "pdf-toolkit",
 ]
 
 [workspace.package]

@@ -1,0 +1,30 @@
+[package]
+name = "pdf-toolkit"
+description = "Pure Rust PDF toolkit: zero-copy no_std reader, text and reading order, renderer, writer and incremental editor"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[features]
+# The reader and text extraction are the common case; rendering, writing and
+# editing pull in more dependencies, so they are opt-in.
+default = ["std", "text"]
+std = ["pdf-core/std", "pdf-text?/std"]
+text = ["dep:pdf-text"]
+render = ["text", "dep:pdf-render"]
+raster = ["render", "std", "dep:pdf-raster"]
+write = ["dep:pdf-write"]
+edit = ["std", "text", "raster", "write", "dep:pdf-edit"]
+
+[dependencies]
+pdf-core = { package = "pdf-toolkit-core", version = "0.1.0", path = "../pdf-core", default-features = false }
+pdf-text = { package = "pdf-toolkit-text", version = "0.1.0", path = "../pdf-text", default-features = false, optional = true }
+pdf-render = { package = "pdf-toolkit-render", version = "0.1.0", path = "../pdf-render", default-features = false, optional = true }
+pdf-raster = { package = "pdf-toolkit-raster", version = "0.1.0", path = "../pdf-raster", optional = true }
+pdf-write = { package = "pdf-toolkit-write", version = "0.1.0", path = "../pdf-write", optional = true }
+pdf-edit = { package = "pdf-toolkit-edit", version = "0.1.0", path = "../pdf-edit", optional = true }
