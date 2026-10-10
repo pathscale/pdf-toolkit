@@ -15,11 +15,12 @@ pub mod limits;
 pub mod object;
 pub mod objstm;
 pub mod pages;
+pub mod repair;
 pub mod source;
 pub mod work;
 pub mod xref;
 
-pub use document::{Document, Resolver};
+pub use document::{Document, OpenMode, Resolver};
 pub use error::{DocError, Warning};
 pub use limits::{LimitKind, Limits, Refusal};
 pub use object::{

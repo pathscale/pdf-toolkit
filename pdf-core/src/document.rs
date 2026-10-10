@@ -11,6 +11,12 @@ use crate::work::ObjectRef;
 
 pub use crate::xref::{Xref, XrefCounts, XrefEntry, XrefKind};
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum OpenMode {
+    Strict,
+    Repair,
+}
+
 pub struct Document {
     source: PdfSource,
     xref: Xref,
@@ -18,29 +24,106 @@ pub struct Document {
     limits: Limits,
     warnings: Vec<Warning>,
     encrypted: bool,
+    repair_root: Option<ObjectRef>,
+    repaired: bool,
 }
 
 impl Document {
     pub fn open(source: PdfSource, limits: Limits) -> Result<Document, DocError> {
-        let (xref, trailer, warnings) = crate::xref::read(&source, &limits)?;
-        let encrypted = trailer.dict().and_then(|dict| dict.get(b"Encrypt"))
-            .map(|value| !value.is_null()).unwrap_or(false);
-        Ok(Self { source, xref, trailer, limits, warnings, encrypted })
+        Self::open_with(source, limits, OpenMode::Strict)
     }
-    pub fn source(&self) -> &PdfSource { &self.source }
-    pub fn limits(&self) -> &Limits { &self.limits }
-    pub fn xref(&self) -> &Xref { &self.xref }
-    pub fn trailer(&self) -> &Object { &self.trailer }
+
+    pub fn open_with(
+        source: PdfSource,
+        limits: Limits,
+        mode: OpenMode,
+    ) -> Result<Document, DocError> {
+        match crate::xref::read(&source, &limits) {
+            Ok((xref, trailer, warnings)) => {
+                Ok(Self::from_parts(source, xref, trailer, limits, warnings, None, false))
+            }
+            Err(DocError::Malformed { .. }) if mode == OpenMode::Repair => {
+                crate::repair::rebuild(source, limits)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    pub(crate) fn from_parts(
+        source: PdfSource,
+        xref: Xref,
+        trailer: Object,
+        limits: Limits,
+        warnings: Vec<Warning>,
+        repair_root: Option<ObjectRef>,
+        repaired: bool,
+    ) -> Document {
+        let encrypted = trailer
+            .dict()
+            .and_then(|dict| dict.get(b"Encrypt"))
+            .map(|value| !value.is_null())
+            .unwrap_or(false);
+        Self {
+            source,
+            xref,
+            trailer,
+            limits,
+            warnings,
+            encrypted,
+            repair_root,
+            repaired,
+        }
+    }
+
+    pub fn source(&self) -> &PdfSource {
+        &self.source
+    }
+    pub fn limits(&self) -> &Limits {
+        &self.limits
+    }
+    pub fn xref(&self) -> &Xref {
+        &self.xref
+    }
+    pub fn trailer(&self) -> &Object {
+        &self.trailer
+    }
     pub fn root_ref(&self) -> Option<ObjectRef> {
-        self.trailer.dict().and_then(|dict| dict.get(b"Root")).and_then(|value| value.as_ref())
+        self.trailer
+            .dict()
+            .and_then(|dict| dict.get(b"Root"))
+            .and_then(|value| value.as_ref())
+            .or(self.repair_root)
     }
     pub fn info_ref(&self) -> Option<ObjectRef> {
-        self.trailer.dict().and_then(|dict| dict.get(b"Info")).and_then(|value| value.as_ref())
+        self.trailer
+            .dict()
+            .and_then(|dict| dict.get(b"Info"))
+            .and_then(|value| value.as_ref())
     }
-    pub fn encrypted(&self) -> bool { self.encrypted }
-    pub fn warnings(&self) -> &[Warning] { &self.warnings }
+    pub fn encrypted(&self) -> bool {
+        self.encrypted
+    }
+    pub fn repaired(&self) -> bool {
+        self.repaired
+    }
+    pub fn repaired_counts(&self) -> Option<XrefCounts> {
+        if self.repaired {
+            Some(self.xref.counts())
+        } else {
+            None
+        }
+    }
+    pub fn warnings(&self) -> &[Warning] {
+        &self.warnings
+    }
     pub fn resolver(&self) -> Resolver<'_> {
-        Resolver { document: self, cache: Vec::new(), cache_bytes: 0, warnings: Vec::new(), nesting: 0 }
+        Resolver {
+            document: self,
+            cache: Vec::new(),
+            cache_bytes: 0,
+            warnings: Vec::new(),
+            nesting: 0,
+        }
     }
 }
 
@@ -66,7 +149,9 @@ enum GetTask {
 }
 
 impl<'d> Resolver<'d> {
-    pub fn document(&self) -> &'d Document { self.document }
+    pub fn document(&self) -> &'d Document {
+        self.document
+    }
 
     pub fn get(&mut self, id: ObjectRef) -> Result<Object, DocError> {
         if self.nesting >= self.document.limits.max_ref_chain {
@@ -89,19 +174,41 @@ impl<'d> Resolver<'d> {
                     if active.contains(&id.number()) {
                         return Err(self.ref_cycle());
                     }
-                    check(LimitKind::RefChain, active.len() as u64, u64::from(self.document.limits.max_ref_chain))?;
+                    check(
+                        LimitKind::RefChain,
+                        active.len() as u64,
+                        u64::from(self.document.limits.max_ref_chain),
+                    )?;
                     active.push(id.number());
                     match self.document.xref.get(id.number()) {
                         Some(XrefEntry::InUse { offset, generation }) => {
-                            let offset = usize::try_from(offset).map_err(|_| malformed(0, "object offset"))?;
+                            let offset =
+                                usize::try_from(offset).map_err(|_| malformed(0, "object offset"))?;
                             let mut object = parse_indirect_pending(
-                                &self.document.source.shared(), offset, id, &self.document.limits,
+                                &self.document.source.shared(),
+                                offset,
+                                id,
+                                &self.document.limits,
                             )?;
-                            if object.id().map(|found| found.generation() != generation || found.generation() != id.generation()).unwrap_or(false) {
-                                self.warn(Warning { offset: Some(offset as u64), object: Some(id), what: "generation_mismatch" });
+                            if object
+                                .id()
+                                .map(|found| {
+                                    found.generation() != generation
+                                        || found.generation() != id.generation()
+                                })
+                                .unwrap_or(false)
+                            {
+                                self.warn(Warning {
+                                    offset: Some(offset as u64),
+                                    object: Some(id),
+                                    what: "generation_mismatch",
+                                });
                             }
                             if object.is_stream() && object.stream_raw().is_none() {
-                                let length = object.dict().and_then(|dict| dict.get(b"Length")).and_then(|value| value.as_ref());
+                                let length = object
+                                    .dict()
+                                    .and_then(|dict| dict.get(b"Length"))
+                                    .and_then(|value| value.as_ref());
                                 // An unresolvable or non-integer indirect /Length falls back
                                 // to the bounded endstream scan inside finish_stream.
                                 let resolved = match length {
@@ -119,12 +226,21 @@ impl<'d> Resolver<'d> {
                             objects.push(object);
                         }
                         Some(XrefEntry::Compressed { stream, index }) => {
-                            if self.document.encrypted { return Err(DocError::Encrypted); }
-                            if id.generation() != 0 {
-                                self.warn(Warning { offset: None, object: Some(id), what: "generation_mismatch" });
+                            if self.document.encrypted {
+                                return Err(DocError::Encrypted);
                             }
-                            if let Some(cached) = self.cache.iter().find(|entry| entry.number == stream) {
-                                let object = cached.stream.member(index, id, &self.document.limits)?;
+                            if id.generation() != 0 {
+                                self.warn(Warning {
+                                    offset: None,
+                                    object: Some(id),
+                                    what: "generation_mismatch",
+                                });
+                            }
+                            if let Some(cached) =
+                                self.cache.iter().find(|entry| entry.number == stream)
+                            {
+                                let object =
+                                    cached.stream.member(index, id, &self.document.limits)?;
                                 active.pop();
                                 objects.push(object);
                                 continue;
@@ -133,7 +249,11 @@ impl<'d> Resolver<'d> {
                                 Some(XrefEntry::InUse { generation, .. }) => generation,
                                 _ => return Err(malformed(0, "object stream xref")),
                             };
-                            tasks.push(GetTask::FinishObjectStream { id, index, number: stream });
+                            tasks.push(GetTask::FinishObjectStream {
+                                id,
+                                index,
+                                number: stream,
+                            });
                             tasks.push(GetTask::Object(ObjectRef::new(stream, generation)));
                         }
                         _ => return Err(DocError::MissingObject { id }),
@@ -146,7 +266,9 @@ impl<'d> Resolver<'d> {
                         return Err(malformed(0, "object stream decode"));
                     }
                     let stream = ObjectStream::parse(
-                        &container, Arc::<[u8]>::from(decoded.bytes), &self.document.limits,
+                        &container,
+                        Arc::<[u8]>::from(decoded.bytes),
+                        &self.document.limits,
                     )?;
                     let object = stream.member(index, id, &self.document.limits)?;
                     self.cache_stream(number, stream);
@@ -160,7 +282,11 @@ impl<'d> Resolver<'d> {
 
     fn ref_cycle(&self) -> DocError {
         let maximum = u64::from(self.document.limits.max_ref_chain);
-        DocError::Refused(Refusal { limit: LimitKind::RefChain, requested: maximum.saturating_add(1), maximum })
+        DocError::Refused(Refusal {
+            limit: LimitKind::RefChain,
+            requested: maximum.saturating_add(1),
+            maximum,
+        })
     }
 
     fn record_recovery(&mut self, object: &Object) {
@@ -176,7 +302,9 @@ impl<'d> Resolver<'d> {
     fn cache_stream(&mut self, number: u32, stream: ObjectStream) {
         let cost = stream.cost();
         let maximum = self.document.limits.max_objstm_cache_bytes;
-        if cost > maximum { return; }
+        if cost > maximum {
+            return;
+        }
         if let Some(index) = self.cache.iter().position(|entry| entry.number == number) {
             let removed = self.cache.remove(index);
             self.cache_bytes = self.cache_bytes.saturating_sub(removed.cost);
@@ -186,15 +314,25 @@ impl<'d> Resolver<'d> {
             self.cache_bytes = self.cache_bytes.saturating_sub(removed.cost);
         }
         self.cache_bytes = self.cache_bytes.saturating_add(cost);
-        self.cache.push(CacheEntry { number, stream, cost });
+        self.cache.push(CacheEntry {
+            number,
+            stream,
+            cost,
+        });
     }
 
     pub fn resolve(&mut self, value: ValueRef<'_>) -> Result<Value, DocError> {
         let mut value = value.to_owned();
         let mut seen = Vec::new();
         while let Some(id) = value.get().as_ref() {
-            if seen.contains(&id) { return Err(self.ref_cycle()); }
-            check(LimitKind::RefChain, seen.len().saturating_add(1) as u64, u64::from(self.document.limits.max_ref_chain))?;
+            if seen.contains(&id) {
+                return Err(self.ref_cycle());
+            }
+            check(
+                LimitKind::RefChain,
+                seen.len().saturating_add(1) as u64,
+                u64::from(self.document.limits.max_ref_chain),
+            )?;
             seen.push(id);
             let object = self.get(id)?;
             value = object.root().to_owned();
@@ -202,7 +340,11 @@ impl<'d> Resolver<'d> {
         Ok(value)
     }
 
-    pub fn resolve_dict_key(&mut self, dict: DictRef<'_>, key: &[u8]) -> Result<Option<Value>, DocError> {
+    pub fn resolve_dict_key(
+        &mut self,
+        dict: DictRef<'_>,
+        key: &[u8],
+    ) -> Result<Option<Value>, DocError> {
         match dict.get(key) {
             Some(value) => self.resolve(value).map(Some),
             None => Ok(None),
@@ -210,15 +352,27 @@ impl<'d> Resolver<'d> {
     }
 
     pub fn decode_stream(&mut self, stream: &Object) -> Result<Decoded, DocError> {
-        if self.document.encrypted { return Err(DocError::Encrypted); }
-        let raw = stream.stream_raw().ok_or(DocError::WrongType { id: stream.id(), expected: "stream" })?;
+        if self.document.encrypted {
+            return Err(DocError::Encrypted);
+        }
+        let raw = stream
+            .stream_raw()
+            .ok_or(DocError::WrongType {
+                id: stream.id(),
+                expected: "stream",
+            })?;
         let steps = filter_steps(stream, |value| self.resolve(value))?;
-        crate::filter::decode(raw, &steps, self.document.limits.max_decoded_bytes).map_err(DocError::from)
+        crate::filter::decode(raw, &steps, self.document.limits.max_decoded_bytes)
+            .map_err(DocError::from)
     }
 
-    pub fn take_warnings(&mut self) -> Vec<Warning> { core::mem::take(&mut self.warnings) }
+    pub fn take_warnings(&mut self) -> Vec<Warning> {
+        core::mem::take(&mut self.warnings)
+    }
 
-    pub fn warn(&mut self, warning: Warning) { self.warnings.push(warning); }
+    pub fn warn(&mut self, warning: Warning) {
+        self.warnings.push(warning);
+    }
 }
 
 pub(crate) fn filter_steps<F>(
@@ -228,11 +382,18 @@ pub(crate) fn filter_steps<F>(
 where
     F: for<'o> FnMut(ValueRef<'o>) -> Result<Value, DocError>,
 {
-    let wrong = || DocError::WrongType { id: stream.id(), expected: "stream filters" };
+    let wrong = || DocError::WrongType {
+        id: stream.id(),
+        expected: "stream filters",
+    };
     let dict = stream.dict().ok_or_else(wrong)?;
-    let Some(filters) = dict.get(b"Filter") else { return Ok(Vec::new()) };
+    let Some(filters) = dict.get(b"Filter") else {
+        return Ok(Vec::new());
+    };
     let filters = resolve(filters)?;
-    if filters.get().is_null() { return Ok(Vec::new()); }
+    if filters.get().is_null() {
+        return Ok(Vec::new());
+    }
     let values: Vec<Value> = if let Some(array) = filters.get().as_array() {
         array.iter().map(|value| value.to_owned()).collect()
     } else {
@@ -247,7 +408,9 @@ where
         let value = resolve(value.get())?;
         let name = value.get().as_name().ok_or_else(wrong)?;
         let kind = FilterKind::from_name(name.decoded().as_ref())
-            .ok_or(DocError::Unsupported { feature: "filter:unknown" })?;
+            .ok_or(DocError::Unsupported {
+                feature: "filter:unknown",
+            })?;
         let param = if let Some(params) = &params {
             if let Some(array) = params.get().as_array() {
                 match array.get(index) {
@@ -263,7 +426,10 @@ where
             None
         };
         let decoded_params = parameters(param.as_ref(), kind, &mut resolve, stream.id())?;
-        steps.push(FilterStep { kind, params: decoded_params });
+        steps.push(FilterStep {
+            kind,
+            params: decoded_params,
+        });
     }
     Ok(steps)
 }
@@ -278,15 +444,29 @@ where
     F: for<'o> FnMut(ValueRef<'o>) -> Result<Value, DocError>,
 {
     let mut params = DecodeParams::default();
-    let Some(value) = value else { return Ok(params) };
-    if value.get().is_null() { return Ok(params); }
-    let wrong = || DocError::WrongType { id, expected: "decode parameters" };
+    let Some(value) = value else {
+        return Ok(params);
+    };
+    if value.get().is_null() {
+        return Ok(params);
+    }
+    let wrong = || DocError::WrongType {
+        id,
+        expected: "decode parameters",
+    };
     let dict = value.get().as_dict().ok_or_else(wrong)?;
     if kind == FilterKind::Crypt {
         if let Some(name) = dict.get(b"Name") {
             let name = resolve(name)?;
-            if !name.get().as_name().map(|name| name.eq_bytes(b"Identity")).unwrap_or(false) {
-                return Err(DocError::Unsupported { feature: "filter:Crypt" });
+            if !name
+                .get()
+                .as_name()
+                .map(|name| name.eq_bytes(b"Identity"))
+                .unwrap_or(false)
+            {
+                return Err(DocError::Unsupported {
+                    feature: "filter:Crypt",
+                });
             }
         }
         return Ok(params);
@@ -304,7 +484,9 @@ where
         params.columns = u32::try_from(n).map_err(|_| wrong())?;
     }
     if let Some(n) = parameter(dict, b"EarlyChange", resolve, id)? {
-        if n != 0 && n != 1 { return Err(wrong()); }
+        if n != 0 && n != 1 {
+            return Err(wrong());
+        }
         params.early_change = n == 1;
     }
     Ok(params)
@@ -319,9 +501,20 @@ fn parameter<F>(
 where
     F: for<'o> FnMut(ValueRef<'o>) -> Result<Value, DocError>,
 {
-    let Some(value) = dict.get(key) else { return Ok(None) };
+    let Some(value) = dict.get(key) else {
+        return Ok(None);
+    };
     let value = resolve(value)?;
-    if value.get().is_null() { return Ok(None); }
-    value.get().as_i64().map(Some).ok_or(DocError::WrongType { id, expected: "integer decode parameter" })
+    if value.get().is_null() {
+        return Ok(None);
+    }
+    value
+        .get()
+        .as_i64()
+        .map(Some)
+        .ok_or(DocError::WrongType {
+            id,
+            expected: "integer decode parameter",
+        })
 }
 
