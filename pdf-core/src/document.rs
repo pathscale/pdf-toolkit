@@ -29,6 +29,7 @@ pub struct Document {
     permissions: Option<i32>,
     repair_root: Option<ObjectRef>,
     repaired: bool,
+    repair_mode: bool,
 }
 
 impl Document {
@@ -45,11 +46,45 @@ impl Document {
             Ok((xref, trailer, warnings)) => {
                 Ok(Self::from_parts(source, xref, trailer, limits, warnings, None, false))
             }
-            Err(DocError::Malformed { .. }) if mode == OpenMode::Repair => {
-                crate::repair::rebuild(source, limits)
+            Err(error) if mode == OpenMode::Repair && !crate::repair::is_hard_error(&error) => {
+                match crate::repair::rebuild(source, limits) {
+                    Ok(document) => {
+                        if matches!(error, DocError::Filter(_) | DocError::Unsupported { .. })
+                            && crate::repair::needs_rebuild(&document)?
+                        {
+                            Err(error)
+                        } else {
+                            Ok(document)
+                        }
+                    },
+                    Err(repair_error) if crate::repair::is_hard_error(&repair_error) => {
+                        Err(repair_error)
+                    }
+                    // Keep an accurate codec or unsupported-feature refusal when
+                    // scanning could not recover a usable document.
+                    Err(_) if matches!(error, DocError::Filter(_) | DocError::Unsupported { .. }) => {
+                        Err(error)
+                    }
+                    Err(repair_error) => Err(repair_error),
+                }
             }
             Err(error) => Err(error),
         }?;
+        document.repair_mode = mode == OpenMode::Repair;
+        if mode == OpenMode::Repair
+            && !document.repaired
+            && crate::repair::needs_rebuild(&document)?
+        {
+            match crate::repair::rebuild(document.source.clone(), limits) {
+                Ok(rebuilt) => document = rebuilt,
+                Err(error) if crate::repair::is_hard_error(&error) => return Err(error),
+                Err(_) => document.warnings.push(Warning {
+                    offset: None,
+                    object: None,
+                    what: "repair_incomplete",
+                }),
+            }
+        }
         document.initialize_crypt()?;
         Ok(document)
     }
@@ -112,6 +147,7 @@ impl Document {
             permissions: None,
             repair_root,
             repaired,
+            repair_mode: repaired,
         }
     }
 
@@ -128,11 +164,12 @@ impl Document {
         &self.trailer
     }
     pub fn root_ref(&self) -> Option<ObjectRef> {
-        self.trailer
-            .dict()
-            .and_then(|dict| dict.get(b"Root"))
-            .and_then(|value| value.as_ref())
-            .or(self.repair_root)
+        self.repair_root.or_else(|| {
+            self.trailer
+                .dict()
+                .and_then(|dict| dict.get(b"Root"))
+                .and_then(|value| value.as_ref())
+        })
     }
     pub fn info_ref(&self) -> Option<ObjectRef> {
         self.trailer
@@ -312,14 +349,30 @@ impl<'d> Resolver<'d> {
                 GetTask::FinishObjectStream { id, index, number } => {
                     let container = objects.pop().ok_or_else(|| malformed(0, "resolver state"))?;
                     let decoded = self.decode_stream(&container)?;
-                    if decoded.image.is_some() || decoded.truncated {
+                    if decoded.image.is_some()
+                        || (decoded.truncated && !self.document.repair_mode)
+                    {
                         return Err(malformed(0, "object stream decode"));
                     }
-                    let stream = ObjectStream::parse(
-                        &container,
-                        Arc::<[u8]>::from(decoded.bytes),
-                        &self.document.limits,
-                    )?;
+                    let truncated = decoded.truncated;
+                    let buf = Arc::<[u8]>::from(decoded.bytes);
+                    let stream = if self.document.repair_mode {
+                        let (stream, recovered) = ObjectStream::parse_repair(
+                            &container,
+                            buf,
+                            &self.document.limits,
+                        )?;
+                        if recovered || truncated {
+                            self.warn(Warning {
+                                offset: container.stream_range().map(|range| range.start as u64),
+                                object: container.id(),
+                                what: "object_stream_recovered",
+                            });
+                        }
+                        stream
+                    } else {
+                        ObjectStream::parse(&container, buf, &self.document.limits)?
+                    };
                     let object = stream.member(index, id, &self.document.limits)?;
                     self.cache_stream(number, stream);
                     active.pop();
