@@ -1776,10 +1776,10 @@ fn styled_spans() -> io::Result<Fixture> {
     Ok(fixture)
 }
 
-/// Writes all thirty-five fixtures in a fixed order. No reader is invoked.
+/// Writes all thirty-six fixtures in a fixed order. No reader is invoked.
 pub fn write_fixtures(out: &Path) -> io::Result<usize> {
     type Builder = fn() -> io::Result<Fixture>;
-    let builders: [(&str, Builder); 35] = [
+    let builders: [(&str, Builder); 36] = [
         ("classic-one-page", classic_one_page),
         ("xref-stream-objstm", xref_stream_objstm),
         ("incremental", incremental),
@@ -1812,6 +1812,7 @@ pub fn write_fixtures(out: &Path) -> io::Result<usize> {
         ("scan-codecs", scan::codecs),
         ("annotations", annotations::build),
         ("jpx-images", jpx::images),
+        ("jpx-tiles", jpx::tiles),
         ("encrypted-rc4", encrypted::rc4),
         ("encrypted-aes128", encrypted::aes128),
         ("encrypted-aes256", encrypted::aes256),

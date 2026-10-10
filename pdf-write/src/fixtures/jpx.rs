@@ -26,7 +26,7 @@ struct Source {
 }
 
 fn scaled(value: u16, bit_depth: u8) -> io::Result<u8> {
-    if !matches!(bit_depth, 8 | 16) {
+    if !matches!(bit_depth, 8 | 12 | 16) {
         return Err(invalid("JPX fixture precision"));
     }
     let maximum = (1u32 << bit_depth).saturating_sub(1);
@@ -261,6 +261,173 @@ pub(super) fn images() -> io::Result<Fixture> {
             3 => &[(4, 12), (28, 8), (27, 27)],
             4 => &[(0, 0), (12, 12), (23, 23)],
             _ => return Err(invalid("JPX fixture probe kind")),
+        };
+        for (x, y) in probes {
+            pixel_truth(&mut expected, source, *left, *x, *y)?;
+        }
+    }
+    Ok(house.fixture(expected))
+}
+
+fn cmyk_source() -> Source {
+    let width = 48u32;
+    let height = 32u32;
+    // Fixed fixture dimensions bound every product and sample below.
+    let count = 48usize * 32;
+    let mut planes = vec![Vec::with_capacity(count); 4];
+    let mut rgba = Vec::with_capacity(count * 4);
+    for y in 0..height {
+        for x in 0..width {
+            let samples = [
+                ((x * 5 + y * 3) & 255) as u16,
+                ((x * 7 + y * 11) & 255) as u16,
+                ((x * 17 + y * 5) & 255) as u16,
+                ((x * 13 + y * 7) & 255) as u16,
+            ];
+            for (plane, sample) in planes.iter_mut().zip(samples) {
+                plane.push(sample);
+            }
+            // Match pdf-text's naive CMYK conversion, including truncation.
+            let black = 255u32 - u32::from(samples[3]);
+            let component = |value: u16| -> u8 {
+                ((255u32 - u32::from(value)) * black / 255) as u8
+            };
+            rgba.extend_from_slice(&[
+                component(samples[0]), component(samples[1]),
+                component(samples[2]), 255,
+            ]);
+        }
+    }
+    Source { width, height, planes, rgba }
+}
+
+fn gray12_source() -> io::Result<Source> {
+    // Every possible unsigned 12-bit value appears once, in row-major order.
+    let mut gray = Vec::with_capacity(4096);
+    let mut rgba = Vec::with_capacity(4096 * 4);
+    for value in 0..4096u16 {
+        gray.push(value);
+        let byte = scaled(value, 12)?;
+        rgba.extend_from_slice(&[byte, byte, byte, 255]);
+    }
+    Ok(Source { width: 64, height: 64, planes: vec![gray], rgba })
+}
+
+pub(super) fn tiles() -> io::Result<Fixture> {
+    let mut house = House::new("1.5")?;
+    let mut resources = Vec::new();
+    let mut truths = Vec::new();
+    let mut plain = Vec::new();
+    let names = ["T1", "T2", "T3", "T4"];
+    let lefts = [16u32, 128, 192, 240];
+    let tile_coding = [
+        encode_jpx::TileCoding { levels: 0, rct: true },
+        encode_jpx::TileCoding { levels: 1, rct: false },
+        encode_jpx::TileCoding { levels: 2, rct: false },
+        encode_jpx::TileCoding { levels: 1, rct: true },
+    ];
+
+    for kind in 0..4usize {
+        let source = match kind {
+            0 => source(2)?,
+            1 => cmyk_source(),
+            2 => {
+                let mut source = source(3)?;
+                // Move planes to A, R, G, B; keep the source RGBA truth intact.
+                source.planes.rotate_right(1);
+                source
+            }
+            3 => gray12_source()?,
+            _ => return Err(invalid("JPX tile fixture source kind")),
+        };
+        let resource_name = names.get(kind)
+            .ok_or_else(|| invalid("JPX tile fixture resource name"))?;
+        let left = *lefts.get(kind)
+            .ok_or_else(|| invalid("JPX tile fixture placement"))?;
+        let settings = match kind {
+            0 => Settings {
+                levels: 2,
+                tile_width: 48,
+                tile_height: 32,
+                ..Settings::default()
+            },
+            1 => Settings::default(),
+            2 => Settings {
+                jp2: true,
+                alpha: true,
+                alpha_first: true,
+                ..Settings::default()
+            },
+            3 => Settings { bit_depth: 12, ..Settings::default() },
+            _ => return Err(invalid("JPX tile fixture encoding kind")),
+        };
+        let components: Vec<&[u16]> = source.planes.iter().map(Vec::as_slice).collect();
+        let encoded = if kind == 0 {
+            encode_jpx::encode_with_tiles(
+                source.width, source.height, &components, settings, &tile_coding,
+            )?
+        } else {
+            encode_jpx::encode(source.width, source.height, &components, settings)?
+        };
+        let object = house.writer.alloc()?;
+        let color_space = match kind {
+            0 | 2 => name("DeviceRGB"),
+            1 => name("DeviceCMYK"),
+            3 => name("DeviceGray"),
+            _ => return Err(invalid("JPX tile fixture color space")),
+        };
+        let mut extra = vec![
+            ("Filter".to_owned(), name("JPXDecode")),
+            ("Interpolate".to_owned(), Value::Bool(false)),
+        ];
+        if kind == 2 {
+            extra.push(("SMaskInData".to_owned(), Value::Int(1)));
+        }
+        // Deliberately declare 8 even for the 12-bit gray codestream.
+        house.writer.stream(object, image_dictionary(
+            source.width, source.height, Some(color_space), Some(8), extra,
+        ), &encoded)?;
+        let bottom = PAGE_HEIGHT.checked_sub(TOP)
+            .and_then(|v| v.checked_sub(source.height))
+            .ok_or_else(|| invalid("JPX tile fixture placement overflow"))?;
+        plain.extend_from_slice(format!(
+            "q {} 0 0 {} {left} {bottom} cm /{resource_name} Do Q\n",
+            source.width, source.height,
+        ).as_bytes());
+        resources.push((*resource_name, object));
+        truths.push((object, left, source));
+    }
+
+    let page = house.add_page(house.pages, &plain, Encoding::Plain, vec![
+        ("Resources".to_owned(), fixture_resources(&[], &resources)),
+        ("MediaBox".to_owned(), rect(BOUNDS)),
+        ("CropBox".to_owned(), rect(BOUNDS)),
+    ])?;
+    house.write_base(&[page.id], 1)?;
+    house.table(Vec::new())?;
+
+    let mut expected = manifest("1.5", "table", 1, 1, 0, false);
+    expected.push_str(&format!(
+        "page.0.media_box=0 0 352 96\n\
+         page.0.crop_box=0 0 352 96\n\
+         page.0.rotate=0\npage.0.contents=1\n\
+         page.0.content_sha256={}\n\
+         page.0.resource_keys=ProcSet,XObject\n\
+         page.0.images=4\npage.0.render=ok\n\
+         page.0.pixel.8.8=ffffff\n",
+        sha256::hex(&plain),
+    ));
+    for (kind, (object, left, source)) in truths.iter().enumerate() {
+        image_truth(&mut expected, *object, "pixels", Some(&source.rgba));
+        let probes: &[(u32, u32)] = match kind {
+            0 => &[
+                (8, 8), (56, 8), (8, 40), (56, 40),
+                (47, 31), (48, 31), (47, 32), (48, 32),
+            ],
+            1 => &[(0, 0), (13, 8), (31, 19), (47, 31)],
+            2 => &[(4, 12), (16, 12), (28, 8), (27, 27)],
+            3 => &[(0, 0), (8, 0), (9, 0), (63, 31), (0, 32), (63, 63)],
+            _ => return Err(invalid("JPX tile fixture probe kind")),
         };
         for (x, y) in probes {
             pixel_truth(&mut expected, source, *left, *x, *y)?;

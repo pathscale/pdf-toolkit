@@ -23,6 +23,15 @@ pub struct Settings {
     pub rct: bool,
     pub jp2: bool,
     pub alpha: bool,
+    /// With JP2 opacity, the caller supplies A, R, G, B instead of R, G, B, A.
+    pub alpha_first: bool,
+}
+
+/// Tile-local coding, in row-major tile order.
+#[derive(Clone, Copy, Debug)]
+pub struct TileCoding {
+    pub levels: u8,
+    pub rct: bool,
 }
 
 impl Default for Settings {
@@ -36,6 +45,7 @@ impl Default for Settings {
             rct: false,
             jp2: false,
             alpha: false,
+            alpha_first: false,
         }
     }
 }
@@ -1110,11 +1120,20 @@ fn wrap_jp2(
     if settings.alpha {
         let mut cdef = Vec::new();
         u16be(&mut cdef, 4);
-        // Define every component, with straight opacity associated to the image.
+        // Keep definitions in codestream order, including opacity when first.
+        let opacity = if settings.alpha_first { 0 } else { 3 };
         for channel in 0..4u16 {
+            let is_opacity = channel == opacity;
+            let association = if is_opacity {
+                0
+            } else if settings.alpha_first {
+                channel
+            } else {
+                channel.saturating_add(1)
+            };
             u16be(&mut cdef, channel);
-            u16be(&mut cdef, if channel == 3 { 1 } else { 0 });
-            u16be(&mut cdef, if channel == 3 { 0 } else { channel.saturating_add(1) });
+            u16be(&mut cdef, u16::from(is_opacity));
+            u16be(&mut cdef, association);
         }
         box_bytes(&mut header, b"cdef", &cdef)?;
     }
@@ -1123,16 +1142,50 @@ fn wrap_jp2(
     Ok(out)
 }
 
+fn coding_markers(out: &mut Vec<u8>, settings: Settings) -> io::Result<()> {
+    let block_exponent = if settings.code_block_size == 32 { 3 } else { 4 };
+    marker(out, 0x52, &[
+        0, 0, 0, 1, u8::from(settings.rct),
+        settings.levels, block_exponent, block_exponent, 0, 1,
+    ])?;
+    // Reversible quantization exponents are precision plus subband gain.
+    // Four guard bits cover two lifting levels, including transformed chroma.
+    let mut qcd = vec![(GUARD_BITS as u8) << 5, settings.bit_depth << 3];
+    for _ in 0..settings.levels {
+        qcd.extend_from_slice(&[
+            settings.bit_depth.saturating_add(1) << 3,
+            settings.bit_depth.saturating_add(1) << 3,
+            settings.bit_depth.saturating_add(2) << 3,
+        ]);
+    }
+    marker(out, 0x5c, &qcd)
+}
+
 /// Encode row-major planar samples as a raw codestream or a JP2 file.
 ///
-/// Supports one, three, or four 8-bit components and one 16-bit gray component.
-/// JP2 four-component output requires `alpha`. RCT requires three components.
-/// Dimensions, samples, tiles, and encoded bytes have explicit fixture limits.
+/// Supports one, three, or four 8-bit components and one 12- or 16-bit gray
+/// component. JP2 four-component output requires `alpha`. RCT requires three
+/// components. Dimensions, samples, tiles, and bytes have fixture limits.
 pub fn encode(
     width: u32,
     height: u32,
     components: &[&[u16]],
     settings: Settings,
+) -> io::Result<Vec<u8>> {
+    encode_with_tiles(width, height, components, settings, &[])
+}
+
+/// Encode with explicit tile-part COD and QCD overrides for every tile.
+///
+/// An empty slice inherits the main header. Otherwise the slice must contain
+/// exactly one entry per tile in row-major order. Each tile origin must align
+/// with its own decomposition grid. Sample precision and block size are shared.
+pub fn encode_with_tiles(
+    width: u32,
+    height: u32,
+    components: &[&[u16]],
+    settings: Settings,
+    tile_coding: &[TileCoding],
 ) -> io::Result<Vec<u8>> {
     let w = usize::try_from(width)
         .map_err(|_| invalid("JPEG 2000 width conversion"))?;
@@ -1147,7 +1200,7 @@ pub fn encode(
         return Err(invalid("unsupported:jpx_encoder_components"));
     }
     if settings.bit_depth != 8
-        && !(settings.bit_depth == 16 && components.len() == 1)
+        && !(matches!(settings.bit_depth, 12 | 16) && components.len() == 1)
     {
         return Err(invalid("unsupported:jpx_encoder_precision"));
     }
@@ -1160,6 +1213,9 @@ pub fn encode(
     }
     if settings.alpha && (!settings.jp2 || components.len() != 4) {
         return Err(invalid("unsupported:jpx_encoder_alpha"));
+    }
+    if settings.alpha_first && !settings.alpha {
+        return Err(invalid("unsupported:jpx_encoder_alpha_first"));
     }
     if settings.jp2 && components.len() == 4 && !settings.alpha {
         return Err(invalid("unsupported:jpx_encoder_jp2_color"));
@@ -1191,12 +1247,30 @@ pub fn encode(
         return Err(invalid("unsupported:jpx_encoder_tile_dimensions"));
     }
     let alignment = 1usize << settings.levels;
-    if (tw < w && tw % alignment != 0) || (th < h && th % alignment != 0) {
+    if tile_coding.is_empty()
+        && ((tw < w && tw % alignment != 0) || (th < h && th % alignment != 0))
+    {
         return Err(invalid("unsupported:jpx_encoder_tile_alignment"));
     }
     let columns = sum(w, tw.saturating_sub(1))? / tw;
     let rows = sum(h, th.saturating_sub(1))? / th;
-    limit("jpx_encoder_tiles", product(columns, rows)?, MAX_TILES)?;
+    let tile_count = product(columns, rows)?;
+    limit("jpx_encoder_tiles", tile_count, MAX_TILES)?;
+    if !tile_coding.is_empty() && tile_coding.len() != tile_count {
+        return Err(invalid("JPEG 2000 tile coding count"));
+    }
+    for (index, coding) in tile_coding.iter().enumerate() {
+        limit("jpx_encoder_levels", usize::from(coding.levels), 2)?;
+        if coding.rct && components.len() != 3 {
+            return Err(invalid("unsupported:jpx_encoder_rct"));
+        }
+        let grid = 1usize << coding.levels;
+        let x = product(index % columns, tw)?;
+        let y = product(index / columns, th)?;
+        if x % grid != 0 || y % grid != 0 {
+            return Err(invalid("unsupported:jpx_encoder_tile_alignment"));
+        }
+    }
 
     let mut out = vec![0xff, 0x4f];
     let mut siz = Vec::new();
@@ -1210,34 +1284,28 @@ pub fn encode(
         siz.extend_from_slice(&[settings.bit_depth.saturating_sub(1), 1, 1]);
     }
     marker(&mut out, 0x51, &siz)?;
-    let block_exponent = if settings.code_block_size == 32 { 3 } else { 4 };
-    marker(&mut out, 0x52, &[
-        0, 0, 0, 1, u8::from(settings.rct),
-        settings.levels, block_exponent, block_exponent, 0, 1,
-    ])?;
-    // Reversible quantization exponents are precision plus subband gain.
-    // Four guard bits cover two lifting levels, including transformed chroma.
-    let mut qcd = vec![(GUARD_BITS as u8) << 5, settings.bit_depth << 3];
-    for _ in 0..settings.levels {
-        qcd.extend_from_slice(&[
-            settings.bit_depth.saturating_add(1) << 3,
-            settings.bit_depth.saturating_add(1) << 3,
-            settings.bit_depth.saturating_add(2) << 3,
-        ]);
-    }
-    marker(&mut out, 0x5c, &qcd)?;
+    coding_markers(&mut out, settings)?;
 
     for row in 0..rows {
         for column in 0..columns {
             let x = product(column, tw)?;
             let y = product(row, th)?;
+            let index = sum(product(row, columns)?, column)?;
+            let mut local = settings;
+            let mut header = Vec::new();
+            if !tile_coding.is_empty() {
+                let coding = at(tile_coding, index)?;
+                local.levels = coding.levels;
+                local.rct = coding.rct;
+                coding_markers(&mut header, local)?;
+            }
             let data = tile(
                 w, components, x, y, tw.min(w.saturating_sub(x)),
-                th.min(h.saturating_sub(y)), settings,
+                th.min(h.saturating_sub(y)), local,
             )?;
-            let tile_id = u16::try_from(sum(product(row, columns)?, column)?)
+            let tile_id = u16::try_from(index)
                 .map_err(|_| invalid("JPEG 2000 tile index overflow"))?;
-            let length = u32::try_from(sum(data.len(), 14)?)
+            let length = u32::try_from(sum(sum(data.len(), header.len())?, 14)?)
                 .map_err(|_| invalid("JPEG 2000 tile-part length overflow"))?;
             limit(
                 "jpx_encoder_bytes",
@@ -1249,6 +1317,7 @@ pub fn encode(
             u32be(&mut sot, length);
             sot.extend_from_slice(&[0, 1]);
             marker(&mut out, 0x90, &sot)?;
+            out.extend_from_slice(&header);
             out.extend_from_slice(&[0xff, 0x93]);
             out.extend_from_slice(&data);
         }
