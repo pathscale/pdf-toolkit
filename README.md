@@ -8,7 +8,7 @@ MIT.
 ## Crates
 
 Most users want the umbrella crate, `pdf-toolkit`, with features: `text` (default), `render`, `raster`, `write`,
-`edit`, `jpx` (JPEG 2000 images through hayro-jpeg2000); `default-features = false` gives the no_std reader alone. Its modules are the layered crates below, which
+`edit`, `jpx` (JPEG 2000 images through ps-hayro-jpeg2000); `default-features = false` gives the no_std reader alone. Its modules are the layered crates below, which
 can also be used directly (embedders such as a browser take only the no_std core and text layers).
 
 | Crate | What it does |
