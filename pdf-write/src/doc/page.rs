@@ -25,7 +25,7 @@ fn width_command(width: f32) -> io::Result<Vec<u8>> {
     Ok(out)
 }
 
-fn win_ansi(character: char) -> u8 {
+pub(crate) fn win_ansi(character: char) -> u8 {
     match character {
         '\u{20}'..='\u{7e}' | '\u{a0}'..='\u{ff}' => character as u8,
         '\u{20ac}' => 0x80,
@@ -68,6 +68,28 @@ impl PageBuilder<'_> {
         if let Err(error) = work(self.doc, index) {
             self.doc.fail(error);
         }
+    }
+
+    /// Adds a printable annotation with a self-contained normal appearance.
+    pub fn annotation(&mut self, annot: &crate::annot::Annot) {
+        self.perform(|doc, index| {
+            let count = add(doc.annotations, 1)?;
+            check("annotations", add(count, doc.links)?, MAX_LINKS)?;
+            let parts = crate::annot::build(annot).map_err(invalid)?;
+            let dictionary = serialize_value(&Value::Dict(parts.dict.clone()))?.len();
+            let appearance = serialize_value(&Value::Dict(parts.ap_dict.clone()))?.len();
+            // Include retained Value storage, not just its serialized bytes.
+            let bytes = add(
+                add(mul(add(dictionary, appearance)?, 16)?, parts.ap_content.len())?,
+                1024,
+            )?;
+            doc.charge(bytes)?;
+            let page = doc.pages.get_mut(index)
+                .ok_or_else(|| invalid("page handle is invalid"))?;
+            push(&mut page.annotations, parts, "annotations", MAX_LINKS)?;
+            doc.annotations = count;
+            Ok(())
+        });
     }
 
     pub fn fill_rect(&mut self, x: f32, y: f32, w: f32, h: f32, color: Color) {
@@ -218,7 +240,7 @@ impl PageBuilder<'_> {
 
 fn add_link(doc: &mut DocumentBuilder, index: usize, link: Link) -> io::Result<()> {
     let count = add(doc.links, 1)?;
-    check("links", count, MAX_LINKS)?;
+    check("links", add(count, doc.annotations)?, MAX_LINKS)?;
     let bytes = match &link.target {
         Target::Uri(bytes) => bytes.len(),
         Target::Page { .. } => 0,

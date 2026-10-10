@@ -2966,10 +2966,30 @@ fn actual_fixture_values(
             format!("{prefix}.contents"),
             page.contents.len().to_string(),
         );
+        let annotation_count = match resolver.get(page.id) {
+            Ok(object) => pdf_text::annots::page_annotations(&mut resolver, &object).len(),
+            Err(_) => 0,
+        };
+        actuals.insert(
+            format!("{prefix}.annotations"),
+            annotation_count.to_string(),
+        );
         actuals.insert(
             format!("{prefix}.resource_keys"),
             resource_keys_manifest(page),
         );
+        match resolver.get(page.id) {
+            Ok(object) => {
+                let annotations = pdf_text::annots::page_annotations(&mut resolver, &object);
+                actuals.insert(
+                    format!("{prefix}.annotations"),
+                    annotations.len().to_string(),
+                );
+            }
+            Err(error) => {
+                actuals.insert(format!("{prefix}.annotations"), error.code().to_string());
+            }
+        }
 
         let mut hasher = Sha256::new();
         let mut content_refusal = None;

@@ -20,6 +20,8 @@ use crate::paint::{self, ColorState, ColorSpace};
 const PATH_ELEMENTS: u64 = 1_000_000;
 const FORM_DEPTH: u64 = 16;
 const CLIP_DEPTH: u64 = 64;
+const ANNOTATIONS: u64 = 10_000;
+
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Matrix(pub [f32; 6]);
@@ -113,8 +115,15 @@ pub struct Dash {
     pub phase: f32,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BlendMode {
+    Normal,
+    Multiply,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum Item {
+    SetBlendMode(BlendMode),
     PushClip { path: Path, rule: FillRule },
     PopClip,
     Fill { path: Path, rule: FillRule, paint: Paint },
@@ -216,6 +225,7 @@ struct GraphicsState {
     dash: Option<Arc<Dash>>,
     fill_alpha: f32,
     stroke_alpha: f32,
+    blend: BlendMode,
     text: TextState,
     clips: u64,
 }
@@ -230,6 +240,7 @@ impl GraphicsState {
             dash: None,
             fill_alpha: 1.0,
             stroke_alpha: 1.0,
+            blend: BlendMode::Normal,
             text: TextState::default(),
             clips: 0,
         }
@@ -455,10 +466,159 @@ pub fn display_list_cached(
         warn(resolver, Some(page.id), "graphics_state_unclosed");
     }
     builder.pop_clips(0)?;
+    builder.annotations(resolver, page, ctm)?;
     Ok(builder.output)
 }
 
 impl Builder<'_> {
+    fn annotations(
+        &mut self,
+        resolver: &mut Resolver<'_>,
+        page: &Page,
+        ctm: Matrix,
+    ) -> Result<(), DocError> {
+        let object = match resolver.get(page.id) {
+            Ok(object) => object,
+            Err(error) => {
+                recover(resolver, error, Some(page.id), "render_annotations_failed")?;
+                return Ok(());
+            }
+        };
+        let result = (|| {
+            let Some(dict) = object.dict() else { return Ok(None) };
+            resolver.resolve_dict_key(dict, b"Annots")
+        })();
+        let annots = match result {
+            Ok(Some(value)) => value,
+            Ok(None) => return Ok(()),
+            Err(error) => {
+                recover(resolver, error, Some(page.id), "render_annotations_failed")?;
+                return Ok(());
+            }
+        };
+        let Some(array) = annots.get().as_array() else {
+            warn(resolver, Some(page.id), "render_annots_invalid");
+            return Ok(());
+        };
+        check(
+            LimitKind::Objects, array.len() as u64,
+            ANNOTATIONS.min(u64::from(self.limits.max_objects)),
+        )?;
+        let mut tasks = Vec::new();
+        for value in array.iter() {
+            self.step()?;
+            let id = value.as_ref();
+            let form = match self.annotation_form(resolver, value, page.resources.clone()) {
+                Ok(Some(form)) => form,
+                Ok(None) => continue,
+                Err(error) => {
+                    recover(resolver, error, id, "render_annotation_failed")?;
+                    continue;
+                }
+            };
+            // Page content and adjacent appearances cannot leak graphics state.
+            self.graphics = GraphicsState::new(ctm);
+            self.graphics.fill_alpha = form.1;
+            self.graphics.stroke_alpha = form.1;
+            self.saved.clear();
+            self.active.clear();
+            self.path = CurrentPath::default();
+            self.text_matrix = Matrix::IDENTITY;
+            self.line_matrix = Matrix::IDENTITY;
+            self.in_text = false;
+            self.text_clip = Path::default();
+            self.clip_requested = false;
+            if let Err(error) = self.enter_form(resolver, form.0, &mut tasks) {
+                recover(resolver, error, id, "render_annotation_failed")?;
+            }
+            while let Some(task) = tasks.pop() {
+                match task {
+                    Task::Stream(frame) => self.stream(resolver, frame, &mut tasks)?,
+                    Task::Array(array) => self.array(resolver, array, &mut tasks)?,
+                    Task::Run(run) => self.run(resolver, run, &mut tasks)?,
+                    Task::Restore(snapshot) => self.restore(resolver, snapshot)?,
+                }
+            }
+            self.pop_clips(0)?;
+        }
+        Ok(())
+    }
+
+    fn annotation_form(
+        &mut self,
+        resolver: &mut Resolver<'_>,
+        value: pdf_core::ValueRef<'_>,
+        inherited: Option<Value>,
+    ) -> Result<Option<(Invocation, f32)>, DocError> {
+        let annot = resolver.resolve(value)?;
+        let Some(dict) = annot.get().as_dict() else { return Ok(None) };
+        let flags = match resolver.resolve_dict_key(dict, b"F")? {
+            Some(value) => value.get().as_i64()
+                .and_then(|value| u32::try_from(value).ok())
+                .ok_or_else(|| bad("annotation_flags"))?,
+            None => 0,
+        };
+        if flags & (2 | 32) != 0 { return Ok(None); }
+        let Some(rect) = read_array::<4>(resolver, dict, b"Rect")? else { return Ok(None) };
+        let opacity = number(resolver, dict, b"CA")?.unwrap_or(1.0).clamp(0.0, 1.0);
+        let Some(ap) = resolver.resolve_dict_key(dict, b"AP")? else { return Ok(None) };
+        let Some(ap_dict) = ap.get().as_dict() else { return Ok(None) };
+        let Some(mut normal) = resolver.resolve_dict_key(ap_dict, b"N")? else {
+            return Ok(None);
+        };
+        if !normal.object().is_stream() {
+            let Some(states) = normal.get().as_dict() else { return Ok(None) };
+            let Some(state) = resolver.resolve_dict_key(dict, b"AS")? else { return Ok(None) };
+            let Some(name) = state.get().as_name() else { return Ok(None) };
+            let name = name.decoded();
+            let Some(selected) = resolver.resolve_dict_key(states, name.as_ref())? else {
+                return Ok(None);
+            };
+            normal = selected;
+        }
+        if !normal.object().is_stream() { return Ok(None); }
+        let form_dict = normal.object().dict().ok_or_else(|| bad("annotation_appearance"))?;
+        let bbox = read_array::<4>(resolver, form_dict, b"BBox")?
+            .ok_or_else(|| bad("annotation_bbox"))?;
+        let matrix = read_array::<6>(resolver, form_dict, b"Matrix")?
+            .map(Matrix).unwrap_or(Matrix::IDENTITY);
+        let [x0, y0, x1, y1] = bbox;
+        let mut bounds = [f32::INFINITY, f32::INFINITY, f32::NEG_INFINITY, f32::NEG_INFINITY];
+        for (x, y) in [(x0, y0), (x0, y1), (x1, y0), (x1, y1)] {
+            let (x, y) = checked_point(matrix, x, y)?;
+            bounds[0] = bounds[0].min(x);
+            bounds[1] = bounds[1].min(y);
+            bounds[2] = bounds[2].max(x);
+            bounds[3] = bounds[3].max(y);
+        }
+        let [left, bottom, right, top] = rect;
+        let left = f64::from(left.min(right));
+        let bottom = f64::from(bottom.min(top));
+        let right = f64::from(rect[0].max(rect[2]));
+        let top = f64::from(rect[1].max(rect[3]));
+        let bw = f64::from(bounds[2]) - f64::from(bounds[0]);
+        let bh = f64::from(bounds[3]) - f64::from(bounds[1]);
+        if bw <= 0.0 || bh <= 0.0 || right <= left || top <= bottom {
+            return Err(bad("annotation_geometry"));
+        }
+        let sx = (right - left) / bw;
+        let sy = (top - bottom) / bh;
+        let mapping = Matrix([
+            finite(sx).ok_or_else(|| bad("annotation_geometry"))?, 0.0,
+            0.0, finite(sy).ok_or_else(|| bad("annotation_geometry"))?,
+            finite(left - f64::from(bounds[0]) * sx)
+                .ok_or_else(|| bad("annotation_geometry"))?,
+            finite(bottom - f64::from(bounds[1]) * sy)
+                .ok_or_else(|| bad("annotation_geometry"))?,
+        ]);
+        let transform = matrix.then(mapping);
+        if !transform.is_finite() { return Err(bad("annotation_geometry")); }
+        Ok(Some((Invocation {
+            object: normal.object().clone(), inherited,
+            matrix: Some(transform), bbox: Some(bbox), type3_mode: None,
+        }, opacity)))
+    }
+
     fn step(&mut self) -> Result<(), DocError> {
         self.ops = self.ops.checked_add(1).ok_or_else(|| {
             refusal(LimitKind::ContentOps, u64::MAX, self.limits.max_content_ops)
@@ -490,6 +650,14 @@ impl Builder<'_> {
             let bytes = stops.len().checked_mul(core::mem::size_of::<(f32, Rgba)>())
                 .ok_or_else(|| bad("render_paint_size"))?;
             self.budget.charge(bytes)?;
+        }
+        if matches!(
+            &item, Item::Fill { .. } | Item::Stroke { .. }
+                | Item::Glyphs { .. } | Item::Image { .. }
+        ) {
+            self.budget.push(
+                &mut self.output.items, Item::SetBlendMode(self.graphics.blend),
+            )?;
         }
         self.budget.push(&mut self.output.items, item)
     }
@@ -718,8 +886,9 @@ impl Builder<'_> {
                     }
                 } else {
                     let outline = run.font_index.and_then(|index| self.fonts.get(index))
-                        .and_then(|entry| entry.source.as_ref())
-                        .and_then(|source| source.outline(&glyph));
+                        .and_then(|entry| {
+                            entry.source.as_ref().and_then(|source| source.outline(&glyph))
+                        });
                     if let Some(mut path) = outline {
                         account_path(&path, &mut self.budget)?;
                         if let Err(error) = transform_path(&mut path, transform) {
@@ -1406,6 +1575,9 @@ impl Builder<'_> {
         if let Some(value) = number(resolver, dict, b"ca")? {
             self.graphics.fill_alpha = value.clamp(0.0, 1.0);
         }
+        if let Some(mode) = blend_mode(resolver, dict)? {
+            self.graphics.blend = mode;
+        }
         if let Some(value) = resolver.resolve_dict_key(dict, b"D")? {
             let pair = value.get().as_array().filter(|array| array.len() == 2)
                 .ok_or_else(|| bad("ext_gstate_dash"))?;
@@ -1770,6 +1942,36 @@ pub(crate) fn read_array<const N: usize>(
         *slot = value.get().as_f64().and_then(finite).ok_or_else(|| bad("render_number"))?;
     }
     Ok(Some(result))
+}
+
+fn blend_mode(
+    resolver: &mut Resolver<'_>,
+    dict: DictRef<'_>,
+) -> Result<Option<BlendMode>, DocError> {
+    fn supported(value: &Value) -> Option<BlendMode> {
+        let name = value.get().as_name()?;
+        if name.eq_bytes(b"Normal") || name.eq_bytes(b"Compatible") {
+            Some(BlendMode::Normal)
+        } else if name.eq_bytes(b"Multiply") {
+            Some(BlendMode::Multiply)
+        } else {
+            None
+        }
+    }
+    let Some(value) = resolver.resolve_dict_key(dict, b"BM")? else { return Ok(None) };
+    if let Some(mode) = supported(&value) { return Ok(Some(mode)); }
+    if let Some(array) = value.get().as_array() {
+        check(
+            LimitKind::Tokens, array.len() as u64,
+            u64::from(resolver.document().limits().max_tokens_per_object).min(64),
+        )?;
+        for value in array.iter() {
+            let value = resolver.resolve(value)?;
+            if let Some(mode) = supported(&value) { return Ok(Some(mode)); }
+        }
+    }
+    warn(resolver, value.object().id(), "render_blend_mode_unsupported");
+    Ok(Some(BlendMode::Normal))
 }
 
 pub(crate) fn number(

@@ -144,6 +144,9 @@ fn validate(doc: &DocumentBuilder, options: &WriteOptions) -> io::Result<()> {
     if doc.links != 0 {
         minimum = minimum.max((1, 1));
     }
+    if doc.annotations != 0 {
+        minimum = minimum.max((1, 4));
+    }
     if options.version < minimum {
         return Err(invalid("PDF version is too old for selected document features"));
     }
@@ -275,6 +278,18 @@ pub(super) fn finish(mut doc: DocumentBuilder, options: &WriteOptions) -> io::Re
             }
             out.object(id, dict(entries))?;
             push(&mut annotations, reference(id), "links", MAX_LINKS)?;
+        }
+        for parts in &page.annotations {
+            let appearance = out.alloc()?;
+            out.stream(
+                appearance, parts.ap_dict.clone(), &parts.ap_content, options.compress,
+            )?;
+            let id = out.alloc()?;
+            let mut entries = parts.dict.clone();
+            entries.push(("P".to_owned(), page_ref(&page_ids, index)?));
+            entries.push(("AP".to_owned(), dict(vec![("N", reference(appearance))])));
+            out.object(id, Value::Dict(entries))?;
+            push(&mut annotations, reference(id), "annotations", MAX_LINKS)?;
         }
         let mut entries = vec![
             ("Type", name("Page")), ("Parent", reference(pages_root)),

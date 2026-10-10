@@ -7,6 +7,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::io;
 use std::ops::Range;
 
+pub mod annot;
 pub mod doc;
 pub mod encode;
 pub mod encode_jpx;

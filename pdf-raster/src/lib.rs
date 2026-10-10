@@ -47,9 +47,16 @@ pub fn render_page(
 
     let pixel_count = u64::try_from(buffer_len / 4).unwrap_or(u64::MAX);
     let mut clips: Vec<Mask> = Vec::new();
+    let mut blend = tiny_skia::BlendMode::SourceOver;
 
     for item in display.items {
         match item {
+            Item::SetBlendMode(mode) => {
+                blend = match mode {
+                    pdf_render::display::BlendMode::Normal => tiny_skia::BlendMode::SourceOver,
+                    pdf_render::display::BlendMode::Multiply => tiny_skia::BlendMode::Multiply,
+                };
+            }
             Item::PushClip { path, rule } => {
                 let requested_depth = u64::try_from(clips.len())
                     .unwrap_or(u64::MAX)
@@ -99,7 +106,7 @@ pub fn render_page(
                 clips.pop();
             }
             Item::Fill { path, rule, paint } => {
-                let (Some(path), Some(paint)) = (path_to_skia(&path), paint_to_skia(&paint)) else {
+                let (Some(path), Some(paint)) = (path_to_skia(&path), paint_to_skia(&paint, blend)) else {
                     continue;
                 };
                 pixmap.fill_path(
@@ -118,7 +125,7 @@ pub fn render_page(
             } => {
                 let (Some(path), Some(paint), Some(stroke)) = (
                     path_to_skia(&path),
-                    paint_to_skia(&paint),
+                    paint_to_skia(&paint, blend),
                     stroke_to_skia(&stroke, dash.as_ref()),
                 ) else {
                     continue;
@@ -142,6 +149,7 @@ pub fn render_page(
                     image,
                     transform,
                     alpha,
+                    blend,
                     clips.last(),
                     maximum,
                 )?;
@@ -151,7 +159,7 @@ pub fn render_page(
                 paint,
                 stroke,
             } => {
-                let Some(paint) = paint_to_skia(&paint) else {
+                let Some(paint) = paint_to_skia(&paint, blend) else {
                     continue;
                 };
                 let stroke = stroke.as_ref().and_then(|stroke| stroke_to_skia(stroke, None));
@@ -361,7 +369,7 @@ fn gradient_stops(
     output
 }
 
-fn paint_to_skia(paint: &PdfPaint) -> Option<SkPaint<'static>> {
+fn paint_to_skia(paint: &PdfPaint, blend: tiny_skia::BlendMode) -> Option<SkPaint<'static>> {
     let shader = match paint {
         PdfPaint::Solid(rgba) => Shader::SolidColor(color_to_skia(*rgba)?),
         PdfPaint::Axial {
@@ -403,7 +411,9 @@ fn paint_to_skia(paint: &PdfPaint) -> Option<SkPaint<'static>> {
             .unwrap_or_else(fallback)
         }
     };
-    Some(sk_paint(shader))
+    let mut paint = sk_paint(shader);
+    paint.blend_mode = blend;
+    Some(paint)
 }
 
 fn sk_paint(shader: Shader<'static>) -> SkPaint<'static> {
@@ -469,6 +479,7 @@ fn draw_image(
     source: ImageSource,
     matrix: pdf_render::display::Matrix,
     alpha: f32,
+    blend: tiny_skia::BlendMode,
     mask: Option<&Mask>,
     maximum: u64,
 ) -> Result<(), DocError> {
@@ -500,6 +511,7 @@ fn draw_image(
         return Ok(());
     };
     let mut paint = PixmapPaint::default();
+    paint.blend_mode = blend;
     paint.quality = FilterQuality::Bilinear;
     paint.opacity = if alpha.is_finite() {
         alpha.clamp(0.0, 1.0)

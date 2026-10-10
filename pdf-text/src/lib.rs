@@ -21,6 +21,7 @@ pub mod extract;
 pub mod semantic;
 pub mod links;
 pub mod images;
+pub mod annots;
 
 pub use font::{Font, FontFlags, FontKind, Glyph, GlyphText};
 pub use interp::{page_text, FontInfo, ImageInfo, PageText, PositionedGlyph};

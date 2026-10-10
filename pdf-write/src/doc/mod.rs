@@ -25,6 +25,7 @@ use font::TrueType;
 use image::Image;
 pub use bounds::Refusal;
 pub use page::{PageBuilder, PathBuilder};
+pub(crate) use page::win_ansi;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Color {
@@ -101,6 +102,7 @@ struct Page {
     fonts: BTreeSet<u32>,
     images: BTreeSet<u32>,
     links: Vec<Link>,
+    annotations: Vec<crate::annot::AnnotParts>,
 }
 
 enum Target {
@@ -129,6 +131,7 @@ pub struct DocumentBuilder {
     bytes: usize,
     operations: usize,
     links: usize,
+    annotations: usize,
     error: Option<io::Error>,
 }
 
@@ -149,6 +152,7 @@ impl DocumentBuilder {
             bytes: 0,
             operations: 0,
             links: 0,
+            annotations: 0,
             error: None,
         }
     }
@@ -305,6 +309,7 @@ impl DocumentBuilder {
                 Page {
                     width, height, content: Vec::new(),
                     fonts: BTreeSet::new(), images: BTreeSet::new(), links: Vec::new(),
+                    annotations: Vec::new(),
                 },
                 "pages", MAX_PAGES,
             )?;
