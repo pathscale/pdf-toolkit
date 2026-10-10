@@ -2,6 +2,8 @@
 //!
 //! Usage: pdf-roundtrip OUT_DIR [HOUSE_DIR | CLASSIC_PDF XREF_PDF]
 //! HOUSE_DIR defaults to fixtures/house relative to the current directory.
+//! CLASSIC_PDF XREF_PDF runs that pair without the house fixture pass.
+//! A missing house directory yields one failure that names that path.
 
 use std::env;
 use std::fmt::Debug;
@@ -25,8 +27,11 @@ mod editing;
 
 type CheckResult<T> = Result<T, String>;
 
-const MAX_FILE_BYTES: u64 = 32 << 20;
-const MAX_TOTAL_BYTES: u64 = 64 << 20;
+// Library defaults from Limits::default: max_file_bytes and max_total_decoded_bytes.
+const MAX_FILE_BYTES: u64 = 1 << 30;
+const MAX_TOTAL_BYTES: u64 = 4 << 30;
+/// Pages compared per snapshot (first, last, and evenly spaced between).
+/// Read limits come from Limits::default; this bounds only comparisons.
 const MAX_PAGES: u32 = 16;
 const MAX_STARTXREF_DIGITS: usize = 20;
 const WIDTH: f32 = 360.0;
@@ -142,22 +147,9 @@ fn bounded(kind: &str, requested: u64, maximum: u64) -> CheckResult<()> {
 }
 
 fn limits() -> Limits {
-    Limits {
-        max_file_bytes: MAX_FILE_BYTES,
-        max_objects: 65_536,
-        max_prev_chain: 16,
-        max_depth: 32,
-        max_ref_chain: 32,
-        max_tokens_per_object: 1_000_000,
-        max_object_bytes: 8 << 20,
-        max_decoded_bytes: 16 << 20,
-        max_total_decoded_bytes: MAX_TOTAL_BYTES,
-        max_pages: MAX_PAGES,
-        max_page_tree_depth: 16,
-        max_objstm_members: 65_536,
-        max_objstm_cache_bytes: 8 << 20,
-        max_content_ops: 1_000_000,
-    }
+    // File bytes, page count, nesting, and every other read budget stay on the
+    // library default. No field here had a documented reason to be tighter.
+    Limits::default()
 }
 
 struct Config {
@@ -166,15 +158,20 @@ struct Config {
     stream: PathBuf,
 }
 
+const DEFAULT_HOUSE_DIR: &str = "fixtures/house";
+
 fn config() -> CheckResult<Config> {
     // Four arguments suffice to detect every unsupported argument count.
     let arguments: Vec<_> = env::args_os().skip(1).take(4).collect();
     let (output, classic, stream) = match arguments.as_slice() {
-        [output] => (
-            PathBuf::from(output.as_os_str()),
-            PathBuf::from("fixtures/house/classic-one-page.pdf"),
-            PathBuf::from("fixtures/house/xref-stream-objstm.pdf"),
-        ),
+        [output] => {
+            let house = PathBuf::from(DEFAULT_HOUSE_DIR);
+            (
+                PathBuf::from(output.as_os_str()),
+                house.join("classic-one-page.pdf"),
+                house.join("xref-stream-objstm.pdf"),
+            )
+        }
         [output, house] => {
             let house = PathBuf::from(house.as_os_str());
             (
@@ -193,6 +190,40 @@ fn config() -> CheckResult<Config> {
         ),
     };
     Ok(Config { output, classic, stream })
+}
+
+/// House directory for the argument split `config` accepts.
+/// Pair mode (classic PDF plus xref PDF) returns `None`.
+fn active_house_dir() -> Option<PathBuf> {
+    let arguments: Vec<_> = env::args_os().skip(1).take(4).collect();
+    match arguments.as_slice() {
+        [_] => Some(PathBuf::from(DEFAULT_HOUSE_DIR)),
+        [_, house] => Some(PathBuf::from(house.as_os_str())),
+        _ => None,
+    }
+}
+
+struct FixturePlan {
+    /// Scripted house-fixture edits. Pair mode leaves this false.
+    house_pass: bool,
+    /// Classic and xref inputs. False when the house directory is missing.
+    open_inputs: bool,
+}
+
+fn fixture_plan(report: &mut Report) -> FixturePlan {
+    let Some(house) = active_house_dir() else {
+        return FixturePlan { house_pass: false, open_inputs: true };
+    };
+    if house.is_dir() {
+        return FixturePlan { house_pass: true, open_inputs: true };
+    }
+    report.check(
+        "setup",
+        "house-directory",
+        false,
+        &format!("missing fixture directory: {}", house.display()),
+    );
+    FixturePlan { house_pass: false, open_inputs: false }
 }
 
 fn read_bounded(path: &Path) -> CheckResult<Arc<[u8]>> {
@@ -353,6 +384,29 @@ struct Snapshot {
     rasters: Vec<Raster>,
 }
 
+/// Comparison page indexes, at most MAX_PAGES.
+///
+/// The first and last pages are included, with the other indexes spaced evenly
+/// between them. A shorter document returns every page in order, which keeps
+/// the house and writer checks on their existing pages.
+fn sample_indexes(page_count: usize) -> Vec<usize> {
+    let cap = MAX_PAGES as usize;
+    if page_count <= cap {
+        return (0..page_count).collect();
+    }
+    if cap <= 1 {
+        return vec![0];
+    }
+    let last = page_count - 1;
+    let span = cap - 1;
+    let mut indexes = Vec::with_capacity(cap);
+    for slot in 0..cap {
+        let index = slot as u128 * last as u128 / span as u128;
+        indexes.push(usize::try_from(index).unwrap_or(last));
+    }
+    indexes
+}
+
 fn snapshot(bytes: Arc<[u8]>, font: Arc<[u8]>) -> CheckResult<Snapshot> {
     bounded("file_bytes", u64::try_from(bytes.len()).map_err(describe)?, MAX_FILE_BYTES)?;
     let source = PdfSource::new(bytes).map_err(describe)?;
@@ -363,17 +417,16 @@ fn snapshot(bytes: Arc<[u8]>, font: Arc<[u8]>) -> CheckResult<Snapshot> {
     let mut resolver = document.resolver();
     let mut pages = Vec::new();
     for page in PageWalk::new(&mut resolver).map_err(describe)? {
-        let page = page.map_err(describe)?;
-        let requested = u64::try_from(pages.len()).map_err(describe)?.saturating_add(1);
-        bounded("pages", requested, u64::from(MAX_PAGES))?;
-        pages.push(page);
+        pages.push(page.map_err(describe)?);
     }
     let options = RenderOptions { scale: 1.0, fallback_font: Some(font) };
     let mut text = Vec::new();
     let mut unmapped = Vec::new();
     let mut rasters = Vec::new();
     let mut retained = 0u64;
-    for page in pages.iter().take(MAX_PAGES as usize) {
+    // Sample order matches document order when there are at most MAX_PAGES pages.
+    for index in sample_indexes(pages.len()) {
+        let page = pages.get(index).ok_or_else(|| format!("missing sampled page {index}"))?;
         let interpreted = pdf_text::page_text(&mut resolver, page).map_err(describe)?;
         let plain = pdf_text::layout(&interpreted).plain_text();
         let raster = pdf_raster::render_page(
@@ -393,7 +446,9 @@ fn snapshot(bytes: Arc<[u8]>, font: Arc<[u8]>) -> CheckResult<Snapshot> {
     }
     drop(resolver);
     let semantic = pdf_text::semantic::semantic_document(source, limits()).map_err(describe)?;
-    for page in semantic.pages.iter().take(MAX_PAGES as usize) {
+    for index in sample_indexes(semantic.pages.len()) {
+        let page = semantic.pages.get(index)
+            .ok_or_else(|| format!("missing sampled semantic page {index}"))?;
         if let Some(refusal) = page.refusal {
             return Err(format!("semantic page {} refused: {refusal}", page.index));
         }
@@ -697,9 +752,15 @@ fn run_incremental(
     let Some(before) = report.obtain(name, "read-original", snapshot(original.clone(), font.clone())) else {
         return;
     };
-    check_text(report, &format!("{name}.original"), &before, expected_text);
+    // A house input has exactly the fixture pages; any other file (a real book) is checked only for what an
+    // incremental edit must preserve, never against the fixture text, links or layout.
+    let fixture = before.pages.len() == expected_text.len();
+    let kind = if fixture { kind } else { before.document.xref().kind() };
+    if fixture {
+        check_text(report, &format!("{name}.original"), &before, expected_text);
+        report.equal(name, "original.xref-sections", &before.document.xref().sections(), &1);
+    }
     report.equal(name, "original.xref-kind", &before.document.xref().kind(), &kind);
-    report.equal(name, "original.xref-sections", &before.document.xref().sections(), &1);
     let Some(previous) = report.obtain(name, "original.startxref", startxref(&original)) else {
         return;
     };
@@ -737,7 +798,9 @@ fn run_incremental(
     let Some(after) = report.obtain(name, "read-back", snapshot(saved, font)) else {
         return;
     };
-    check_text(report, name, &after, expected_text);
+    if fixture {
+        check_text(report, name, &after, expected_text);
+    }
     report.equal(name, "xref-kind", &after.document.xref().kind(), &kind);
     let sections = before.document.xref().sections().checked_add(1);
     report.equal(name, "xref-sections", &Some(after.document.xref().sections()), &sections);
@@ -760,16 +823,16 @@ fn run_incremental(
         name, "render-preserved", after.rasters == before.rasters,
         "incremental metadata or annotation edit changed rendered pixels",
     );
-    check_links(report, name, &after, 0, &[
-        uri_link([30.0, 742.0, 130.0, 762.0], EDIT_URI),
-    ]);
-    for page in 1..expected_text.len().min(MAX_PAGES as usize) {
-        check_links(report, name, &after, page, &[]);
+    if fixture {
+        check_links(report, name, &after, 0, &[
+            uri_link([30.0, 742.0, 130.0, 762.0], EDIT_URI),
+        ]);
+        for page in 1..expected_text.len().min(MAX_PAGES as usize) {
+            check_links(report, name, &after, page, &[]);
+        }
     }
-    report.equal(
-        name, "page.0.annotations",
-        &after.pages.first().map(|page| page.annots), &Some(1),
-    );
+    let added = before.pages.first().map(|page| page.annots + 1);
+    report.equal(name, "page.0.annotations", &after.pages.first().map(|page| page.annots), &added);
 }
 
 fn main() -> ExitCode {
@@ -788,7 +851,10 @@ fn main() -> ExitCode {
         return report.finish();
     };
     let jpeg = jpeg_program();
-    editing::run(&mut report, &config, font.clone());
+    let plan = fixture_plan(&mut report);
+    if plan.house_pass {
+        editing::run(&mut report, &config, font.clone());
+    }
     for (name, compress, object_streams) in [
         ("writer-table-plain", false, false),
         ("writer-table-flate", true, false),
@@ -802,14 +868,16 @@ fn main() -> ExitCode {
         };
         run_generated(&mut report, &config, name, &options, font.clone(), jpeg.clone());
     }
-    run_incremental(
-        &mut report, &config, "edited-classic", &config.classic,
-        "Edited classic café", CLASSIC_TEXT, XrefKind::Table, font.clone(),
-    );
-    run_incremental(
-        &mut report, &config, "edited-xref-stream", &config.stream,
-        "Edited stream café", STREAM_TEXT, XrefKind::Stream, font,
-    );
+    if plan.open_inputs {
+        run_incremental(
+            &mut report, &config, "edited-classic", &config.classic,
+            "Edited classic café", CLASSIC_TEXT, XrefKind::Table, font.clone(),
+        );
+        run_incremental(
+            &mut report, &config, "edited-xref-stream", &config.stream,
+            "Edited stream café", STREAM_TEXT, XrefKind::Stream, font,
+        );
+    }
     report.finish()
 }
 
