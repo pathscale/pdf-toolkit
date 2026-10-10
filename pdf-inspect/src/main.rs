@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
+use std::io::Read;
 
 use pdf_core::document::{Document, Resolver, XrefEntry, XrefKind};
 use pdf_core::error::{DocError, Warning};
@@ -15,6 +16,8 @@ use pdf_core::pages::{page_count_hint, Page, PageWalk};
 use pdf_core::source::PdfSource;
 use pdf_core::work::ObjectRef;
 use pdf_inspect::{digest_hex, format_number, JsonWriter, Sha256};
+use pdf_raster::{encode_png, render_page as rasterize_page};
+use pdf_render::RenderOptions;
 
 mod text;
 
@@ -150,6 +153,15 @@ fn run() -> u8 {
                 1
             }
         },
+        "render" => match parse_render_args(&args) {
+            Some((path, page, output, dpi, font)) => {
+                run_render(&path, page, &output, dpi, font.as_deref(), Limits::default())
+            }
+            None => {
+                print_usage();
+                1
+            }
+        },
         "streams" => match parse_single_path(&args) {
             Some(path) => run_streams(&path, Limits::default()),
             None => {
@@ -191,6 +203,7 @@ fn print_usage() {
          [--max-prev-chain N] [--max-pages N]\n  pdf-inspect streams FILE\n  \
          pdf-inspect text FILE\n  pdf-inspect receipt FILE\n  \
          pdf-inspect semantic FILE\n  pdf-inspect image FILE OBJ_NUM OUT\n  \
+         pdf-inspect render FILE PAGE OUT.png [--dpi N] [--font FILE]\n  \
          pdf-inspect bench FILE... [--repeat N]\n  \
          pdf-inspect mutate FILE --seed N --count K\n  pdf-inspect check DIR"
     );
@@ -212,6 +225,44 @@ fn parse_image_args(args: &[OsString]) -> Option<(PathBuf, u32, PathBuf)> {
         parse_u32_argument(args.get(2)?)?,
         PathBuf::from(args.get(3)?),
     ))
+}
+
+fn parse_render_args(
+    args: &[OsString],
+) -> Option<(PathBuf, u32, PathBuf, u32, Option<PathBuf>)> {
+    if args.len() < 4 {
+        return None;
+    }
+
+    let path = PathBuf::from(args.get(1)?);
+    let page = parse_u32_argument(args.get(2)?)?;
+    let output = PathBuf::from(args.get(3)?);
+    let mut dpi = 72u32;
+    let mut font = None;
+    let mut saw_dpi = false;
+    let mut saw_font = false;
+    let mut index = 4usize;
+
+    while index < args.len() {
+        match args.get(index)?.to_str()? {
+            "--dpi" if !saw_dpi => {
+                dpi = parse_u32_argument(args.get(index.saturating_add(1))?)?;
+                if dpi == 0 {
+                    return None;
+                }
+                saw_dpi = true;
+                index = index.saturating_add(2);
+            }
+            "--font" if !saw_font => {
+                font = Some(PathBuf::from(args.get(index.saturating_add(1))?));
+                saw_font = true;
+                index = index.saturating_add(2);
+            }
+            _ => return None,
+        }
+    }
+
+    Some((path, page, output, dpi, font))
 }
 
 fn parse_summary_args(args: &[OsString]) -> Option<(PathBuf, Limits)> {
@@ -920,6 +971,112 @@ fn run_image(path: &Path, object_number: u32, output: &Path, limits: Limits) -> 
     0
 }
 
+fn read_bounded(path: &Path, maximum: u64) -> std::io::Result<Vec<u8>> {
+    let file = std::fs::File::open(path)?;
+    let mut reader = file.take(maximum.saturating_add(1));
+    let mut bytes = Vec::new();
+    reader.read_to_end(&mut bytes)?;
+    if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > maximum {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "font exceeds the decoded byte limit",
+        ));
+    }
+    Ok(bytes)
+}
+
+fn run_render(
+    path: &Path,
+    page_index: u32,
+    output: &Path,
+    dpi: u32,
+    font_path: Option<&Path>,
+    limits: Limits,
+) -> u8 {
+    let source = match file::open(path, limits.max_file_bytes) {
+        Ok(source) => source,
+        Err(error) => {
+            eprintln!("{error}");
+            return 3;
+        }
+    };
+    let document = match Document::open(source, limits) {
+        Ok(document) => document,
+        Err(error) => {
+            eprintln!("{error}");
+            return 3;
+        }
+    };
+
+    let fallback_font = match font_path {
+        Some(font_path) => match read_bounded(font_path, limits.max_decoded_bytes) {
+            Ok(bytes) => Some(Arc::<[u8]>::from(bytes)),
+            Err(error) => {
+                eprintln!("{error}");
+                return 3;
+            }
+        },
+        None => None,
+    };
+
+    let mut resolver = document.resolver();
+    let page = {
+        let walk = match PageWalk::new(&mut resolver) {
+            Ok(walk) => walk,
+            Err(error) => {
+                eprintln!("{error}");
+                return 3;
+            }
+        };
+        let mut found = None;
+        for item in walk {
+            match item {
+                Ok(page) if page.index == page_index => {
+                    found = Some(page);
+                    break;
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    eprintln!("{error}");
+                    return 3;
+                }
+            }
+        }
+        found
+    };
+    let Some(page) = page else {
+        eprintln!("missing page {page_index}");
+        return 3;
+    };
+
+    let options = RenderOptions {
+        scale: dpi as f32 / 72.0,
+        fallback_font,
+    };
+    let raster = match rasterize_page(
+        &mut resolver,
+        &page,
+        &options,
+        [255, 255, 255, 255],
+    ) {
+        Ok(raster) => raster,
+        Err(error) => {
+            eprintln!("{error}");
+            return 3;
+        }
+    };
+    let png = encode_png(&raster);
+    if png.is_empty() {
+        eprintln!("PNG encoding failed");
+        return 3;
+    }
+    if let Err(error) = std::fs::write(output, png) {
+        eprintln!("{error}");
+        return 3;
+    }
+    0
+}
+
 fn run_summary(path: &Path, limits: Limits) -> u8 {
     let source = match file::open(path, limits.max_file_bytes) {
         Ok(source) => source,
@@ -1230,6 +1387,7 @@ struct BenchSample {
     pages_ms: f64,
     decode_ms: f64,
     text_ms: f64,
+    render_ms: f64,
     pages: u64,
     decoded_bytes: u64,
     glyphs: u64,
@@ -1261,6 +1419,7 @@ fn bench_sample(path: &Path, limits: Limits) -> Result<BenchSample, String> {
     let mut pages_ms = 0.0;
     let mut decode_ms = 0.0;
     let mut text_ms = 0.0;
+    let mut render_ms = 0.0;
     let mut pages = Vec::new();
     let mut decoded_bytes = 0u64;
     let mut glyphs = 0u64;
@@ -1324,6 +1483,25 @@ fn bench_sample(path: &Path, limits: Limits) -> Result<BenchSample, String> {
         let text_start = Instant::now();
         glyphs = text::scan_text(&document, &pages, &mut refusal);
         text_ms = text_start.elapsed().as_secs_f64() * 1000.0;
+
+        let render_start = Instant::now();
+        if let Some(page) = pages.first() {
+            let options = RenderOptions {
+                scale: 1.0,
+                fallback_font: None,
+            };
+            if let Err(error) = rasterize_page(
+                &mut resolver,
+                page,
+                &options,
+                [255, 255, 255, 255],
+            ) {
+                if refusal.is_none() {
+                    refusal = Some(error.code().to_string());
+                }
+            }
+        }
+        render_ms = render_start.elapsed().as_secs_f64() * 1000.0;
     }
 
     Ok(BenchSample {
@@ -1333,6 +1511,7 @@ fn bench_sample(path: &Path, limits: Limits) -> Result<BenchSample, String> {
         pages_ms,
         decode_ms,
         text_ms,
+        render_ms,
         pages: pages.len() as u64,
         decoded_bytes,
         glyphs,
@@ -1397,6 +1576,7 @@ fn run_bench(paths: &[PathBuf], repeat: usize, limits: Limits) -> u8 {
         let pages_ms = median_f64(samples.iter().map(|sample| sample.pages_ms));
         let decode_ms = median_f64(samples.iter().map(|sample| sample.decode_ms));
         let text_ms = median_f64(samples.iter().map(|sample| sample.text_ms));
+        let render_ms = median_f64(samples.iter().map(|sample| sample.render_ms));
         let pages = median_u64(samples.iter().map(|sample| sample.pages));
         let glyphs = median_u64(samples.iter().map(|sample| sample.glyphs));
         let decoded_bytes = median_u64(samples.iter().map(|sample| sample.decoded_bytes));
@@ -1429,6 +1609,8 @@ fn run_bench(paths: &[PathBuf], repeat: usize, limits: Limits) -> u8 {
         json.float(decode_ms);
         json.member("text_ms");
         json.float(text_ms);
+        json.member("render_ms");
+        json.float(render_ms);
         json.member("glyphs");
         json.number(glyphs);
         json.member("pages");
@@ -2009,9 +2191,154 @@ fn semantic_with_warnings(
     )
 }
 
+fn parse_render_page_key(key: &str) -> Option<u32> {
+    key.strip_prefix("page.")?
+        .strip_suffix(".render")?
+        .parse()
+        .ok()
+}
+
+fn parse_pixel_key(key: &str) -> Option<(u32, u32, u32)> {
+    let value = key.strip_prefix("page.")?;
+    let (page, coordinates) = value.split_once(".pixel.")?;
+    let (x, y) = coordinates.split_once('.')?;
+    if y.contains('.') {
+        return None;
+    }
+    Some((page.parse().ok()?, x.parse().ok()?, y.parse().ok()?))
+}
+
+fn mark_render_failure(
+    actuals: &mut BTreeMap<String, String>,
+    expectations: &[(String, String)],
+    page_index: u32,
+    code: &str,
+) {
+    actuals.insert(
+        format!("page.{page_index}.render"),
+        code.to_string(),
+    );
+    for (key, _) in expectations {
+        if parse_pixel_key(key).is_some_and(|(index, _, _)| index == page_index) {
+            actuals.insert(key.clone(), "unavailable".to_string());
+        }
+    }
+}
+
+fn mark_requested_render_failures(
+    actuals: &mut BTreeMap<String, String>,
+    expectations: &[(String, String)],
+    code: &str,
+) {
+    let mut indices = BTreeMap::new();
+    for (key, _) in expectations {
+        if let Some(index) = parse_render_page_key(key)
+            .or_else(|| parse_pixel_key(key).map(|(index, _, _)| index))
+        {
+            indices.insert(index, ());
+        }
+    }
+    for index in indices.keys().copied() {
+        mark_render_failure(actuals, expectations, index, code);
+    }
+}
+
+fn pixel_rgb(raster: &pdf_raster::Raster, x: u32, y: u32) -> Option<String> {
+    if x >= raster.width || y >= raster.height {
+        return None;
+    }
+    let width = usize::try_from(raster.width).ok()?;
+    let x = usize::try_from(x).ok()?;
+    let y = usize::try_from(y).ok()?;
+    let pixel = y.checked_mul(width)?.checked_add(x)?;
+    let start = pixel.checked_mul(4)?;
+    let end = start.checked_add(3)?;
+    let rgb = raster.rgba.get(start..end)?;
+    let r = rgb.first().copied()?;
+    let g = rgb.get(1).copied()?;
+    let b = rgb.get(2).copied()?;
+    Some(format!("{r:02x}{g:02x}{b:02x}"))
+}
+
+fn parse_rgb_hex(value: &str) -> Option<[u8; 3]> {
+    if value.len() != 6 {
+        return None;
+    }
+    Some([
+        u8::from_str_radix(value.get(0..2)?, 16).ok()?,
+        u8::from_str_radix(value.get(2..4)?, 16).ok()?,
+        u8::from_str_radix(value.get(4..6)?, 16).ok()?,
+    ])
+}
+
+fn pixel_manifest_matches(expected: &str, actual: &str) -> bool {
+    let (Some(expected), Some(actual)) = (parse_rgb_hex(expected), parse_rgb_hex(actual)) else {
+        return false;
+    };
+    expected
+        .iter()
+        .zip(actual.iter())
+        .all(|(expected, actual)| expected.abs_diff(*actual) <= 8)
+}
+
+fn render_fixture_expectations(
+    actuals: &mut BTreeMap<String, String>,
+    document: &Document,
+    pages: &[Page],
+    expectations: &[(String, String)],
+    warnings: &mut Vec<WarningRecord>,
+) {
+    let mut indices = BTreeMap::new();
+    for (key, _) in expectations {
+        if let Some(index) = parse_render_page_key(key)
+            .or_else(|| parse_pixel_key(key).map(|(index, _, _)| index))
+        {
+            indices.insert(index, ());
+        }
+    }
+
+    for index in indices.keys().copied() {
+        let Some(page) = pages.iter().find(|page| page.index == index) else {
+            mark_render_failure(actuals, expectations, index, "missing_page");
+            continue;
+        };
+        let mut resolver = document.resolver();
+        let options = RenderOptions {
+            scale: 1.0,
+            fallback_font: None,
+        };
+        match rasterize_page(
+            &mut resolver,
+            page,
+            &options,
+            [255, 255, 255, 255],
+        ) {
+            Ok(raster) => {
+                actuals.insert(format!("page.{index}.render"), "ok".to_string());
+                for (key, _) in expectations {
+                    if let Some((page_index, x, y)) = parse_pixel_key(key) {
+                        if page_index == index {
+                            actuals.insert(
+                                key.clone(),
+                                pixel_rgb(&raster, x, y)
+                                    .unwrap_or_else(|| "unavailable".to_string()),
+                            );
+                        }
+                    }
+                }
+            }
+            Err(error) => {
+                mark_render_failure(actuals, expectations, index, error.code());
+            }
+        }
+        append_resolver_warnings(&mut resolver, warnings);
+    }
+}
+
 fn actual_fixture_values(
     path: &Path,
     limits: Limits,
+    expectations: &[(String, String)],
 ) -> Result<(BTreeMap<String, String>, Vec<String>), String> {
     let source = file::open(path, limits.max_file_bytes).map_err(|error| error.to_string())?;
     let mut actuals = BTreeMap::new();
@@ -2028,6 +2355,7 @@ fn actual_fixture_values(
         }
         Err(error) => {
             actuals.insert("refusal".to_string(), error.code().to_string());
+            mark_requested_render_failures(&mut actuals, expectations, error.code());
             return Ok((actuals, Vec::new()));
         }
     };
@@ -2116,6 +2444,13 @@ fn actual_fixture_values(
         text::fixture_values(&mut actuals, &prefix, &receipt);
     }
 
+    render_fixture_expectations(
+        &mut actuals,
+        &document,
+        &report.pages,
+        expectations,
+        &mut report.warnings,
+    );
     append_resolver_warnings(&mut resolver, &mut report.warnings);
     append_resolver_warnings(&mut text_resolver, &mut report.warnings);
     append_resolver_warnings(&mut image_resolver, &mut report.warnings);
@@ -2193,7 +2528,11 @@ fn run_check(directory: &Path) -> u8 {
             checked_keys = checked_keys.saturating_add(1);
         }
 
-        let (actuals, warnings) = match actual_fixture_values(&pdf_path, manifest.limits) {
+        let (actuals, warnings) = match actual_fixture_values(
+            &pdf_path,
+            manifest.limits,
+            &manifest.expectations,
+        ) {
             Ok(values) => values,
             Err(error) => {
                 eprintln!("{error}");
@@ -2216,7 +2555,15 @@ fn run_check(directory: &Path) -> u8 {
                 .cloned()
                 .unwrap_or_else(|| "unavailable".to_string());
 
-            if actual.as_deref() == Some(expected.as_str()) {
+            let matches_expected = if key.starts_with("page.") && key.contains(".pixel.") {
+                actual
+                    .as_deref()
+                    .map(|value| pixel_manifest_matches(expected, value))
+                    .unwrap_or(false)
+            } else {
+                actual.as_deref() == Some(expected.as_str())
+            };
+            if matches_expected {
                 println!("PASS {fixture_name} {key}");
             } else {
                 println!("FAIL {fixture_name} {key} expected={expected} got={got}");
