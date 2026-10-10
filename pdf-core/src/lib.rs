@@ -5,12 +5,28 @@ extern crate alloc;
 #[cfg(feature = "std")]
 extern crate std;
 
+pub mod document;
+pub mod error;
+#[cfg(feature = "std")]
+pub mod file;
+pub mod filter;
 pub mod lex;
+pub mod limits;
 pub mod object;
-pub mod resolve;
+pub mod objstm;
+pub mod pages;
 pub mod source;
 pub mod work;
+pub mod xref;
 
-pub use object::{parse_object, Object, PdfError};
+pub use document::{Document, Resolver};
+pub use error::{DocError, Warning};
+pub use limits::{LimitKind, Limits, Refusal};
+pub use object::{
+    parse_indirect, parse_value, ArrayRef, DictRef, Name, Object, PdfStr, Value, ValueKind,
+    ValueRef,
+};
 pub use source::PdfSource;
 pub use work::{ObjectRef, ObjectWork, WorkBudget};
+pub use xref::{Xref, XrefCounts, XrefEntry, XrefKind};
+

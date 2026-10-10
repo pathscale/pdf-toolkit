@@ -124,7 +124,7 @@ impl std::error::Error for SourceError {}
 pub struct PdfSource {
     bytes: Arc<[u8]>,
     header: PdfHeader,
-    identity: SourceIdentity,
+    revision: u64,
 }
 
 impl PdfSource {
@@ -140,15 +140,10 @@ impl PdfSource {
     ) -> Result<Self, SourceError> {
         let bytes = bytes.into();
         let header = parse_header(&bytes)?;
-        let identity = SourceIdentity {
-            digest: sha256(&bytes),
-            revision,
-        };
-
         Ok(Self {
             bytes,
             header,
-            identity,
+            revision,
         })
     }
 
@@ -157,14 +152,25 @@ impl PdfSource {
         &self.bytes
     }
 
+    /// Returns shared ownership of the exact source bytes.
+    pub fn shared(&self) -> Arc<[u8]> {
+        self.bytes.clone()
+    }
+
     /// Returns the parsed header and version.
     pub const fn header(&self) -> PdfHeader {
         self.header
     }
 
-    /// Returns the stable content digest and source revision.
-    pub const fn identity(&self) -> SourceIdentity {
-        self.identity
+    /// Computes the stable content digest and returns it with the source revision.
+    ///
+    /// Hashing reads every byte (about 400 MB/s), so opening a source never does it;
+    /// callers that need an identity for a receipt compute it once and keep it.
+    pub fn identity(&self) -> SourceIdentity {
+        SourceIdentity {
+            digest: sha256(&self.bytes),
+            revision: self.revision,
+        }
     }
 
     /// Returns a checked borrowed slice of the source bytes.
@@ -331,3 +337,4 @@ fn compress_block(state: &mut [u32; 8], block: &[u8], round_constants: &[u32; 64
     state[6] = state[6].wrapping_add(g);
     state[7] = state[7].wrapping_add(h);
 }
+

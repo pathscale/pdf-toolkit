@@ -1,763 +1,693 @@
+use alloc::borrow::Cow;
+use alloc::sync::Arc;
 use alloc::vec::Vec;
-use core::fmt;
 use core::ops::Range;
 
+use crate::error::{malformed, DocError};
 use crate::lex::{LexError, Lexer, LexerLimits, Token, TokenKind};
-use crate::source::{PdfSource, RawSpan};
-use crate::work::{ObjectRef, ObjectWork, WorkBudget, WorkError};
+use crate::limits::{check, LimitKind, Limits, Refusal};
+use crate::work::ObjectRef;
 
-/// A half-open byte range in the original PDF source.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub struct ObjectSpan {
-    start: usize,
-    end: usize,
-}
-
-impl ObjectSpan {
-    pub const fn start(self) -> usize {
-        self.start
-    }
-
-    pub const fn end(self) -> usize {
-        self.end
-    }
-
-    pub fn range(self) -> Range<usize> {
-        self.start..self.end
-    }
-}
-
-/// A borrowed byte sequence and its range in the original source.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub struct RawObjectValue<'source> {
-    bytes: &'source [u8],
-    span: ObjectSpan,
-}
-
-impl<'source> RawObjectValue<'source> {
-    pub const fn as_bytes(self) -> &'source [u8] {
-        self.bytes
-    }
-
-    pub const fn span(self) -> ObjectSpan {
-        self.span
-    }
-
-    pub fn range(self) -> Range<usize> {
-        self.span.range()
-    }
-}
-
-/// An index into the flat value graph owned by an indirect object.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub struct ObjectValueIndex(usize);
-
-impl ObjectValueIndex {
-    pub const fn index(self) -> usize {
-        self.0
-    }
-}
-
-/// A dictionary key and the graph index of its value.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct DictionaryEntry<'source> {
-    key: RawObjectValue<'source>,
-    value: ObjectValueIndex,
-}
-
-impl<'source> DictionaryEntry<'source> {
-    pub const fn key(self) -> RawObjectValue<'source> {
-        self.key
-    }
-
-    pub const fn value(self) -> ObjectValueIndex {
-        self.value
-    }
-}
-
-/// The kind of a direct PDF value.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum ObjectKind<'source> {
-    Array(Vec<ObjectValueIndex>),
-    Dictionary(Vec<DictionaryEntry<'source>>),
-    String,
-    Name,
-    Number,
-    Boolean(bool),
+pub enum ValueKind {
     Null,
-    Reference(ObjectRef),
+    Bool,
+    Int,
+    Real,
+    Name,
+    String,
+    Array,
+    Dict,
+    Ref,
 }
 
-/// One node in an indirect object's direct value graph.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ObjectValue<'source> {
-    raw: RawObjectValue<'source>,
-    kind: ObjectKind<'source>,
+#[derive(Clone, Debug)]
+enum Kind {
+    Null,
+    Bool(bool),
+    Int(i64),
+    Real(f64),
+    Name,
+    String,
+    Array(Vec<usize>),
+    Dict(Vec<(Range<usize>, usize)>),
+    Ref(ObjectRef),
 }
 
-impl<'source> ObjectValue<'source> {
-    pub const fn raw(&self) -> RawObjectValue<'source> {
-        self.raw
-    }
-
-    pub const fn kind(&self) -> &ObjectKind<'source> {
-        &self.kind
-    }
+#[derive(Clone, Debug)]
+struct Node {
+    span: Range<usize>,
+    kind: Kind,
 }
 
-/// A validated indirect object and its parsed, flat direct-value graph.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct Object<'source> {
-    id: ObjectRef,
-    root: ObjectValueIndex,
-    values: Vec<ObjectValue<'source>>,
-    raw: RawObjectValue<'source>,
-    token_count: usize,
+#[derive(Clone, Debug)]
+struct ObjectData {
+    buf: Arc<[u8]>,
+    nodes: Vec<Node>,
+    root: usize,
+    id: Option<ObjectRef>,
+    stream: Option<Range<usize>>,
+    stream_start: Option<usize>,
+    syntax_bytes: u64,
+    token_count: u32,
+    recovered: bool,
 }
 
-impl<'source> Object<'source> {
-    pub const fn id(&self) -> ObjectRef {
-        self.id
-    }
+#[derive(Clone, Debug)]
+pub struct Object(Arc<ObjectData>);
 
-    pub const fn root_index(&self) -> ObjectValueIndex {
-        self.root
-    }
-
-    pub fn root_value(&self) -> Option<&ObjectValue<'source>> {
-        self.value(self.root)
-    }
-
-    pub fn value(&self, index: ObjectValueIndex) -> Option<&ObjectValue<'source>> {
-        self.values.get(index.0)
-    }
-
-    /// Returns every node in source order without following indirect references.
-    pub fn values(&self) -> &[ObjectValue<'source>] {
-        &self.values
-    }
-
-    pub const fn raw(&self) -> RawObjectValue<'source> {
-        self.raw
-    }
-
-    pub const fn token_count(&self) -> usize {
-        self.token_count
-    }
+#[derive(Clone, Copy)]
+pub struct ValueRef<'o> {
+    object: &'o Object,
+    index: usize,
 }
 
-/// Errors returned while parsing one bounded indirect object.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum PdfError {
-    Work(WorkError),
-    Lexical {
-        error: LexError,
-        base_offset: usize,
-    },
-    InvalidObjectHeader {
-        offset: usize,
-    },
-    ObjectIdMismatch {
-        expected: ObjectRef,
-        found: ObjectRef,
-    },
-    InvalidValue {
-        offset: usize,
-    },
-    InvalidReference {
-        offset: usize,
-    },
-    DictionaryKeyNotName {
-        offset: usize,
-    },
-    UnexpectedToken {
-        offset: usize,
-    },
-    UnexpectedEnd {
-        offset: usize,
-    },
-    UnclosedContainer {
-        offset: usize,
-    },
-    InvalidSpan {
-        start: usize,
-        end: usize,
-    },
-    OffsetOverflow {
-        offset: usize,
-    },
-    TokenCountOverflow {
-        offset: usize,
-    },
+#[derive(Clone, Copy)]
+pub struct ArrayRef<'o>(ValueRef<'o>);
+
+#[derive(Clone, Copy)]
+pub struct DictRef<'o>(ValueRef<'o>);
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Name<'o> {
+    bytes: &'o [u8],
 }
 
-impl fmt::Display for PdfError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Work(error) => fmt::Display::fmt(error, formatter),
-            Self::Lexical { error, base_offset } => {
-                write!(formatter, "PDF lexical error at base byte {base_offset}: {error:?}")
-            }
-            Self::InvalidObjectHeader { offset } => {
-                write!(formatter, "invalid indirect object header at byte {offset}")
-            }
-            Self::ObjectIdMismatch { expected, found } => write!(
-                formatter,
-                "xref identifies object {} {}, but offset contains object {} {}",
-                expected.number(),
-                expected.generation(),
-                found.number(),
-                found.generation()
-            ),
-            Self::InvalidValue { offset } => {
-                write!(formatter, "invalid PDF object value at byte {offset}")
-            }
-            Self::InvalidReference { offset } => {
-                write!(formatter, "invalid indirect reference at byte {offset}")
-            }
-            Self::DictionaryKeyNotName { offset } => {
-                write!(formatter, "dictionary key is not a name at byte {offset}")
-            }
-            Self::UnexpectedToken { offset } => {
-                write!(formatter, "unexpected PDF token at byte {offset}")
-            }
-            Self::UnexpectedEnd { offset } => {
-                write!(formatter, "unexpected end of indirect object at byte {offset}")
-            }
-            Self::UnclosedContainer { offset } => {
-                write!(formatter, "unclosed PDF container at byte {offset}")
-            }
-            Self::InvalidSpan { start, end } => {
-                write!(formatter, "invalid parsed span {start}..{end}")
-            }
-            Self::OffsetOverflow { offset } => {
-                write!(formatter, "PDF source offset overflows at byte {offset}")
-            }
-            Self::TokenCountOverflow { offset } => {
-                write!(formatter, "PDF token count overflows at byte {offset}")
-            }
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PdfStr<'o> {
+    bytes: &'o [u8],
+}
+
+#[derive(Clone, Debug)]
+pub struct Value {
+    object: Object,
+    index: usize,
+}
+
+impl Object {
+    pub fn id(&self) -> Option<ObjectRef> { self.0.id }
+    pub fn root(&self) -> ValueRef<'_> { ValueRef { object: self, index: self.0.root } }
+    pub fn dict(&self) -> Option<DictRef<'_>> { self.root().as_dict() }
+    pub fn is_stream(&self) -> bool { self.0.stream_start.is_some() }
+    pub fn stream_raw(&self) -> Option<&[u8]> {
+        self.0.stream.as_ref().and_then(|range| self.0.buf.get(range.clone()))
+    }
+    pub fn stream_range(&self) -> Option<Range<usize>> { self.0.stream.clone() }
+    pub fn buffer(&self) -> &Arc<[u8]> { &self.0.buf }
+    pub fn token_count(&self) -> u32 { self.0.token_count }
+    pub(crate) fn stream_recovered(&self) -> bool { self.0.recovered }
+
+    pub(crate) fn finish_stream(
+        &mut self,
+        length: Option<u64>,
+        limits: &Limits,
+    ) -> Result<(), DocError> {
+        if self.0.stream.is_some() {
+            return Ok(());
         }
-    }
-}
-
-impl From<WorkError> for PdfError {
-    fn from(error: WorkError) -> Self {
-        Self::Work(error)
-    }
-}
-
-#[cfg(feature = "std")]
-impl std::error::Error for PdfError {}
-
-/// Parses one indirect object at the exact offset recorded by `work`.
-///
-/// The returned value graph owns only node metadata. Every raw value borrows
-/// directly from `source`; indirect references are recorded but not followed.
-pub fn parse_object<'source>(
-    source: &'source PdfSource,
-    work: ObjectWork,
-    budget: &WorkBudget,
-) -> Result<Object<'source>, PdfError> {
-    let candidate: RawSpan<'source> = work.span(source, budget)?;
-    let input = candidate.as_bytes();
-    let base_offset = candidate.range().start;
-    let mut cursor = TokenCursor::new(input, base_offset, budget);
-
-    let first = required_token(&mut cursor, base_offset)?;
-    if first.kind() != TokenKind::Number || first.span().start() != 0 {
-        return Err(PdfError::InvalidObjectHeader {
-            offset: absolute_offset(base_offset, first.span().start())?,
-        });
-    }
-    let second = required_token(&mut cursor, base_offset)?;
-    let object_keyword = required_token(&mut cursor, base_offset)?;
-    if second.kind() != TokenKind::Number {
-        return Err(PdfError::InvalidObjectHeader {
-            offset: absolute_offset(base_offset, second.span().start())?,
-        });
-    }
-    if object_keyword.kind() != TokenKind::Keyword || object_keyword.bytes() != b"obj" {
-        return Err(PdfError::InvalidObjectHeader {
-            offset: absolute_offset(base_offset, object_keyword.span().start())?,
-        });
-    }
-
-    let number = parse_unsigned(first.bytes()).ok_or(PdfError::InvalidObjectHeader {
-        offset: absolute_offset(base_offset, first.span().start())?,
-    })?;
-    let generation = parse_unsigned(second.bytes()).ok_or(PdfError::InvalidObjectHeader {
-        offset: absolute_offset(base_offset, second.span().start())?,
-    })?;
-    let found = match (u32::try_from(number), u16::try_from(generation)) {
-        (Ok(number), Ok(generation)) => ObjectRef::new(number, generation),
-        _ => {
-            return Err(PdfError::InvalidObjectHeader {
-                offset: absolute_offset(base_offset, first.span().start())?,
-            });
-        }
-    };
-    let expected = work.id();
-    if found != expected {
-        return Err(PdfError::ObjectIdMismatch { expected, found });
-    }
-
-    let (root, values) = parse_value_graph(&mut cursor, input, base_offset, budget)?;
-    let end_object = required_token(&mut cursor, base_offset)?;
-    if end_object.kind() != TokenKind::Keyword || end_object.bytes() != b"endobj" {
-        return Err(PdfError::UnexpectedToken {
-            offset: absolute_offset(base_offset, end_object.span().start())?,
-        });
-    }
-
-    let raw = raw_value(input, base_offset, 0, end_object.span().end())?;
-    Ok(Object {
-        id: found,
-        root,
-        values,
-        raw,
-        token_count: cursor.consumed(),
-    })
-}
-
-#[derive(Debug)]
-enum ContainerFrame<'source> {
-    Array {
-        start: usize,
-        values: Vec<ObjectValueIndex>,
-    },
-    Dictionary {
-        start: usize,
-        entries: Vec<DictionaryEntry<'source>>,
-        pending_key: Option<RawObjectValue<'source>>,
-    },
-}
-
-fn parse_value_graph<'source>(
-    cursor: &mut TokenCursor<'source>,
-    input: &'source [u8],
-    base_offset: usize,
-    budget: &WorkBudget,
-) -> Result<(ObjectValueIndex, Vec<ObjectValue<'source>>), PdfError> {
-    let mut values = Vec::new();
-    let mut frames = Vec::<ContainerFrame<'source>>::new();
-    let mut root = None;
-
-    loop {
-        if frames.is_empty() && root.is_some() {
-            break;
-        }
-
-        let dictionary_needs_key = matches!(
-            frames.last(),
-            Some(ContainerFrame::Dictionary {
-                pending_key: None,
-                ..
-            })
-        );
-        let token = required_token(cursor, base_offset)?;
-
-        if dictionary_needs_key {
-            if token.kind() == TokenKind::DictionaryEnd {
-                let frame = frames.pop().ok_or(PdfError::UnclosedContainer {
-                    offset: absolute_offset(base_offset, token.span().start())?,
-                })?;
-                let ContainerFrame::Dictionary { start, entries, .. } = frame else {
-                    return Err(PdfError::UnexpectedToken {
-                        offset: absolute_offset(base_offset, token.span().start())?,
-                    });
-                };
-                let node = ObjectValue {
-                    raw: raw_value(input, base_offset, start, token.span().end())?,
-                    kind: ObjectKind::Dictionary(entries),
-                };
-                attach_value(node, &mut values, &mut frames, &mut root)?;
-            } else if token.kind() == TokenKind::Name {
-                let key = raw_token(input, base_offset, token)?;
-                match frames.last_mut() {
-                    Some(ContainerFrame::Dictionary { pending_key, .. }) => {
-                        *pending_key = Some(key);
-                    }
-                    _ => {
-                        return Err(PdfError::UnexpectedToken {
-                            offset: absolute_offset(base_offset, token.span().start())?,
-                        });
-                    }
+        let start = self.0.stream_start.ok_or_else(|| malformed(0, "stream"))?;
+        let remaining = limits.max_object_bytes.saturating_sub(self.0.syntax_bytes);
+        let exact = length
+            .and_then(|length| usize::try_from(length).ok())
+            .and_then(|length| start.checked_add(length))
+            .filter(|end| *end <= self.0.buf.len())
+            .and_then(|end| stream_tail(&self.0.buf, end, remaining).map(|tail| (end, tail)));
+        let (end, tail, recovered) = if let Some((end, tail)) = exact {
+            (end, tail, false)
+        } else {
+            let bound = limits.max_object_bytes.min(limits.max_decoded_bytes);
+            let scan_len = usize::try_from(bound).unwrap_or(usize::MAX);
+            let cap = start.saturating_add(scan_len).min(self.0.buf.len());
+            let input = self.0.buf.get(start..cap).ok_or_else(|| malformed(start, "stream"))?;
+            let mut found = None;
+            for (relative, window) in input.windows(9).enumerate() {
+                if window != b"endstream" {
+                    continue;
                 }
+                let marker = start.saturating_add(relative);
+                if marker > start && !self.0.buf.get(marker.saturating_sub(1)).copied().map(whitespace).unwrap_or(false) {
+                    continue;
+                }
+                if let Some(tail) = stream_tail(&self.0.buf, marker, remaining) {
+                    let mut end = marker;
+                    if end > start && self.0.buf.get(end.saturating_sub(1)) == Some(&b'\n') {
+                        end = end.saturating_sub(1);
+                        if end > start && self.0.buf.get(end.saturating_sub(1)) == Some(&b'\r') {
+                            end = end.saturating_sub(1);
+                        }
+                    } else if end > start && self.0.buf.get(end.saturating_sub(1)) == Some(&b'\r') {
+                        end = end.saturating_sub(1);
+                    }
+                    found = Some((end, tail));
+                    break;
+                }
+            }
+            match found {
+                Some((end, tail)) => (end, tail, true),
+                None if cap < self.0.buf.len() => {
+                    return Err(DocError::Refused(Refusal {
+                        limit: if limits.max_object_bytes <= limits.max_decoded_bytes {
+                            LimitKind::ObjectBytes
+                        } else {
+                            LimitKind::DecodedBytes
+                        },
+                        requested: bound.saturating_add(1),
+                        maximum: bound,
+                    }));
+                }
+                None => return Err(malformed(start, "endstream")),
+            }
+        };
+        let syntax = self.0.syntax_bytes.saturating_add(tail.saturating_sub(end) as u64);
+        check(LimitKind::ObjectBytes, syntax, limits.max_object_bytes)?;
+        let tokens = u64::from(self.0.token_count).saturating_add(2);
+        check(LimitKind::Tokens, tokens, u64::from(limits.max_tokens_per_object))?;
+        let data = Arc::make_mut(&mut self.0);
+        data.stream = Some(start..end);
+        data.syntax_bytes = syntax;
+        data.token_count = u32::try_from(tokens).map_err(|_| malformed(start, "token count"))?;
+        data.recovered = recovered;
+        Ok(())
+    }
+}
+
+impl<'o> ValueRef<'o> {
+    fn node(&self) -> Option<&'o Node> { self.object.0.nodes.get(self.index) }
+    pub fn kind(&self) -> ValueKind {
+        match self.node().map(|node| &node.kind) {
+            Some(Kind::Bool(_)) => ValueKind::Bool,
+            Some(Kind::Int(_)) => ValueKind::Int,
+            Some(Kind::Real(_)) => ValueKind::Real,
+            Some(Kind::Name) => ValueKind::Name,
+            Some(Kind::String) => ValueKind::String,
+            Some(Kind::Array(_)) => ValueKind::Array,
+            Some(Kind::Dict(_)) => ValueKind::Dict,
+            Some(Kind::Ref(_)) => ValueKind::Ref,
+            _ => ValueKind::Null,
+        }
+    }
+    pub fn raw(&self) -> &'o [u8] {
+        self.node().and_then(|node| self.object.0.buf.get(node.span.clone())).unwrap_or(&[])
+    }
+    pub fn span(&self) -> Range<usize> {
+        self.node().map(|node| node.span.clone()).unwrap_or(0..0)
+    }
+    pub fn as_bool(&self) -> Option<bool> {
+        match self.node().map(|node| &node.kind) { Some(Kind::Bool(value)) => Some(*value), _ => None }
+    }
+    pub fn as_i64(&self) -> Option<i64> {
+        match self.node().map(|node| &node.kind) { Some(Kind::Int(value)) => Some(*value), _ => None }
+    }
+    pub fn as_f64(&self) -> Option<f64> {
+        match self.node().map(|node| &node.kind) {
+            Some(Kind::Int(value)) => Some(*value as f64),
+            Some(Kind::Real(value)) => Some(*value),
+            _ => None,
+        }
+    }
+    pub fn as_name(&self) -> Option<Name<'o>> {
+        (self.kind() == ValueKind::Name).then(|| Name { bytes: self.raw().get(1..).unwrap_or(&[]) })
+    }
+    pub fn as_str(&self) -> Option<PdfStr<'o>> {
+        (self.kind() == ValueKind::String).then(|| PdfStr { bytes: self.raw() })
+    }
+    pub fn as_array(&self) -> Option<ArrayRef<'o>> {
+        (self.kind() == ValueKind::Array).then(|| ArrayRef(*self))
+    }
+    pub fn as_dict(&self) -> Option<DictRef<'o>> {
+        (self.kind() == ValueKind::Dict).then(|| DictRef(*self))
+    }
+    pub fn as_ref(&self) -> Option<ObjectRef> {
+        match self.node().map(|node| &node.kind) { Some(Kind::Ref(value)) => Some(*value), _ => None }
+    }
+    pub fn is_null(&self) -> bool { self.kind() == ValueKind::Null }
+    pub fn to_owned(&self) -> Value { Value { object: self.object.clone(), index: self.index } }
+}
+
+impl<'o> ArrayRef<'o> {
+    fn items(&self) -> &'o [usize] {
+        match self.0.node().map(|node| &node.kind) { Some(Kind::Array(items)) => items, _ => &[] }
+    }
+    pub fn len(&self) -> usize { self.items().len() }
+    pub fn is_empty(&self) -> bool { self.items().is_empty() }
+    pub fn get(&self, i: usize) -> Option<ValueRef<'o>> {
+        self.items().get(i).map(|index| ValueRef { object: self.0.object, index: *index })
+    }
+    pub fn iter(&self) -> impl Iterator<Item = ValueRef<'o>> + 'o {
+        let object = self.0.object;
+        self.items().iter().map(move |index| ValueRef { object, index: *index })
+    }
+}
+
+impl<'o> DictRef<'o> {
+    fn entries(&self) -> &'o [(Range<usize>, usize)] {
+        match self.0.node().map(|node| &node.kind) { Some(Kind::Dict(entries)) => entries, _ => &[] }
+    }
+    pub fn len(&self) -> usize { self.entries().len() }
+    pub fn get(&self, key: &[u8]) -> Option<ValueRef<'o>> {
+        self.entries().iter().rev().find_map(|(range, index)| {
+            let name = Name { bytes: self.0.object.0.buf.get(range.clone()).unwrap_or(&[]) };
+            name.eq_bytes(key).then(|| ValueRef { object: self.0.object, index: *index })
+        })
+    }
+    pub fn iter(&self) -> impl Iterator<Item = (Name<'o>, ValueRef<'o>)> + 'o {
+        let object = self.0.object;
+        self.entries().iter().map(move |(range, index)| (
+            Name { bytes: object.0.buf.get(range.clone()).unwrap_or(&[]) },
+            ValueRef { object, index: *index },
+        ))
+    }
+}
+
+impl<'o> Name<'o> {
+    pub fn encoded(&self) -> &'o [u8] { self.bytes }
+    pub fn eq_bytes(&self, decoded: &[u8]) -> bool { NameBytes(self.bytes).eq(decoded.iter().copied()) }
+    pub fn decoded(&self) -> Cow<'o, [u8]> {
+        if self.bytes.contains(&b'#') {
+            Cow::Owned(NameBytes(self.bytes).collect())
+        } else {
+            Cow::Borrowed(self.bytes)
+        }
+    }
+}
+
+struct NameBytes<'a>(&'a [u8]);
+
+impl Iterator for NameBytes<'_> {
+    type Item = u8;
+    fn next(&mut self) -> Option<u8> {
+        let (&first, rest) = self.0.split_first()?;
+        if first == b'#' {
+            if let (Some(high), Some(low)) = (
+                rest.first().copied().and_then(hex),
+                rest.get(1).copied().and_then(hex),
+            ) {
+                self.0 = rest.get(2..).unwrap_or(&[]);
+                return Some((high << 4) | low);
+            }
+        }
+        self.0 = rest;
+        Some(first)
+    }
+}
+
+impl<'o> PdfStr<'o> {
+    pub fn raw(&self) -> &'o [u8] { self.bytes }
+    pub fn is_hex(&self) -> bool { self.bytes.first() == Some(&b'<') }
+    pub fn decode(&self) -> Vec<u8> {
+        let input = self.bytes.get(1..self.bytes.len().saturating_sub(1)).unwrap_or(&[]);
+        let mut out = Vec::new();
+        if self.is_hex() {
+            let mut high = None;
+            for digit in input.iter().copied().filter_map(hex) {
+                if let Some(first) = high.take() {
+                    out.push((first << 4) | digit);
+                } else {
+                    high = Some(digit);
+                }
+            }
+            if let Some(first) = high { out.push(first << 4); }
+            return out;
+        }
+        let mut pos = 0usize;
+        while let Some(byte) = input.get(pos).copied() {
+            pos = pos.saturating_add(1);
+            if byte == b'\\' {
+                let Some(escaped) = input.get(pos).copied() else { break };
+                pos = pos.saturating_add(1);
+                match escaped {
+                    b'n' => out.push(b'\n'),
+                    b'r' => out.push(b'\r'),
+                    b't' => out.push(b'\t'),
+                    b'b' => out.push(8),
+                    b'f' => out.push(12),
+                    b'\n' => {}
+                    b'\r' => {
+                        if input.get(pos) == Some(&b'\n') { pos = pos.saturating_add(1); }
+                    }
+                    b'0'..=b'7' => {
+                        let mut value = u16::from(escaped - b'0');
+                        for _ in 0..2 {
+                            match input.get(pos).copied() {
+                                Some(next @ b'0'..=b'7') => {
+                                    value = value.saturating_mul(8).saturating_add(u16::from(next - b'0'));
+                                    pos = pos.saturating_add(1);
+                                }
+                                _ => break,
+                            }
+                        }
+                        out.push(value as u8);
+                    }
+                    other => out.push(other),
+                }
+            } else if byte == b'\r' {
+                if input.get(pos) == Some(&b'\n') { pos = pos.saturating_add(1); }
+                out.push(b'\n');
             } else {
-                return Err(PdfError::DictionaryKeyNotName {
-                    offset: absolute_offset(base_offset, token.span().start())?,
-                });
+                out.push(byte);
+            }
+        }
+        out
+    }
+}
+
+impl Value {
+    pub fn get(&self) -> ValueRef<'_> { ValueRef { object: &self.object, index: self.index } }
+    pub fn object(&self) -> &Object { &self.object }
+}
+
+pub fn parse_value(
+    buf: &Arc<[u8]>,
+    range: Range<usize>,
+    id: Option<ObjectRef>,
+    limits: &Limits,
+) -> Result<Object, DocError> {
+    let mut cursor = Cursor::at(buf, range, limits)?;
+    let (nodes, root) = graph(&mut cursor, limits)?;
+    Ok(Object(Arc::new(ObjectData {
+        buf: buf.clone(),
+        nodes,
+        root,
+        id,
+        stream: None,
+        stream_start: None,
+        syntax_bytes: cursor.used() as u64,
+        token_count: cursor.count,
+        recovered: false,
+    })))
+}
+
+pub fn parse_indirect(
+    buf: &Arc<[u8]>,
+    offset: usize,
+    expected: ObjectRef,
+    limits: &Limits,
+) -> Result<Object, DocError> {
+    let mut object = parse_indirect_pending(buf, offset, expected, limits)?;
+    if object.is_stream() && object.stream_raw().is_none() {
+        object.finish_stream(None, limits)?;
+    }
+    Ok(object)
+}
+
+pub(crate) fn parse_indirect_pending(
+    buf: &Arc<[u8]>,
+    offset: usize,
+    expected: ObjectRef,
+    limits: &Limits,
+) -> Result<Object, DocError> {
+    let mut cursor = Cursor::at(buf, offset..buf.len(), limits)?;
+    let first = cursor.required()?;
+    let second = cursor.required()?;
+    let marker = cursor.required()?;
+    let number = unsigned(first.bytes()).and_then(|n| u32::try_from(n).ok());
+    let generation = unsigned(second.bytes()).and_then(|n| u16::try_from(n).ok());
+    if first.span().start() != 0 || marker.bytes() != b"obj" {
+        return Err(malformed(offset, "object header"));
+    }
+    let (Some(number), Some(generation)) = (number, generation) else {
+        return Err(malformed(offset, "object header"));
+    };
+    if number != expected.number() {
+        return Err(malformed(offset, "object number"));
+    }
+    let (nodes, root) = graph(&mut cursor, limits)?;
+    let end = cursor.required()?;
+    let mut stream_start = None;
+    if end.bytes() == b"stream" {
+        if !matches!(nodes.get(root).map(|node| &node.kind), Some(Kind::Dict(_))) {
+            return Err(malformed(cursor.position(), "stream dictionary"));
+        }
+        let mut start = cursor.position();
+        match buf.get(start).copied() {
+            Some(b'\r') => {
+                start = start.saturating_add(1);
+                if buf.get(start) == Some(&b'\n') { start = start.saturating_add(1); }
+            }
+            Some(b'\n') => start = start.saturating_add(1),
+            _ => return Err(malformed(start, "stream EOL")),
+        }
+        check(LimitKind::ObjectBytes, start.saturating_sub(offset) as u64, limits.max_object_bytes)?;
+        stream_start = Some(start);
+    } else if end.bytes() != b"endobj" {
+        return Err(malformed(cursor.position(), "endobj"));
+    }
+    let syntax_bytes = stream_start.unwrap_or(cursor.position()).saturating_sub(offset) as u64;
+    let mut object = Object(Arc::new(ObjectData {
+        buf: buf.clone(),
+        nodes,
+        root,
+        id: Some(ObjectRef::new(number, generation)),
+        stream: None,
+        stream_start,
+        syntax_bytes,
+        token_count: cursor.count,
+        recovered: false,
+    }));
+    if object.is_stream() {
+        let length = object.dict().and_then(|dict| dict.get(b"Length"));
+        let indirect = length.and_then(|value| value.as_ref()).is_some();
+        let direct = length.and_then(|value| value.as_i64()).and_then(|n| u64::try_from(n).ok());
+        if !indirect { object.finish_stream(direct, limits)?; }
+    }
+    Ok(object)
+}
+
+enum Frame {
+    Array { start: usize, items: Vec<usize> },
+    Dict { start: usize, entries: Vec<(Range<usize>, usize)>, key: Option<Range<usize>> },
+}
+
+fn graph(cursor: &mut Cursor<'_>, limits: &Limits) -> Result<(Vec<Node>, usize), DocError> {
+    let mut nodes = Vec::new();
+    let mut frames = Vec::new();
+    let mut root = None;
+    loop {
+        if frames.is_empty() {
+            if let Some(root) = root { return Ok((nodes, root)); }
+        }
+        let token = cursor.required()?;
+        let span = cursor.span(token);
+        if matches!(frames.last(), Some(Frame::Dict { key: None, .. })) && token.kind() != TokenKind::DictionaryEnd {
+            if token.kind() != TokenKind::Name { return Err(malformed(span.start, "dictionary key")); }
+            if let Some(Frame::Dict { key, .. }) = frames.last_mut() {
+                *key = Some(span.start.saturating_add(1)..span.end);
             }
             continue;
         }
-
-        match token.kind() {
-            TokenKind::ArrayEnd => {
-                let frame = frames.pop().ok_or(PdfError::UnexpectedToken {
-                    offset: absolute_offset(base_offset, token.span().start())?,
-                })?;
-                let ContainerFrame::Array {
-                    start,
-                    values: child_values,
-                } = frame
-                else {
-                    return Err(PdfError::UnexpectedToken {
-                        offset: absolute_offset(base_offset, token.span().start())?,
-                    });
+        let kind = match token.kind() {
+            TokenKind::ArrayStart | TokenKind::DictionaryStart => {
+                check(LimitKind::Depth, frames.len().saturating_add(1) as u64, u64::from(limits.max_depth))?;
+                if token.kind() == TokenKind::ArrayStart {
+                    frames.push(Frame::Array { start: span.start, items: Vec::new() });
+                } else {
+                    frames.push(Frame::Dict { start: span.start, entries: Vec::new(), key: None });
+                }
+                continue;
+            }
+            TokenKind::ArrayEnd | TokenKind::DictionaryEnd => {
+                let frame = frames.pop().ok_or_else(|| malformed(span.start, "container end"))?;
+                let (start, kind) = match frame {
+                    Frame::Array { start, items } if token.kind() == TokenKind::ArrayEnd => (start, Kind::Array(items)),
+                    Frame::Dict { start, entries, key: None } if token.kind() == TokenKind::DictionaryEnd => (start, Kind::Dict(entries)),
+                    _ => return Err(malformed(span.start, "container end")),
                 };
-                let node = ObjectValue {
-                    raw: raw_value(input, base_offset, start, token.span().end())?,
-                    kind: ObjectKind::Array(child_values),
-                };
-                attach_value(node, &mut values, &mut frames, &mut root)?;
+                attach(Node { span: start..span.end, kind }, &mut nodes, &mut frames, &mut root)?;
+                continue;
             }
-            TokenKind::DictionaryEnd => {
-                return Err(PdfError::UnexpectedToken {
-                    offset: absolute_offset(base_offset, token.span().start())?,
-                });
-            }
-            TokenKind::ArrayStart => {
-                check_container_depth(base_offset, token, frames.len(), budget)?;
-                frames.push(ContainerFrame::Array {
-                    start: token.span().start(),
-                    values: Vec::new(),
-                });
-            }
-            TokenKind::DictionaryStart => {
-                check_container_depth(base_offset, token, frames.len(), budget)?;
-                frames.push(ContainerFrame::Dictionary {
-                    start: token.span().start(),
-                    entries: Vec::new(),
-                    pending_key: None,
-                });
-            }
-            TokenKind::Name => {
-                let node = ObjectValue {
-                    raw: raw_token(input, base_offset, token)?,
-                    kind: ObjectKind::Name,
-                };
-                attach_value(node, &mut values, &mut frames, &mut root)?;
-            }
-            TokenKind::LiteralString | TokenKind::HexString => {
-                let node = ObjectValue {
-                    raw: raw_token(input, base_offset, token)?,
-                    kind: ObjectKind::String,
-                };
-                attach_value(node, &mut values, &mut frames, &mut root)?;
-            }
+            TokenKind::Name => Kind::Name,
+            TokenKind::LiteralString | TokenKind::HexString => Kind::String,
             TokenKind::Number => {
-                let node = parse_number_value(cursor, input, base_offset, token)?;
-                attach_value(node, &mut values, &mut frames, &mut root)?;
-            }
-            TokenKind::Keyword if token.bytes() == b"true" => {
-                let node = ObjectValue {
-                    raw: raw_token(input, base_offset, token)?,
-                    kind: ObjectKind::Boolean(true),
+                let mut probe = cursor.clone();
+                let reference = match probe.next() {
+                    Ok(Some(second)) if second.kind() == TokenKind::Number => match probe.next() {
+                        Ok(Some(marker)) if marker.bytes() == b"R" => Some((second, marker)),
+                        _ => None,
+                    },
+                    _ => None,
                 };
-                attach_value(node, &mut values, &mut frames, &mut root)?;
+                if let Some((second, marker)) = reference {
+                    let number = unsigned(token.bytes()).and_then(|n| u32::try_from(n).ok());
+                    let generation = unsigned(second.bytes()).and_then(|n| u16::try_from(n).ok());
+                    let (Some(number), Some(generation)) = (number, generation) else {
+                        return Err(malformed(span.start, "reference"));
+                    };
+                    let end = probe.span(marker).end;
+                    *cursor = probe;
+                    attach(Node { span: span.start..end, kind: Kind::Ref(ObjectRef::new(number, generation)) }, &mut nodes, &mut frames, &mut root)?;
+                    continue;
+                }
+                number_kind(token.bytes())
             }
-            TokenKind::Keyword if token.bytes() == b"false" => {
-                let node = ObjectValue {
-                    raw: raw_token(input, base_offset, token)?,
-                    kind: ObjectKind::Boolean(false),
-                };
-                attach_value(node, &mut values, &mut frames, &mut root)?;
-            }
-            TokenKind::Keyword if token.bytes() == b"null" => {
-                let node = ObjectValue {
-                    raw: raw_token(input, base_offset, token)?,
-                    kind: ObjectKind::Null,
-                };
-                attach_value(node, &mut values, &mut frames, &mut root)?;
-            }
-            TokenKind::Keyword => {
-                return Err(PdfError::InvalidValue {
-                    offset: absolute_offset(base_offset, token.span().start())?,
-                });
-            }
-        }
+            TokenKind::Keyword => match token.bytes() {
+                b"true" => Kind::Bool(true),
+                b"false" => Kind::Bool(false),
+                b"null" => Kind::Null,
+                bytes if matches!(bytes.first(), Some(b'+' | b'-' | b'.' | b'0'..=b'9')) => Kind::Null,
+                _ => return Err(malformed(span.start, "value")),
+            },
+        };
+        attach(Node { span, kind }, &mut nodes, &mut frames, &mut root)?;
     }
-
-    if !frames.is_empty() {
-        return Err(PdfError::UnclosedContainer {
-            offset: absolute_offset(base_offset, cursor.offset())?,
-        });
-    }
-    let root = root.ok_or(PdfError::UnexpectedEnd {
-        offset: absolute_offset(base_offset, cursor.offset())?,
-    })?;
-    Ok((root, values))
 }
 
-fn check_container_depth(
-    base_offset: usize,
-    token: Token<'_>,
-    open_containers: usize,
-    budget: &WorkBudget,
-) -> Result<(), PdfError> {
-    let depth = open_containers
-        .checked_add(1)
-        .ok_or(PdfError::OffsetOverflow {
-            offset: absolute_offset(base_offset, token.span().start())?,
-        })?;
-    budget.check_depth(depth)?;
-    Ok(())
-}
-
-fn attach_value<'source>(
-    node: ObjectValue<'source>,
-    values: &mut Vec<ObjectValue<'source>>,
-    frames: &mut [ContainerFrame<'source>],
-    root: &mut Option<ObjectValueIndex>,
-) -> Result<(), PdfError> {
-    let offset = node.raw.span.start();
-    let index = ObjectValueIndex(values.len());
-    values.push(node);
+fn attach(
+    node: Node,
+    nodes: &mut Vec<Node>,
+    frames: &mut [Frame],
+    root: &mut Option<usize>,
+) -> Result<(), DocError> {
+    let offset = node.span.start;
+    let index = nodes.len();
+    nodes.push(node);
     match frames.last_mut() {
-        Some(ContainerFrame::Array { values, .. }) => values.push(index),
-        Some(ContainerFrame::Dictionary {
-            entries,
-            pending_key,
-            ..
-        }) => {
-            let key = pending_key
-                .take()
-                .ok_or(PdfError::UnexpectedToken { offset })?;
-            entries.push(DictionaryEntry { key, value: index });
+        Some(Frame::Array { items, .. }) => items.push(index),
+        Some(Frame::Dict { entries, key, .. }) => {
+            entries.push((key.take().ok_or_else(|| malformed(offset, "dictionary key"))?, index));
         }
         None => {
-            if root.replace(index).is_some() {
-                return Err(PdfError::UnexpectedToken { offset });
-            }
+            if root.replace(index).is_some() { return Err(malformed(offset, "multiple roots")); }
         }
     }
     Ok(())
 }
 
-fn parse_number_value<'source>(
-    cursor: &mut TokenCursor<'source>,
-    input: &'source [u8],
-    base_offset: usize,
-    first: Token<'source>,
-) -> Result<ObjectValue<'source>, PdfError> {
-    let Some(second) = cursor.peek(0)? else {
-        return Ok(ObjectValue {
-            raw: raw_token(input, base_offset, first)?,
-            kind: ObjectKind::Number,
-        });
-    };
-    if second.kind() != TokenKind::Number {
-        return Ok(ObjectValue {
-            raw: raw_token(input, base_offset, first)?,
-            kind: ObjectKind::Number,
-        });
+fn number_kind(bytes: &[u8]) -> Kind {
+    let Ok(text) = core::str::from_utf8(bytes) else { return Kind::Null };
+    if !bytes.contains(&b'.') {
+        if let Ok(value) = text.parse::<i64>() { return Kind::Int(value); }
     }
-    let Some(reference_marker) = cursor.peek(1)? else {
-        return Ok(ObjectValue {
-            raw: raw_token(input, base_offset, first)?,
-            kind: ObjectKind::Number,
-        });
-    };
-    if reference_marker.kind() != TokenKind::Keyword || reference_marker.bytes() != b"R" {
-        return Ok(ObjectValue {
-            raw: raw_token(input, base_offset, first)?,
-            kind: ObjectKind::Number,
-        });
+    match text.parse::<f64>() {
+        Ok(value) if value.is_finite() => Kind::Real(value),
+        _ => Kind::Null,
     }
-
-    let object_number = parse_unsigned(first.bytes());
-    let generation = parse_unsigned(second.bytes());
-    let (Some(object_number), Some(generation)) = (object_number, generation) else {
-        return Err(PdfError::InvalidReference {
-            offset: absolute_offset(base_offset, first.span().start())?,
-        });
-    };
-    let (Ok(object_number), Ok(generation)) =
-        (u32::try_from(object_number), u16::try_from(generation))
-    else {
-        return Err(PdfError::InvalidReference {
-            offset: absolute_offset(base_offset, first.span().start())?,
-        });
-    };
-
-    let consumed_number = required_token(cursor, base_offset)?;
-    let consumed_marker = required_token(cursor, base_offset)?;
-    if consumed_number.span() != second.span() || consumed_marker.span() != reference_marker.span() {
-        return Err(PdfError::UnexpectedToken {
-            offset: absolute_offset(base_offset, first.span().start())?,
-        });
-    }
-    Ok(ObjectValue {
-        raw: raw_value(
-            input,
-            base_offset,
-            first.span().start(),
-            reference_marker.span().end(),
-        )?,
-        kind: ObjectKind::Reference(ObjectRef::new(object_number, generation)),
-    })
 }
 
-fn parse_unsigned(bytes: &[u8]) -> Option<u64> {
+pub(crate) fn unsigned(bytes: &[u8]) -> Option<u64> {
     let digits = match bytes.first() {
         Some(b'+') => bytes.get(1..)?,
         Some(b'-') | None => return None,
         Some(_) => bytes,
     };
-    if digits.is_empty() {
-        return None;
-    }
+    if digits.is_empty() { return None; }
     let mut value = 0u64;
     for byte in digits {
-        if !byte.is_ascii_digit() {
-            return None;
-        }
-        value = value
-            .checked_mul(10)?
-            .checked_add(u64::from(*byte - b'0'))?;
+        if !byte.is_ascii_digit() { return None; }
+        value = value.checked_mul(10)?.checked_add(u64::from(*byte - b'0'))?;
     }
     Some(value)
 }
 
-fn required_token<'source>(
-    cursor: &mut TokenCursor<'source>,
-    base_offset: usize,
-) -> Result<Token<'source>, PdfError> {
-    cursor.next()?.ok_or(PdfError::UnexpectedEnd {
-        offset: absolute_offset(base_offset, cursor.offset())?,
-    })
+#[derive(Clone)]
+pub(crate) struct Cursor<'a> {
+    lexer: Lexer<'a>,
+    base: usize,
+    count: u32,
+    limits: Limits,
+    cut: bool,
 }
 
-fn raw_token<'source>(
-    input: &'source [u8],
-    base_offset: usize,
-    token: Token<'source>,
-) -> Result<RawObjectValue<'source>, PdfError> {
-    raw_value(
-        input,
-        base_offset,
-        token.span().start(),
-        token.span().end(),
-    )
-}
-
-fn raw_value<'source>(
-    input: &'source [u8],
-    base_offset: usize,
-    start: usize,
-    end: usize,
-) -> Result<RawObjectValue<'source>, PdfError> {
-    let bytes = input
-        .get(start..end)
-        .ok_or(PdfError::InvalidSpan { start, end })?;
-    let span = ObjectSpan {
-        start: absolute_offset(base_offset, start)?,
-        end: absolute_offset(base_offset, end)?,
-    };
-    Ok(RawObjectValue { bytes, span })
-}
-
-fn absolute_offset(base_offset: usize, relative: usize) -> Result<usize, PdfError> {
-    base_offset
-        .checked_add(relative)
-        .ok_or(PdfError::OffsetOverflow { offset: base_offset })
-}
-
-struct TokenCursor<'input> {
-    lexer: Lexer<'input>,
-    base_offset: usize,
-    buffered: [Option<Result<Token<'input>, LexError>>; 3],
-    buffered_len: usize,
-    finished: bool,
-    consumed: usize,
-}
-
-impl<'input> TokenCursor<'input> {
-    fn new(input: &'input [u8], base_offset: usize, budget: &WorkBudget) -> Self {
-        Self {
-            lexer: Lexer::with_limits(
-                input,
-                LexerLimits::new(
-                    budget.max_tokens(),
-                    budget.max_input_bytes(),
-                    budget.max_depth(),
-                ),
-            ),
-            base_offset,
-            buffered: [None, None, None],
-            buffered_len: 0,
-            finished: false,
-            consumed: 0,
+impl<'a> Cursor<'a> {
+    pub(crate) fn at(buf: &'a [u8], range: Range<usize>, limits: &Limits) -> Result<Self, DocError> {
+        if range.start > range.end || range.end > buf.len() {
+            return Err(malformed(range.start, "value range"));
         }
+        let bound = usize::try_from(limits.max_object_bytes).unwrap_or(usize::MAX);
+        let cap = range.start.saturating_add(bound.saturating_add(1)).min(range.end);
+        let input = buf.get(range.start..cap).ok_or_else(|| malformed(range.start, "value range"))?;
+        Ok(Self {
+            lexer: Lexer::with_limits(input, LexerLimits::new(
+                limits.max_tokens_per_object as usize,
+                bound,
+                limits.max_depth as usize,
+            )),
+            base: range.start,
+            count: 0,
+            limits: *limits,
+            cut: cap < range.end,
+        })
     }
-
-    fn peek(&mut self, index: usize) -> Result<Option<Token<'input>>, PdfError> {
-        if index >= self.buffered.len() {
-            return Err(PdfError::UnexpectedToken {
-                offset: absolute_offset(self.base_offset, self.lexer.offset())?,
-            });
-        }
-        while self.buffered_len <= index && !self.finished {
-            match self.lexer.next() {
-                Some(Ok(token)) => {
-                    let Some(slot) = self.buffered.get_mut(self.buffered_len) else {
-                        return Err(PdfError::UnexpectedToken {
-                            offset: absolute_offset(self.base_offset, self.lexer.offset())?,
-                        });
-                    };
-                    *slot = Some(Ok(token));
-                    self.buffered_len += 1;
-                }
-                Some(Err(error)) => {
-                    self.finished = true;
-                    return Err(PdfError::Lexical {
-                        error,
-                        base_offset: self.base_offset,
-                    });
-                }
-                None => self.finished = true,
+    pub(crate) fn position(&self) -> usize { self.base.saturating_add(self.lexer.offset()) }
+    fn used(&self) -> usize { self.lexer.offset() }
+    fn span(&self, token: Token<'_>) -> Range<usize> {
+        self.base.saturating_add(token.span().start())..self.base.saturating_add(token.span().end())
+    }
+    pub(crate) fn next(&mut self) -> Result<Option<Token<'a>>, DocError> {
+        match self.lexer.next() {
+            Some(Ok(token)) => {
+                check(LimitKind::ObjectBytes, token.span().end() as u64, self.limits.max_object_bytes)?;
+                self.count = self.count.saturating_add(1);
+                Ok(Some(token))
             }
-        }
-        let Some(buffered) = self.buffered.get(index).copied().flatten() else {
-            return Ok(None);
-        };
-        match buffered {
-            Ok(token) => Ok(Some(token)),
-            Err(error) => Err(PdfError::Lexical {
-                error,
-                base_offset: self.base_offset,
-            }),
-        }
-    }
-
-    fn next(&mut self) -> Result<Option<Token<'input>>, PdfError> {
-        let token = self.peek(0)?;
-        if token.is_some() {
-            for index in 1..self.buffered_len {
-                let next = self.buffered.get(index).copied().flatten();
-                if let Some(slot) = self.buffered.get_mut(index - 1) {
-                    *slot = next;
+            Some(Err(error)) => {
+                let (kind, maximum) = match error {
+                    LexError::TokenBudgetExceeded { .. } => (Some(LimitKind::Tokens), u64::from(self.limits.max_tokens_per_object)),
+                    LexError::TokenTooLong { .. } => (Some(LimitKind::ObjectBytes), self.limits.max_object_bytes),
+                    LexError::LiteralNestingTooDeep { .. } => (Some(LimitKind::Depth), u64::from(self.limits.max_depth)),
+                    LexError::UnterminatedLiteralString { .. } | LexError::UnterminatedHexString { .. } if self.cut => (Some(LimitKind::ObjectBytes), self.limits.max_object_bytes),
+                    _ => (None, 0),
+                };
+                if let Some(limit) = kind {
+                    Err(DocError::Refused(Refusal { limit, requested: maximum.saturating_add(1), maximum }))
+                } else {
+                    Err(malformed(self.position(), "token"))
                 }
             }
-            self.buffered_len -= 1;
-            if let Some(slot) = self.buffered.get_mut(self.buffered_len) {
-                *slot = None;
-            }
-            self.consumed = self
-                .consumed
-                .checked_add(1)
-                .ok_or(PdfError::TokenCountOverflow {
-                    offset: absolute_offset(self.base_offset, self.lexer.offset())?,
-                })?;
+            None if self.cut => Err(DocError::Refused(Refusal {
+                limit: LimitKind::ObjectBytes,
+                requested: self.limits.max_object_bytes.saturating_add(1),
+                maximum: self.limits.max_object_bytes,
+            })),
+            None => Ok(None),
         }
-        Ok(token)
     }
-
-    const fn offset(&self) -> usize {
-        self.lexer.offset()
+    pub(crate) fn required(&mut self) -> Result<Token<'a>, DocError> {
+        self.next()?.ok_or_else(|| malformed(self.position(), "unexpected EOF"))
     }
+}
 
-    const fn consumed(&self) -> usize {
-        self.consumed
+pub(crate) fn whitespace(byte: u8) -> bool { matches!(byte, 0 | 9 | 10 | 12 | 13 | 32) }
+
+pub(crate) fn keyword_at(buf: &[u8], offset: usize, keyword: &[u8]) -> bool {
+    let Some(end) = offset.checked_add(keyword.len()) else { return false };
+    if buf.get(offset..end) != Some(keyword) { return false; }
+    buf.get(end).copied().map(|byte| whitespace(byte) || b"()<>[]{}/%".contains(&byte)).unwrap_or(true)
+}
+
+fn skip_trivia(buf: &[u8], mut pos: usize, cap: usize) -> usize {
+    while pos < cap {
+        match buf.get(pos).copied() {
+            Some(byte) if whitespace(byte) => pos = pos.saturating_add(1),
+            Some(b'%') => {
+                while pos < cap && !matches!(buf.get(pos), Some(b'\r' | b'\n')) {
+                    pos = pos.saturating_add(1);
+                }
+            }
+            _ => break,
+        }
+    }
+    pos
+}
+
+fn stream_tail(buf: &[u8], end: usize, maximum: u64) -> Option<usize> {
+    if end > buf.len() { return None; }
+    let bound = usize::try_from(maximum).unwrap_or(usize::MAX);
+    let cap = end.saturating_add(bound).min(buf.len());
+    let marker = skip_trivia(buf, end, cap);
+    if !keyword_at(buf, marker, b"endstream") { return None; }
+    let after = marker.checked_add(9)?;
+    if after > cap { return None; }
+    let endobj = skip_trivia(buf, after, cap);
+    if !keyword_at(buf, endobj, b"endobj") { return None; }
+    let tail = endobj.checked_add(6)?;
+    (tail <= cap).then_some(tail)
+}
+
+fn hex(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
     }
 }
