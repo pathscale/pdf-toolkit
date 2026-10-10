@@ -1,0 +1,11 @@
+[package]
+name = "pdf-render"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+pdf-core = { path = "../pdf-core", default-features = false }
+pdf-text = { path = "../pdf-text", default-features = false }
+skrifa = { version = "0.42", default-features = false, features = ["libm"] }
+
