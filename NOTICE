@@ -1,0 +1,13 @@
+Third-party source, code, and data import record
+
+As of 2026-09-26, no third-party source, code, or data has been imported into
+this repository.
+
+Future attribution entries use this format:
+
+- Source: <name and upstream URL>
+- Revision: <commit, release, or other exact source revision>
+- Source path: <path within the upstream source>
+- Local path: <path in this repository>
+- Copyright and attribution: <copyright notice and required attribution>
+- Modifications: <changes made, or "none">
