@@ -1,0 +1,13 @@
+[package]
+name = "pdf-raster"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+pdf-core = { path = "../pdf-core", default-features = false }
+pdf-render = { path = "../pdf-render", default-features = false }
+pdf-text = { path = "../pdf-text", default-features = false }
+tiny-skia = { version = "0.12", features = ["png-format"] }
+zune-jpeg = "0.5"
+
