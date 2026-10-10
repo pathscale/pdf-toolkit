@@ -1,0 +1,16 @@
+version=1.7
+xref_kind=table
+xref_sections=1
+encrypted=true
+refusal=none
+pages=1
+page_errors=0
+page.0.media_box=0 0 612 792
+page.0.crop_box=0 0 612 792
+page.0.rotate=0
+page.0.contents=1
+page.0.resource_keys=Font,ProcSet
+page.0.content_sha256=ef85abd15adfbf04cb17a8ff0be5ff4b148806b18d5651fb6aef6dc1eff8e52f
+page.0.content_refusal=none
+page.0.text_norm=Empty user password Encrypted strings and streams
+info.title=Encrypted RC4

@@ -9,6 +9,7 @@ use std::ops::Range;
 
 pub mod doc;
 pub mod encode;
+pub(crate) mod encrypt;
 pub mod fixtures;
 pub mod sha256;
 
