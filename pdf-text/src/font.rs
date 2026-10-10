@@ -1,10 +1,10 @@
 use alloc::borrow::Cow;
 use alloc::string::String;
-use alloc::sync::Arc;
+use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
 use core::cmp::Ordering;
 
-use pdf_core::{ArrayRef, DictRef, DocError, LimitKind, ObjectRef, Refusal, Resolver,
+use pdf_core::{ArrayRef, DictRef, DocError, LimitKind, Limits, ObjectRef, Refusal, Resolver,
     Value, ValueRef, Warning};
 
 use crate::cmap::{self, CMap};
@@ -85,6 +85,128 @@ pub struct Font {
     data: Arc<FontData>,
 }
 
+struct FontEntry {
+    id: ObjectRef,
+    font: Font,
+}
+
+/// Caller-owned cache for one immutable document. Direct dictionaries bypass it.
+/// The cap charges retained allocations conservatively, including entry capacity,
+/// but excludes the document's already-owned source bytes. Cache pressure clears
+/// retained entries; oversized fonts and allocation failures simply bypass it.
+pub struct FontCache {
+    entries: Vec<FontEntry>,
+    used: u64,
+    maximum: u64,
+    document: Option<(Weak<[u8]>, Limits)>,
+}
+
+impl Default for FontCache {
+    fn default() -> Self { Self::new(64 << 20) }
+}
+
+impl FontCache {
+    pub fn new(maximum_bytes: u64) -> Self {
+        Self {
+            entries: Vec::new(), used: 0,
+            maximum: maximum_bytes.min(isize::MAX as u64), document: None,
+        }
+    }
+
+    pub fn clear(&mut self) {
+        self.entries = Vec::new();
+        self.used = 0;
+        self.document = None;
+    }
+
+    pub fn bytes(&self) -> u64 {
+        self.used.saturating_add((self.entries.capacity() as u64)
+            .saturating_mul(core::mem::size_of::<FontEntry>() as u64))
+    }
+
+    pub fn maximum_bytes(&self) -> u64 { self.maximum }
+
+    pub fn len(&self) -> usize { self.entries.len() }
+
+    pub fn is_empty(&self) -> bool { self.entries.is_empty() }
+
+    /// `value` is an already-resolved font dictionary. Only an indirect
+    /// object's root qualifies, never a dictionary nested in its resources.
+    pub fn load(&mut self, resolver: &mut Resolver<'_>, value: &Value)
+        -> Result<Font, DocError>
+    {
+        if resolver.document().encrypted() {
+            return Err(DocError::Encrypted);
+        }
+        let source = Arc::downgrade(&resolver.document().source().shared());
+        let limits = *resolver.document().limits();
+        if !self.document.as_ref().is_some_and(|(old, old_limits)| {
+            Weak::ptr_eq(old, &source) && *old_limits == limits
+        }) {
+            self.clear();
+            self.document = Some((source, limits));
+        }
+        let dict = value.get().as_dict().ok_or(DocError::WrongType {
+            id: value.object().id(), expected: "font dictionary",
+        })?;
+        let id = value.object().id().filter(|_| {
+            value.get().span() == value.object().root().span()
+        });
+        let key = id.map(|id| (id.number(), id.generation()));
+        if let Some(key) = key {
+            if let Ok(index) = self.entries.binary_search_by_key(&key, |entry| {
+                (entry.id.number(), entry.id.generation())
+            }) {
+                if let Some(entry) = self.entries.get(index) {
+                    for what in &entry.font.data.warnings {
+                        resolver.warn(Warning { offset: None, object: id, what: *what });
+                    }
+                    return Ok(entry.font.clone());
+                }
+            }
+        }
+        let font = Font::load(resolver, dict, value.object().id())?;
+        if let Some(id) = id {
+            self.retain(id, &font, self.maximum.min(limits.max_total_decoded_bytes));
+        }
+        Ok(font)
+    }
+
+    fn retain(&mut self, id: ObjectRef, font: &Font, maximum: u64) {
+        let cost = font.data.cache_bytes;
+        let entry_bytes = core::mem::size_of::<FontEntry>() as u64;
+        if cost.saturating_add(entry_bytes) > maximum { return; }
+        let slots = self.entries.len().saturating_add(1).max(self.entries.capacity());
+        let requested = self.used.saturating_add(cost)
+            .saturating_add((slots as u64).saturating_mul(entry_bytes));
+        if requested > maximum {
+            self.entries = Vec::new();
+            self.used = 0;
+        }
+        if self.entries.try_reserve_exact(1).is_err() { return; }
+        if self.bytes().saturating_add(cost) > maximum {
+            self.entries = Vec::new();
+            self.used = 0;
+            return;
+        }
+        let key = (id.number(), id.generation());
+        let index = self.entries.binary_search_by_key(&key, |entry| {
+            (entry.id.number(), entry.id.generation())
+        }).unwrap_or_else(|index| index);
+        // binary_search always yields a position at or below len.
+        if index <= self.entries.len() {
+            self.entries.insert(index, FontEntry { id, font: font.clone() });
+            self.used = self.used.saturating_add(cost);
+        }
+    }
+}
+
+// CMap's private vectors contain at most 100,000 mappings and 256 codespaces.
+// Charge generously for all vector capacities without exposing parser internals.
+fn cmap_cache_bytes(length: usize) -> u64 {
+    (length.min(100_000) as u64).saturating_mul(128).saturating_add(8192)
+}
+
 #[derive(Debug)]
 struct FontData {
     kind: FontKind,
@@ -97,6 +219,8 @@ struct FontData {
     to_unicode: Option<CMap>,
     cid_widths: Vec<CidWidth>,
     default_width: f64,
+    cache_bytes: u64,
+    warnings: Vec<&'static str>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -159,6 +283,7 @@ impl Font {
             id,
             warnings: Vec::new(),
             width_operands: 0,
+            cmap_bytes: 0,
         };
         let subtype = loader.key(dict, b"Subtype", "font_subtype_unknown")?;
         let kind = match subtype.as_ref().and_then(|value| value.get().as_name()) {
@@ -219,6 +344,8 @@ impl Font {
             to_unicode,
             cid_widths: Vec::new(),
             default_width: 1.0,
+            cache_bytes: 0,
+            warnings: Vec::new(),
         };
         if kind == FontKind::Type0 {
             data.encoding = Some(load_type0_encoding(&mut loader, dict)?);
@@ -238,6 +365,30 @@ impl Font {
                 &mut loader, dict, &data, missing_width,
             )?;
         }
+        let mut cost = (core::mem::size_of::<FontData>() as u64).saturating_add(64)
+            .saturating_add(loader.cmap_bytes)
+            .saturating_add((data.cid_widths.capacity() as u64)
+                .saturating_mul(core::mem::size_of::<CidWidth>() as u64));
+        if data.encoding.is_some() {
+            // Also covers the small allocation made by Identity-H/Identity-V.
+            cost = cost.saturating_add(8192);
+        }
+        if let Some(bytes) = &data.name.decoded {
+            cost = cost.saturating_add(bytes.len() as u64).saturating_add(32);
+        }
+        if let Some(value) = &data.name.value {
+            let object = value.object();
+            // Nodes and dictionary/array vectors are bounded by token count.
+            cost = cost.saturating_add(u64::from(object.token_count()).saturating_mul(256))
+                .saturating_add(256);
+            if !Arc::ptr_eq(object.buffer(), &loader.resolver.document().source().shared()) {
+                cost = cost.saturating_add(object.buffer().len() as u64).saturating_add(32);
+            }
+        }
+        cost = cost.saturating_add((loader.warnings.capacity() as u64)
+            .saturating_mul(core::mem::size_of::<&'static str>() as u64));
+        data.cache_bytes = cost;
+        data.warnings = loader.warnings;
         Ok(Font { data: Arc::new(data) })
     }
 
@@ -323,6 +474,7 @@ struct Loader<'r, 'd> {
     id: Option<ObjectRef>,
     warnings: Vec<&'static str>,
     width_operands: u64,
+    cmap_bytes: u64,
 }
 
 impl Loader<'_, '_> {
@@ -432,6 +584,7 @@ impl Loader<'_, '_> {
         if decoded.truncated {
             self.warn(what);
         }
+        self.cmap_bytes = self.cmap_bytes.saturating_add(cmap_cache_bytes(decoded.bytes.len()));
         let (map, warning) = cmap::parse(&decoded.bytes, 100_000);
         if let Some(warning) = warning {
             self.warn(warning);

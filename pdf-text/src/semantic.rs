@@ -5,7 +5,8 @@ use pdf_core::pages::{Page, PageWalk};
 use pdf_core::{DocError, Document, LimitKind, Limits, ObjectRef, PdfSource, Resolver, Warning};
 
 use crate::content::{check, refusal};
-use crate::interp::{display_dimensions, display_transform, page_text, PageText, PositionedGlyph};
+use crate::font::FontCache;
+use crate::interp::{display_dimensions, display_transform, page_text_cached, PageText, PositionedGlyph};
 use crate::layout::{direction, layout, BlockKind, Line, PageLayout, SPACE_GAP};
 use crate::links;
 
@@ -97,6 +98,7 @@ pub struct SemanticDoc {
 /// Owns the document and walked page descriptors, never a resolver borrowing it.
 pub struct SemanticReader {
     document: Document,
+    font_cache: FontCache,
     pages: Vec<Page>,
     page_ids: Vec<ObjectRef>,
     page_lookup: Vec<(u32, u16, u32)>,
@@ -156,7 +158,10 @@ impl SemanticReader {
             budget.push(&mut warnings, warning)?;
         }
         drop(resolver);
-        Ok(Self { document, pages, page_ids, page_lookup, info, next: 0, warnings })
+        Ok(Self {
+            document, font_cache: FontCache::default(),
+            pages, page_ids, page_lookup, info, next: 0, warnings,
+        })
     }
 
     pub fn info(&self) -> &DocInfo {
@@ -200,7 +205,10 @@ impl SemanticReader {
             refusal: None,
         };
         let mut resolver = self.document.resolver();
-        let result = build_page(&mut resolver, page, &self.page_ids, &self.pages, &self.page_lookup);
+        let result = build_page(
+            &mut resolver, page, &self.page_ids, &self.pages, &self.page_lookup,
+            &mut self.font_cache,
+        );
         let warnings = resolver.take_warnings();
         drop(resolver);
         match result {
@@ -281,8 +289,9 @@ fn build_page(
     page_ids: &[ObjectRef],
     pages: &[Page],
     page_lookup: &[(u32, u16, u32)],
+    font_cache: &mut FontCache,
 ) -> Result<SemanticPage, DocError> {
-    let text = page_text(resolver, page)?;
+    let text = page_text_cached(resolver, page, font_cache)?;
     let layout = layout(&text);
     let mut budget = Budget::new(resolver.document().limits().max_total_decoded_bytes);
     let links = links::page_links_with_pages(

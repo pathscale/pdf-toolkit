@@ -5,7 +5,8 @@ use alloc::vec::Vec;
 use pdf_core::pages::{Page, PageWalk};
 use pdf_core::{DocError, Document, Limits, ObjectRef, PdfSource, Resolver};
 
-use crate::interp::{page_text, ImageInfo};
+use crate::font::FontCache;
+use crate::interp::{page_text_cached, ImageInfo};
 use crate::layout::{layout, PageLayout};
 
 pub struct TextExtraction {
@@ -47,7 +48,15 @@ fn display_dimensions(page: &Page) -> (f32, f32) {
 }
 
 pub fn page_receipt(resolver: &mut Resolver<'_>, page: &Page) -> PageReceipt {
-    match page_text(resolver, page) {
+    page_receipt_cached(resolver, page, &mut FontCache::default())
+}
+
+pub fn page_receipt_cached(
+    resolver: &mut Resolver<'_>,
+    page: &Page,
+    cache: &mut FontCache,
+) -> PageReceipt {
+    match page_text_cached(resolver, page, cache) {
         Ok(text) => {
             let page_layout = layout(&text);
             PageReceipt {
@@ -105,11 +114,12 @@ pub fn extract_text(source: PdfSource, limits: Limits) -> Result<TextExtraction,
     let mut empty_pages = Vec::new();
     let mut refused_pages = Vec::new();
     let mut unmapped_glyphs = 0u64;
+    let mut font_cache = FontCache::default();
     for (position, page) in pages.iter().enumerate() {
         if position != 0 {
             text.push('\u{0c}');
         }
-        let receipt = page_receipt(&mut resolver, page);
+        let receipt = page_receipt_cached(&mut resolver, page, &mut font_cache);
         if let Some(error) = receipt.refusal.as_ref() {
             refused_pages.push((page.index, error.code()));
             continue;

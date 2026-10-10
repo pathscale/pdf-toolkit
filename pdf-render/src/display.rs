@@ -12,9 +12,9 @@ use pdf_text::content::{
     Content, ContentCursor, Op, Operand, Values,
 };
 use pdf_text::encoding::BaseEncoding;
-use pdf_text::font::{Font, FontKind, Glyph, GlyphText};
+use pdf_text::font::{Font, FontCache, FontKind, Glyph, GlyphText};
 
-use crate::glyphs::GlyphSource;
+use crate::glyphs::{GlyphSource, GlyphSourceCache};
 use crate::paint::{self, ColorState, ColorSpace};
 
 const PATH_ELEMENTS: u64 = 1_000_000;
@@ -340,7 +340,9 @@ struct LoadedFont {
     type3: Option<Type3>,
 }
 
-struct Builder {
+struct Builder<'c> {
+    font_cache: &'c mut FontCache,
+    glyph_cache: &'c mut GlyphSourceCache,
     limits: Limits,
     budget: Budget,
     output: DisplayList,
@@ -365,6 +367,21 @@ pub fn display_list(
     page: &Page,
     options: &RenderOptions,
 ) -> Result<DisplayList, DocError> {
+    display_list_cached(
+        resolver, page, options,
+        &mut FontCache::default(), &mut GlyphSourceCache::default(),
+    )
+}
+
+/// Reuse both caches across pages. Glyph programs also depend on fallback_font,
+/// so that cache automatically invalidates when its allocation changes.
+pub fn display_list_cached(
+    resolver: &mut Resolver<'_>,
+    page: &Page,
+    options: &RenderOptions,
+    cache: &mut FontCache,
+    glyph_cache: &mut GlyphSourceCache,
+) -> Result<DisplayList, DocError> {
     if resolver.document().encrypted() {
         return Err(DocError::Encrypted);
     }
@@ -375,6 +392,8 @@ pub fn display_list(
         .ok_or_else(|| refusal(LimitKind::DecodedBytes, u64::MAX, limits.max_decoded_bytes))?;
     check(LimitKind::DecodedBytes, pixels, limits.max_decoded_bytes)?;
     let mut builder = Builder {
+        font_cache: cache,
+        glyph_cache,
         limits,
         budget: Budget { used: 0, maximum: limits.max_total_decoded_bytes },
         output: DisplayList { width, height, items: Vec::new(), missing_fonts: 0 },
@@ -439,7 +458,7 @@ pub fn display_list(
     Ok(builder.output)
 }
 
-impl Builder {
+impl Builder<'_> {
     fn step(&mut self) -> Result<(), DocError> {
         self.ops = self.ops.checked_add(1).ok_or_else(|| {
             refusal(LimitKind::ContentOps, u64::MAX, self.limits.max_content_ops)
@@ -892,8 +911,10 @@ impl Builder {
             return Ok(index);
         }
         let dict = value.get().as_dict().ok_or_else(|| bad("font_dictionary"))?;
-        let font = Font::load(resolver, dict, value.object().id())?;
-        let source = match GlyphSource::load(resolver, &font, dict, self.fallback.as_ref()) {
+        let font = self.font_cache.load(resolver, &value)?;
+        let source = match self.glyph_cache.load(
+            resolver, &font, &value, self.fallback.as_ref(),
+        ) {
             Ok(source) => source,
             Err(error) => {
                 recover(resolver, error, value.object().id(), "font_program_failed")?;

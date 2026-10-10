@@ -1,7 +1,8 @@
-use alloc::sync::Arc;
+use alloc::sync::{Arc, Weak};
+use alloc::vec::Vec;
 
 use pdf_core::{
-    DictRef, DocError, LimitKind, Limits, Refusal, Resolver, Value, Warning,
+    DictRef, DocError, LimitKind, Limits, ObjectRef, Refusal, Resolver, Value, Warning,
 };
 use pdf_text::cmap::CMap;
 use pdf_text::encoding::{glyph_name_to_unicode, BaseEncoding};
@@ -25,7 +26,134 @@ pub struct GlyphSource {
     data: Arc<SourceData>,
 }
 
+struct GlyphSourceEntry {
+    id: ObjectRef,
+    source: GlyphSource,
+}
+
+/// Caller-owned glyph-program cache. The cap includes conservative retained
+/// allocation charges and entry capacity, excluding document source bytes.
+/// Changing the source, parser limits or fallback allocation invalidates it.
+pub struct GlyphSourceCache {
+    entries: Vec<GlyphSourceEntry>,
+    used: u64,
+    maximum: u64,
+    document: Option<(Weak<[u8]>, Limits)>,
+    fallback: Option<Weak<[u8]>>,
+}
+
+impl Default for GlyphSourceCache {
+    fn default() -> Self { Self::new(64 << 20) }
+}
+
+impl GlyphSourceCache {
+    pub fn new(maximum_bytes: u64) -> Self {
+        Self {
+            entries: Vec::new(), used: 0,
+            maximum: maximum_bytes.min(isize::MAX as u64),
+            document: None, fallback: None,
+        }
+    }
+
+    pub fn clear(&mut self) {
+        self.entries = Vec::new();
+        self.used = 0;
+        self.document = None;
+        self.fallback = None;
+    }
+
+    pub fn bytes(&self) -> u64 {
+        self.used.saturating_add((self.entries.capacity() as u64)
+            .saturating_mul(core::mem::size_of::<GlyphSourceEntry>() as u64))
+    }
+
+    pub fn maximum_bytes(&self) -> u64 { self.maximum }
+
+    pub fn len(&self) -> usize { self.entries.len() }
+
+    pub fn is_empty(&self) -> bool { self.entries.is_empty() }
+
+    /// `value` is the resolved dictionary from which `font` was loaded.
+    /// Direct dictionaries and unavailable programs are never retained.
+    pub fn load(
+        &mut self,
+        resolver: &mut Resolver<'_>,
+        font: &Font,
+        value: &Value,
+        fallback: Option<&Arc<[u8]>>,
+    ) -> Result<Option<GlyphSource>, DocError> {
+        if resolver.document().encrypted() {
+            return Err(DocError::Encrypted);
+        }
+        let source = Arc::downgrade(&resolver.document().source().shared());
+        let limits = *resolver.document().limits();
+        let same_fallback = match (&self.fallback, fallback) {
+            (None, None) => true,
+            (Some(old), Some(new)) => Weak::ptr_eq(old, &Arc::downgrade(new)),
+            _ => false,
+        };
+        if !same_fallback || !self.document.as_ref().is_some_and(|(old, old_limits)| {
+            Weak::ptr_eq(old, &source) && *old_limits == limits
+        }) {
+            self.clear();
+            self.document = Some((source, limits));
+            self.fallback = fallback.map(Arc::downgrade);
+        }
+        let dict = value.get().as_dict().ok_or_else(failed)?;
+        let id = value.object().id().filter(|_| {
+            value.get().span() == value.object().root().span()
+        });
+        if let Some(id) = id {
+            let key = (id.number(), id.generation());
+            if let Ok(index) = self.entries.binary_search_by_key(&key, |entry| {
+                (entry.id.number(), entry.id.generation())
+            }) {
+                if let Some(entry) = self.entries.get(index) {
+                    for warning in &entry.source.data.warnings {
+                        resolver.warn(warning.clone());
+                    }
+                    return Ok(Some(entry.source.clone()));
+                }
+            }
+        }
+        let source = GlyphSource::load(resolver, font, dict, fallback)?;
+        if let (Some(id), Some(source)) = (id, source.as_ref()) {
+            self.retain(id, source, self.maximum.min(limits.max_total_decoded_bytes));
+        }
+        Ok(source)
+    }
+
+    fn retain(&mut self, id: ObjectRef, source: &GlyphSource, maximum: u64) {
+        let cost = source.data.cache_bytes;
+        let entry_bytes = core::mem::size_of::<GlyphSourceEntry>() as u64;
+        if cost.saturating_add(entry_bytes) > maximum { return; }
+        let slots = self.entries.len().saturating_add(1).max(self.entries.capacity());
+        let requested = self.used.saturating_add(cost)
+            .saturating_add((slots as u64).saturating_mul(entry_bytes));
+        if requested > maximum {
+            self.entries = Vec::new();
+            self.used = 0;
+        }
+        if self.entries.try_reserve_exact(1).is_err() { return; }
+        if self.bytes().saturating_add(cost) > maximum {
+            self.entries = Vec::new();
+            self.used = 0;
+            return;
+        }
+        let key = (id.number(), id.generation());
+        let index = self.entries.binary_search_by_key(&key, |entry| {
+            (entry.id.number(), entry.id.generation())
+        }).unwrap_or_else(|index| index);
+        if index <= self.entries.len() {
+            self.entries.insert(index, GlyphSourceEntry { id, source: source.clone() });
+            self.used = self.used.saturating_add(cost);
+        }
+    }
+}
+
 struct SourceData {
+    cache_bytes: u64,
+    warnings: Vec<Warning>,
     backend: Backend,
     mapping: Mapping,
     maximum_bytes: u64,
@@ -196,7 +324,7 @@ fn load_source(
         .min(MAX_FONT_BYTES)
         .min(isize::MAX as u64);
     let maximum_elements = limits.max_content_ops.min(MAX_PATH_ELEMENTS);
-    let mut budget = Budget { limits, used: 0 };
+    let mut budget = Budget { limits, used: 0, cmap_bytes: 0, warnings: Vec::new() };
 
     let descendant = if font.kind() == FontKind::Type0 {
         let descendants = resolver.resolve_dict_key(dict, b"DescendantFonts")?
@@ -252,6 +380,8 @@ fn load_source(
             .or_else(|| sfnt::cmap_index(&reference, PlatformId::Unicode, 0))
             .ok_or_else(failed)?;
         return Ok(Some(SourceData {
+            cache_bytes: budget.cache_bytes().saturating_add(fallback.len() as u64),
+            warnings: budget.warnings,
             backend: Backend::Sfnt(program),
             mapping: Mapping::Unicode { subtable },
             maximum_bytes,
@@ -282,6 +412,13 @@ fn load_source(
         }
         apply_encoding(resolver, dict, &mut names, &limits)?;
         return Ok(Some(SourceData {
+            // Type1 may reserve 65,536 glyph slots and sparse subroutine slots
+            // even for a tiny input. Include those fixed worst-case capacities,
+            // plus decoded charstrings and names, without changing its parser.
+            cache_bytes: budget.cache_bytes()
+                .saturating_add(budget.used.saturating_mul(4))
+                .saturating_add(8 << 20),
+            warnings: budget.warnings,
             backend: Backend::Type1(program),
             mapping: Mapping::Type1(names),
             maximum_bytes,
@@ -361,6 +498,8 @@ fn load_source(
     };
 
     Ok(Some(SourceData {
+        cache_bytes: budget.cache_bytes(),
+        warnings: budget.warnings,
         backend: Backend::Sfnt(program),
         mapping,
         maximum_bytes,
@@ -561,17 +700,23 @@ fn cid_encoding(
     else { return Ok(None) };
     if let Some(name) = value.get().as_name() {
         if !name.eq_bytes(b"Identity-H") && !name.eq_bytes(b"Identity-V") {
-            resolver.warn(Warning {
+            let warning = Warning {
                 offset: None,
                 object: value.object().id(),
                 what: "predefined_cmap_unsupported",
-            });
+            };
+            budget.warnings.push(warning.clone());
+            resolver.warn(warning);
         }
         // Match pdf-text's identity approximation for predefined CMaps.
         return Ok(None);
     }
     let bytes = budget.stream(resolver, &value, maximum_bytes)?;
     let maximum = budget.limits.max_tokens_per_object.min(MAX_CMAP_ENTRIES);
+    // Match the conservative charge for pdf-text's private CMap vectors.
+    budget.cmap_bytes = budget.cmap_bytes.saturating_add(
+        (bytes.len().min(100_000) as u64).saturating_mul(128).saturating_add(8192),
+    );
     let (map, warning) = CMap::parse(bytes.bytes(), maximum);
     match warning {
         Some("cmap_limit") => Err(DocError::Refused(Refusal {
@@ -587,9 +732,19 @@ fn cid_encoding(
 struct Budget {
     limits: Limits,
     used: u64,
+    cmap_bytes: u64,
+    warnings: Vec<Warning>,
 }
 
 impl Budget {
+    fn cache_bytes(&self) -> u64 {
+        self.used.saturating_add(self.cmap_bytes)
+            .saturating_add(core::mem::size_of::<SourceData>() as u64)
+            .saturating_add(core::mem::size_of::<Program>() as u64)
+            .saturating_add(128)
+            .saturating_add((self.warnings.capacity() as u64)
+                .saturating_mul(core::mem::size_of::<Warning>() as u64))
+    }
     fn charge(&mut self, bytes: usize) -> Result<(), DocError> {
         let requested = self.used.checked_add(bytes as u64).unwrap_or(u64::MAX);
         sfnt::check(

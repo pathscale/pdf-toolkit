@@ -10,7 +10,7 @@ use crate::content::{
     Content, ContentCursor, Op, Operand, Values,
 };
 use crate::data::encodings::{PDF_DOC, WIN_ANSI};
-use crate::font::{Font, FontFlags, FontKind, Glyph, GlyphText};
+use crate::font::{Font, FontCache, FontFlags, FontKind, Glyph, GlyphText};
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PositionedGlyph {
@@ -155,7 +155,8 @@ struct Frame {
     marked_base: usize,
 }
 
-struct Interpreter {
+struct Interpreter<'c> {
+    font_cache: &'c mut FontCache,
     limits: Limits,
     display: Matrix,
     output: PageText,
@@ -173,12 +174,22 @@ struct Interpreter {
 }
 
 pub fn page_text(resolver: &mut Resolver<'_>, page: &Page) -> Result<PageText, DocError> {
+    page_text_cached(resolver, page, &mut FontCache::default())
+}
+
+/// Reuses indirect fonts across pages of the same document.
+pub fn page_text_cached(
+    resolver: &mut Resolver<'_>,
+    page: &Page,
+    cache: &mut FontCache,
+) -> Result<PageText, DocError> {
     if resolver.document().encrypted() {
         return Err(DocError::Encrypted);
     }
     let limits = *resolver.document().limits();
     let (display, width, height) = display_matrix(page)?;
     let mut interpreter = Interpreter {
+        font_cache: cache,
         limits,
         display,
         output: PageText {
@@ -361,7 +372,7 @@ pub fn page_text(resolver: &mut Resolver<'_>, page: &Page) -> Result<PageText, D
     Ok(interpreter.output)
 }
 
-impl Interpreter {
+impl Interpreter<'_> {
     fn snapshot(&self) -> Snapshot {
         Snapshot {
             graphics: self.graphics,
@@ -540,6 +551,7 @@ impl Interpreter {
                         name,
                         &mut self.fonts,
                         &mut self.output.fonts,
+                        self.font_cache,
                         self.limits,
                     )?;
                     self.graphics.text.font = index;
@@ -925,6 +937,7 @@ fn load_font(
     name: &[u8],
     cache: &mut Vec<CachedFont>,
     infos: &mut Vec<FontInfo>,
+    font_cache: &mut FontCache,
     limits: Limits,
 ) -> Result<usize, DocError> {
     if let Some(index) = cache.iter().position(|entry| {
@@ -935,11 +948,7 @@ fn load_font(
     let loaded = (|| {
         let value = resource(resolver, resources, b"Font", name)?
             .ok_or(DocError::WrongType { id: None, expected: "font resource" })?;
-        let dict = value.get().as_dict().ok_or(DocError::WrongType {
-            id: value.object().id(),
-            expected: "font dictionary",
-        })?;
-        Font::load(resolver, dict, value.object().id())
+        font_cache.load(resolver, &value)
     })();
     let font = match loaded {
         Ok(font) => Some(font),
