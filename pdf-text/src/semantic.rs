@@ -84,6 +84,7 @@ pub struct DocInfo {
     pub title: Option<String>,
     pub author: Option<String>,
     pub subject: Option<String>,
+    pub keywords: Option<String>,
     pub pages: u32,
     pub encrypted: bool,
 }
@@ -133,6 +134,7 @@ impl SemanticReader {
             title: None,
             author: None,
             subject: None,
+            keywords: None,
             pages: count,
             encrypted: document.encrypted(),
         };
@@ -143,6 +145,7 @@ impl SemanticReader {
                         info.title = info_string(&mut resolver, dict, b"Title", &mut budget)?;
                         info.author = info_string(&mut resolver, dict, b"Author", &mut budget)?;
                         info.subject = info_string(&mut resolver, dict, b"Subject", &mut budget)?;
+                        info.keywords = info_string(&mut resolver, dict, b"Keywords", &mut budget)?;
                     } else {
                         links::warn(&mut resolver, value.object().id(), "info_invalid");
                     }
@@ -247,7 +250,7 @@ pub fn semantic_document(source: PdfSource, limits: Limits) -> Result<SemanticDo
     let outline = links::outline_with_pages(&mut resolver, &reader.page_ids, &reader.pages, &reader.page_lookup)?;
     drop(resolver);
     let mut budget = Budget::new(limits.max_total_decoded_bytes);
-    for text in [&info.title, &info.author, &info.subject].into_iter().flatten() {
+    for text in [&info.title, &info.author, &info.subject, &info.keywords].into_iter().flatten() {
         budget.charge(text.len() as u64)?;
     }
     for item in &outline {
