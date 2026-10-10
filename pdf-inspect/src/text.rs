@@ -3,10 +3,10 @@ use std::io::{self, Write as _};
 use std::path::Path;
 
 use pdf_core::file;
-use pdf_core::pages::Page;
+use pdf_core::pages::{Page, PageWalk};
 use pdf_core::{Document, Limits};
 use pdf_inspect::JsonWriter;
-use pdf_text::extract::{extract_text, page_receipt, PageReceipt};
+use pdf_text::extract::{extract_text, page_receipt, page_receipt_cached, PageReceipt};
 use pdf_text::layout::BlockKind;
 
 use super::{
@@ -14,7 +14,47 @@ use super::{
     write_file_info, write_refusal, write_warnings,
 };
 
-pub(super) fn run_text(path: &Path, limits: Limits) -> u8 {
+fn write_text_output(text: &str, note: Option<&str>) -> u8 {
+    let mut output = io::stdout().lock();
+    if let Err(error) = output.write_all(text.as_bytes()) {
+        eprintln!("{error}");
+        return 3;
+    }
+    if let Err(error) = output.flush() {
+        eprintln!("{error}");
+        return 3;
+    }
+    if let Some(note) = note {
+        eprintln!("{note}");
+    }
+    0
+}
+
+fn repaired_text(document: &Document) -> Result<String, String> {
+    let mut resolver = document.resolver();
+    // Walk first: the walk borrows the resolver that page_receipt needs next. A
+    // repaired file keeps going past broken pages, which only lose their own text.
+    let pages: Vec<_> = PageWalk::new(&mut resolver)
+        .map_err(|error| error.to_string())?
+        .filter_map(Result::ok)
+        .collect();
+    let mut fonts = pdf_text::font::FontCache::default();
+    let mut output = String::new();
+
+    for (index, page) in pages.iter().enumerate() {
+        if index > 0 {
+            output.push('\x0c');
+        }
+        let receipt = page_receipt_cached(&mut resolver, page, &mut fonts);
+        if receipt.refusal.is_none() {
+            output.push_str(&receipt.layout.plain_text());
+        }
+    }
+
+    Ok(output)
+}
+
+pub(super) fn run_text(path: &Path, limits: Limits, repair: bool) -> u8 {
     let source = match file::open(path, limits.max_file_bytes) {
         Ok(source) => source,
         Err(error) => {
@@ -22,6 +62,31 @@ pub(super) fn run_text(path: &Path, limits: Limits) -> u8 {
             return 3;
         }
     };
+
+    if repair {
+        let document = match Document::open_with(
+            source.clone(),
+            limits,
+            pdf_core::OpenMode::Repair,
+        ) {
+            Ok(document) => document,
+            Err(error) => {
+                eprintln!("{error}");
+                return 1;
+            }
+        };
+        if let Ok(extraction) = extract_text(source, limits) {
+            return write_text_output(&extraction.text, Some(&extraction.note));
+        }
+        return match repaired_text(&document) {
+            Ok(text) => write_text_output(&text, None),
+            Err(error) => {
+                eprintln!("{error}");
+                1
+            }
+        };
+    }
+
     let extraction = match extract_text(source, limits) {
         Ok(extraction) => extraction,
         Err(error) => {
@@ -29,19 +94,7 @@ pub(super) fn run_text(path: &Path, limits: Limits) -> u8 {
             return 1;
         }
     };
-    {
-        let mut output = io::stdout().lock();
-        if let Err(error) = output.write_all(extraction.text.as_bytes()) {
-            eprintln!("{error}");
-            return 3;
-        }
-        if let Err(error) = output.flush() {
-            eprintln!("{error}");
-            return 3;
-        }
-    }
-    eprintln!("{}", extraction.note);
-    0
+    write_text_output(&extraction.text, Some(&extraction.note))
 }
 
 fn write_box(json: &mut JsonWriter, bounds: [f32; 4]) {
@@ -257,3 +310,4 @@ pub(super) fn fixture_values(
         (page.glyphs == 0 && !page.images.is_empty()).to_string(),
     );
 }
+

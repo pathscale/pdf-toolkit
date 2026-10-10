@@ -117,14 +117,14 @@ fn run() -> u8 {
 
     match command {
         "summary" => match parse_summary_args(&args) {
-            Some((path, limits)) => run_summary(&path, limits),
+            Some((path, limits, repair)) => run_summary(&path, limits, repair),
             None => {
                 print_usage();
                 1
             }
         },
-        "text" => match parse_single_path(&args) {
-            Some(path) => text::run_text(&path, Limits::default()),
+        "text" => match parse_path_repair(&args) {
+            Some((path, repair)) => text::run_text(&path, Limits::default(), repair),
             None => {
                 print_usage();
                 1
@@ -144,8 +144,8 @@ fn run() -> u8 {
                 1
             }
         },
-        "semantic" => match parse_single_path(&args) {
-            Some(path) => run_semantic(&path, Limits::default()),
+        "semantic" => match parse_path_repair(&args) {
+            Some((path, repair)) => run_semantic(&path, Limits::default(), repair),
             None => {
                 print_usage();
                 1
@@ -161,8 +161,16 @@ fn run() -> u8 {
             }
         },
         "render" => match parse_render_args(&args) {
-            Some((path, page, output, dpi, font)) => {
-                run_render(&path, page, &output, dpi, font.as_deref(), Limits::default())
+            Some((path, page, output, dpi, font, repair)) => {
+                run_render(
+                    &path,
+                    page,
+                    &output,
+                    dpi,
+                    font.as_deref(),
+                    repair,
+                    Limits::default(),
+                )
             }
             None => {
                 print_usage();
@@ -207,10 +215,10 @@ fn run() -> u8 {
 fn print_usage() {
     eprintln!(
         "usage:\n  pdf-inspect summary FILE [--max-decoded N] [--max-depth N] \
-         [--max-prev-chain N] [--max-pages N]\n  pdf-inspect streams FILE\n  \
-         pdf-inspect text FILE\n  pdf-inspect receipt FILE\n  \
-         pdf-inspect semantic FILE\n  pdf-inspect image FILE OBJ_NUM OUT\n  \
-         pdf-inspect render FILE PAGE OUT.png [--dpi N] [--font FILE]\n  \
+         [--max-prev-chain N] [--max-pages N] [--repair]\n  pdf-inspect streams FILE\n  \
+         pdf-inspect text FILE [--repair]\n  pdf-inspect receipt FILE\n  \
+         pdf-inspect semantic FILE [--repair]\n  pdf-inspect image FILE OBJ_NUM OUT\n  \
+         pdf-inspect render FILE PAGE OUT.png [--dpi N] [--font FILE] [--repair]\n  \
          pdf-inspect bench FILE... [--repeat N]\n  \
          pdf-inspect mutate FILE --seed N --count K\n  pdf-inspect check DIR"
     );
@@ -221,6 +229,16 @@ fn parse_single_path(args: &[OsString]) -> Option<PathBuf> {
         return None;
     }
     args.get(1).map(PathBuf::from)
+}
+
+fn parse_path_repair(args: &[OsString]) -> Option<(PathBuf, bool)> {
+    match args.len() {
+        2 => Some((PathBuf::from(args.get(1)?), false)),
+        3 if args.get(2)?.to_str()? == "--repair" => {
+            Some((PathBuf::from(args.get(1)?), true))
+        }
+        _ => None,
+    }
 }
 
 fn parse_image_args(args: &[OsString]) -> Option<(PathBuf, u32, PathBuf)> {
@@ -236,7 +254,7 @@ fn parse_image_args(args: &[OsString]) -> Option<(PathBuf, u32, PathBuf)> {
 
 fn parse_render_args(
     args: &[OsString],
-) -> Option<(PathBuf, u32, PathBuf, u32, Option<PathBuf>)> {
+) -> Option<(PathBuf, u32, PathBuf, u32, Option<PathBuf>, bool)> {
     if args.len() < 4 {
         return None;
     }
@@ -246,8 +264,10 @@ fn parse_render_args(
     let output = PathBuf::from(args.get(3)?);
     let mut dpi = 72u32;
     let mut font = None;
+    let mut repair = false;
     let mut saw_dpi = false;
     let mut saw_font = false;
+    let mut saw_repair = false;
     let mut index = 4usize;
 
     while index < args.len() {
@@ -265,16 +285,23 @@ fn parse_render_args(
                 saw_font = true;
                 index = index.saturating_add(2);
             }
+            "--repair" if !saw_repair => {
+                repair = true;
+                saw_repair = true;
+                index = index.saturating_add(1);
+            }
             _ => return None,
         }
     }
 
-    Some((path, page, output, dpi, font))
+    Some((path, page, output, dpi, font, repair))
 }
 
-fn parse_summary_args(args: &[OsString]) -> Option<(PathBuf, Limits)> {
+fn parse_summary_args(args: &[OsString]) -> Option<(PathBuf, Limits, bool)> {
     let mut path = None;
     let mut limits = Limits::default();
+    let mut repair = false;
+    let mut saw_repair = false;
     let mut index = 1usize;
 
     while index < args.len() {
@@ -301,6 +328,11 @@ fn parse_summary_args(args: &[OsString]) -> Option<(PathBuf, Limits)> {
                 limits.max_pages = value;
                 index = index.saturating_add(2);
             }
+            "--repair" if !saw_repair => {
+                repair = true;
+                saw_repair = true;
+                index = index.saturating_add(1);
+            }
             value if value.starts_with("--") => return None,
             _ => {
                 if path.is_some() {
@@ -312,7 +344,7 @@ fn parse_summary_args(args: &[OsString]) -> Option<(PathBuf, Limits)> {
         }
     }
 
-    path.map(|path| (path, limits))
+    path.map(|path| (path, limits, repair))
 }
 
 fn parse_bench_args(args: &[OsString]) -> Option<(Vec<PathBuf>, usize)> {
@@ -362,10 +394,14 @@ fn parse_mutate_args(args: &[OsString]) -> Option<(PathBuf, u64, usize)> {
                 index = index.saturating_add(2);
             }
             "--count" => {
-                count = Some(usize::try_from(parse_u64_argument(
+                let parsed = usize::try_from(parse_u64_argument(
                     args.get(index.saturating_add(1))?,
                 )?)
-                .ok()?);
+                .ok()?;
+                if parsed > MAX_MUTATE_CASES {
+                    return None;
+                }
+                count = Some(parsed);
                 index = index.saturating_add(2);
             }
             value if value.starts_with("--") => return None,
@@ -388,6 +424,18 @@ fn parse_u64_argument(argument: &OsStr) -> Option<u64> {
 
 fn parse_u32_argument(argument: &OsStr) -> Option<u32> {
     u32::try_from(parse_u64_argument(argument)?).ok()
+}
+
+fn open_document(
+    source: PdfSource,
+    limits: Limits,
+    repair: bool,
+) -> Result<Document, DocError> {
+    if repair {
+        Document::open_with(source, limits, pdf_core::OpenMode::Repair)
+    } else {
+        Document::open(source, limits)
+    }
 }
 
 #[derive(Clone)]
@@ -818,7 +866,118 @@ fn write_semantic_document(json: &mut JsonWriter, document: &pdf_text::semantic:
     json.end_object();
 }
 
-fn run_semantic(path: &Path, limits: Limits) -> u8 {
+fn write_repaired_semantic_document(json: &mut JsonWriter, document: &Document) {
+    let report = inspect_pages(document);
+    let mut resolver = document.resolver();
+    let mut fonts = pdf_text::font::FontCache::default();
+
+    json.begin_object();
+    json.member("semantic_version");
+    json.number(1);
+
+    json.member("info");
+    json.begin_object();
+    json.member("title");
+    json.null();
+    json.member("author");
+    json.null();
+    json.member("subject");
+    json.null();
+    json.member("pages");
+    json.number(report.pages.len() as u64);
+    json.member("encrypted");
+    json.boolean(document.encrypted());
+    json.end_object();
+
+    json.member("outline");
+    json.begin_array();
+    json.end_array();
+
+    json.member("pages");
+    json.begin_array();
+    for page in &report.pages {
+        let receipt = pdf_text::extract::page_receipt_cached(
+            &mut resolver,
+            page,
+            &mut fonts,
+        );
+        json.begin_object();
+        json.member("index");
+        json.number(page.index as u64);
+        json.member("width");
+        json.float(f64::from(receipt.width));
+        json.member("height");
+        json.float(f64::from(receipt.height));
+        json.member("refusal");
+        match receipt.refusal.as_ref() {
+            Some(error) => json.string(error.code()),
+            None => json.null(),
+        }
+
+        json.member("blocks");
+        json.begin_array();
+        for block in &receipt.layout.blocks {
+            let kind = match block.kind {
+                pdf_text::layout::BlockKind::Paragraph => "paragraph".to_string(),
+                pdf_text::layout::BlockKind::Heading(level) => format!("heading:{level}"),
+                pdf_text::layout::BlockKind::ListItem => "list_item".to_string(),
+                pdf_text::layout::BlockKind::Caption => "caption".to_string(),
+            };
+            let text = receipt.layout.block_text(block);
+            json.begin_object();
+            json.member("kind");
+            json.string(&kind);
+            json.member("bbox");
+            write_semantic_bbox(json, block.bbox);
+            json.member("spans");
+            json.begin_array();
+            json.begin_object();
+            json.member("text");
+            json.string(&text);
+            json.member("bold");
+            json.boolean(false);
+            json.member("italic");
+            json.boolean(false);
+            json.member("monospace");
+            json.boolean(false);
+            json.member("size");
+            json.float(f64::from(receipt.layout.body_size));
+            json.member("link");
+            json.null();
+            json.end_object();
+            json.end_array();
+            json.end_object();
+        }
+        json.end_array();
+
+        json.member("images");
+        json.begin_array();
+        for image in &receipt.images {
+            json.begin_object();
+            json.member("bbox");
+            write_semantic_bbox(json, image.bbox);
+            json.member("object");
+            json.null();
+            json.member("width");
+            json.number(u64::from(image.width));
+            json.member("height");
+            json.number(u64::from(image.height));
+            json.member("inline");
+            json.boolean(false);
+            json.end_object();
+        }
+        json.end_array();
+
+        json.member("links");
+        json.begin_array();
+        json.end_array();
+        json.end_object();
+    }
+    json.end_array();
+    json.end_object();
+}
+
+fn run_semantic(path: &Path, limits: Limits, repair: bool) -> u8 {
     let source = match file::open(path, limits.max_file_bytes) {
         Ok(source) => source,
         Err(error) => {
@@ -826,6 +985,24 @@ fn run_semantic(path: &Path, limits: Limits) -> u8 {
             return 3;
         }
     };
+
+    if repair {
+        let repaired = match open_document(source.clone(), limits, true) {
+            Ok(document) => document,
+            Err(error) => {
+                eprintln!("{error}");
+                return 3;
+            }
+        };
+        let mut json = JsonWriter::new();
+        match pdf_text::semantic::semantic_document(source, limits) {
+            Ok(document) => write_semantic_document(&mut json, &document),
+            Err(_) => write_repaired_semantic_document(&mut json, &repaired),
+        }
+        println!("{}", json.finish());
+        return 0;
+    }
+
     let document = match pdf_text::semantic::semantic_document(source, limits) {
         Ok(document) => document,
         Err(error) => {
@@ -1045,6 +1222,7 @@ fn run_render(
     output: &Path,
     dpi: u32,
     font_path: Option<&Path>,
+    repair: bool,
     limits: Limits,
 ) -> u8 {
     let source = match file::open(path, limits.max_file_bytes) {
@@ -1054,7 +1232,7 @@ fn run_render(
             return 3;
         }
     };
-    let document = match Document::open(source, limits) {
+    let document = match open_document(source, limits, repair) {
         Ok(document) => document,
         Err(error) => {
             eprintln!("{error}");
@@ -1131,7 +1309,7 @@ fn run_render(
     0
 }
 
-fn run_summary(path: &Path, limits: Limits) -> u8 {
+fn run_summary(path: &Path, limits: Limits, repair: bool) -> u8 {
     let source = match file::open(path, limits.max_file_bytes) {
         Ok(source) => source,
         Err(error) => {
@@ -1140,7 +1318,7 @@ fn run_summary(path: &Path, limits: Limits) -> u8 {
         }
     };
 
-    let document = Document::open(source.clone(), limits);
+    let document = open_document(source.clone(), limits, repair);
     let mut json = JsonWriter::new();
     json.begin_object();
     json.member("file");
@@ -1688,6 +1866,8 @@ fn run_bench(paths: &[PathBuf], repeat: usize, limits: Limits) -> u8 {
     0
 }
 
+const MAX_MUTATE_CASES: usize = 10_000;
+
 fn next_random(state: &mut u64) -> u64 {
     if *state == 0 {
         *state = 0x9e3779b97f4a7c15;
@@ -1873,83 +2053,401 @@ fn mutate_bytes(bytes: &mut Vec<u8>, state: &mut u64) {
     }
 }
 
-fn run_mutated(bytes: Vec<u8>, limits: Limits) -> Result<(), String> {
-    let source = PdfSource::new(Arc::<[u8]>::from(bytes)).map_err(|_| "source".to_string())?;
-    let document =
-        Document::open(source.clone(), limits).map_err(|error| error.code().to_string())?;
-    let mut resolver = document.resolver();
-    let mut pages = Vec::new();
-    let mut refusal = None;
+#[derive(Default)]
+struct FuzzStageCounts {
+    attempted: u64,
+    ok: u64,
+    refused: u64,
+    panicked: u64,
+    refusal_codes: BTreeMap<String, u64>,
+}
 
-    {
-        match PageWalk::new(&mut resolver) {
-            Ok(walk) => {
-                for item in walk {
-                    match item {
-                        Ok(page) => pages.push(page),
-                        Err(error) => {
-                            if refusal.is_none() {
-                                refusal = Some(error.code().to_string());
-                            }
-                        }
-                    }
-                }
-            }
-            Err(error) => return Err(error.code().to_string()),
-        }
+impl FuzzStageCounts {
+    fn refuse(&mut self, code: &str) {
+        self.refused = self.refused.saturating_add(1);
+        let occurrences = self.refusal_codes.entry(code.to_string()).or_insert(0);
+        *occurrences = occurrences.saturating_add(1);
     }
 
-    for page in &pages {
-        for id in &page.contents {
-            match resolver.get(*id) {
-                Ok(object) => {
-                    if let Err(error) = resolver.decode_stream(&object) {
-                        if refusal.is_none() {
-                            refusal = Some(error.code().to_string());
-                        }
-                    }
-                }
-                Err(error) => {
-                    if refusal.is_none() {
-                        refusal = Some(error.code().to_string());
-                    }
-                }
-            }
+    fn merge(&mut self, other: &Self) {
+        self.attempted = self.attempted.saturating_add(other.attempted);
+        self.ok = self.ok.saturating_add(other.ok);
+        self.refused = self.refused.saturating_add(other.refused);
+        self.panicked = self.panicked.saturating_add(other.panicked);
+        for (code, occurrences) in &other.refusal_codes {
+            let total = self.refusal_codes.entry(code.clone()).or_insert(0);
+            *total = total.saturating_add(*occurrences);
         }
     }
+}
 
-    let _ = text::scan_text(&document, &pages, &mut refusal);
+#[derive(Default)]
+struct FuzzStages {
+    source: FuzzStageCounts,
+    strict_open: FuzzStageCounts,
+    repair_open: FuzzStageCounts,
+    page_walk: FuzzStageCounts,
+    content_streams: FuzzStageCounts,
+    text: FuzzStageCounts,
+    semantic_document: FuzzStageCounts,
+    load_image: FuzzStageCounts,
+    render_page_0: FuzzStageCounts,
+}
 
-    match pdf_text::semantic::semantic_document(source, limits) {
-        Ok(semantic) => {
-            let mut image_resolver = document.resolver();
-            for page in &semantic.pages {
-                for image in &page.images {
-                    if let Some(object) = image.object {
-                        if let Err(error) = pdf_text::images::load_image(
-                            &mut image_resolver,
-                            object,
-                            limits.max_decoded_bytes / 4,
-                        ) {
-                            if refusal.is_none() {
-                                refusal = Some(error.code().to_string());
-                            }
-                        }
-                    }
-                }
-            }
+impl FuzzStages {
+    fn merge(&mut self, other: &Self) {
+        self.source.merge(&other.source);
+        self.strict_open.merge(&other.strict_open);
+        self.repair_open.merge(&other.repair_open);
+        self.page_walk.merge(&other.page_walk);
+        self.content_streams.merge(&other.content_streams);
+        self.text.merge(&other.text);
+        self.semantic_document.merge(&other.semantic_document);
+        self.load_image.merge(&other.load_image);
+        self.render_page_0.merge(&other.render_page_0);
+    }
+}
+
+enum FuzzStageOutcome<T> {
+    Success(T),
+    Refused(String),
+    Panicked,
+}
+
+fn run_fuzz_stage<T, F>(counts: &mut FuzzStageCounts, action: F) -> FuzzStageOutcome<T>
+where
+    F: FnOnce() -> Result<T, String>,
+{
+    counts.attempted = counts.attempted.saturating_add(1);
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(action)) {
+        Ok(Ok(value)) => {
+            counts.ok = counts.ok.saturating_add(1);
+            FuzzStageOutcome::Success(value)
         }
-        Err(error) => {
+        Ok(Err(code)) => {
+            counts.refuse(&code);
+            FuzzStageOutcome::Refused(code)
+        }
+        Err(_) => {
+            counts.panicked = counts.panicked.saturating_add(1);
+            FuzzStageOutcome::Panicked
+        }
+    }
+}
+
+fn record_fuzz_refusal(counts: &mut FuzzStageCounts, code: &str) {
+    counts.attempted = counts.attempted.saturating_add(1);
+    counts.refuse(code);
+}
+
+fn remember_fuzz_outcome<T>(
+    outcome: &FuzzStageOutcome<T>,
+    refusal: &mut Option<String>,
+    panicked: &mut bool,
+) {
+    match outcome {
+        FuzzStageOutcome::Success(_) => {}
+        FuzzStageOutcome::Refused(code) => {
             if refusal.is_none() {
-                refusal = Some(error.code().to_string());
+                *refusal = Some(code.clone());
+            }
+        }
+        FuzzStageOutcome::Panicked => *panicked = true,
+    }
+}
+
+struct MutateCaseReport {
+    stages: FuzzStages,
+    refusal: Option<String>,
+    panicked: bool,
+}
+
+fn mutation_render_scale(page: &Page) -> Option<f32> {
+    const BASE_SCALE: f64 = 18.0 / 72.0;
+    const MAX_DEVICE_PIXELS: u64 = 1_000_000;
+
+    let [left, bottom, right, top] = page.crop_box;
+    let width = (right - left).abs() * page.user_unit;
+    let height = (top - bottom).abs() * page.user_unit;
+    if !width.is_finite()
+        || !height.is_finite()
+        || !page.user_unit.is_finite()
+        || page.user_unit <= 0.0
+        || width <= 0.0
+        || height <= 0.0
+    {
+        return None;
+    }
+
+    let base_width = (width * BASE_SCALE).ceil().max(1.0) as u64;
+    let base_height = (height * BASE_SCALE).ceil().max(1.0) as u64;
+    let base_pixels = base_width.saturating_mul(base_height);
+    if base_pixels <= MAX_DEVICE_PIXELS {
+        return Some(BASE_SCALE as f32);
+    }
+
+    let target_width = ((MAX_DEVICE_PIXELS as f64 * base_width as f64
+        / base_height as f64)
+        .sqrt()
+        .floor()
+        .max(1.0) as u64)
+        .min(MAX_DEVICE_PIXELS);
+    let target_height = (MAX_DEVICE_PIXELS / target_width).max(1);
+    let scale = (target_width as f64 / width)
+        .min(target_height as f64 / height)
+        .min(BASE_SCALE) as f32;
+    if scale.is_finite() && scale > 0.0 {
+        Some(scale)
+    } else {
+        None
+    }
+}
+
+fn write_fuzz_stage(json: &mut JsonWriter, counts: &FuzzStageCounts) {
+    json.begin_object();
+    json.member("attempted");
+    json.number(counts.attempted);
+    json.member("ok");
+    json.number(counts.ok);
+    json.member("refused");
+    json.number(counts.refused);
+    json.member("refusal_codes");
+    json.begin_object();
+    for (code, occurrences) in &counts.refusal_codes {
+        json.member(code);
+        json.number(*occurrences);
+    }
+    json.end_object();
+    json.member("panicked");
+    json.number(counts.panicked);
+    json.end_object();
+}
+
+fn write_fuzz_stages(json: &mut JsonWriter, stages: &FuzzStages) {
+    json.begin_object();
+    json.member("source");
+    write_fuzz_stage(json, &stages.source);
+    json.member("strict_open");
+    write_fuzz_stage(json, &stages.strict_open);
+    json.member("repair_open");
+    write_fuzz_stage(json, &stages.repair_open);
+    json.member("page_walk");
+    write_fuzz_stage(json, &stages.page_walk);
+    json.member("content_streams");
+    write_fuzz_stage(json, &stages.content_streams);
+    json.member("text");
+    write_fuzz_stage(json, &stages.text);
+    json.member("semantic_document");
+    write_fuzz_stage(json, &stages.semantic_document);
+    json.member("load_image");
+    write_fuzz_stage(json, &stages.load_image);
+    json.member("render_page_0");
+    write_fuzz_stage(json, &stages.render_page_0);
+    json.end_object();
+}
+
+fn run_mutated(bytes: Vec<u8>, limits: Limits) -> MutateCaseReport {
+    let mut report = MutateCaseReport {
+        stages: FuzzStages::default(),
+        refusal: None,
+        panicked: false,
+    };
+
+    let source_result = run_fuzz_stage(&mut report.stages.source, || {
+        PdfSource::new(Arc::<[u8]>::from(bytes)).map_err(|_| "source".to_string())
+    });
+    remember_fuzz_outcome(
+        &source_result,
+        &mut report.refusal,
+        &mut report.panicked,
+    );
+    let source = match source_result {
+        FuzzStageOutcome::Success(source) => Some(source),
+        FuzzStageOutcome::Refused(_) | FuzzStageOutcome::Panicked => None,
+    };
+
+    let mut document = None;
+    if let Some(source) = source.as_ref() {
+        let strict_result = run_fuzz_stage(&mut report.stages.strict_open, || {
+            Document::open(source.clone(), limits).map_err(|error| error.code().to_string())
+        });
+        remember_fuzz_outcome(
+            &strict_result,
+            &mut report.refusal,
+            &mut report.panicked,
+        );
+        match strict_result {
+            FuzzStageOutcome::Success(opened) => document = Some(opened),
+            FuzzStageOutcome::Refused(_) | FuzzStageOutcome::Panicked => {
+                let repair_result = run_fuzz_stage(&mut report.stages.repair_open, || {
+                    Document::open_with(
+                        source.clone(),
+                        limits,
+                        pdf_core::OpenMode::Repair,
+                    )
+                    .map_err(|error| error.code().to_string())
+                });
+                remember_fuzz_outcome(
+                    &repair_result,
+                    &mut report.refusal,
+                    &mut report.panicked,
+                );
+                if let FuzzStageOutcome::Success(opened) = repair_result {
+                    document = Some(opened);
+                }
             }
         }
     }
 
-    match refusal {
-        Some(code) => Err(code),
-        None => Ok(()),
+    let mut pages = None;
+    if let Some(document) = document.as_ref() {
+        let page_result = run_fuzz_stage(&mut report.stages.page_walk, || {
+            let mut resolver = document.resolver();
+            let walk = PageWalk::new(&mut resolver)
+                .map_err(|error| error.code().to_string())?;
+            let mut pages = Vec::new();
+            for item in walk {
+                pages.push(item.map_err(|error| error.code().to_string())?);
+            }
+            Ok(pages)
+        });
+        remember_fuzz_outcome(
+            &page_result,
+            &mut report.refusal,
+            &mut report.panicked,
+        );
+        if let FuzzStageOutcome::Success(walked) = page_result {
+            pages = Some(walked);
+        }
+
+        if let Some(pages) = pages.as_ref() {
+            let stream_result = run_fuzz_stage(&mut report.stages.content_streams, || {
+                let mut resolver = document.resolver();
+                for page in pages {
+                    for id in &page.contents {
+                        let object = resolver
+                            .get(*id)
+                            .map_err(|error| error.code().to_string())?;
+                        resolver
+                            .decode_stream(&object)
+                            .map_err(|error| error.code().to_string())?;
+                    }
+                }
+                Ok(())
+            });
+            remember_fuzz_outcome(
+                &stream_result,
+                &mut report.refusal,
+                &mut report.panicked,
+            );
+
+            let text_result = run_fuzz_stage(&mut report.stages.text, || {
+                let mut refusal = None;
+                let _ = text::scan_text(document, pages, &mut refusal);
+                match refusal {
+                    Some(code) => Err(code),
+                    None => Ok(()),
+                }
+            });
+            remember_fuzz_outcome(
+                &text_result,
+                &mut report.refusal,
+                &mut report.panicked,
+            );
+        }
     }
+
+    let mut semantic = None;
+    if let Some(source) = source.as_ref() {
+        let semantic_result = run_fuzz_stage(&mut report.stages.semantic_document, || {
+            pdf_text::semantic::semantic_document(source.clone(), limits)
+                .map_err(|error| error.code().to_string())
+        });
+        remember_fuzz_outcome(
+            &semantic_result,
+            &mut report.refusal,
+            &mut report.panicked,
+        );
+        if let FuzzStageOutcome::Success(value) = semantic_result {
+            semantic = Some(value);
+        }
+    }
+
+    if let Some(semantic) = semantic.as_ref() {
+        for page in &semantic.pages {
+            for image in &page.images {
+                let Some(object) = image.object else {
+                    record_fuzz_refusal(&mut report.stages.load_image, "image_without_object");
+                    if report.refusal.is_none() {
+                        report.refusal = Some("image_without_object".to_string());
+                    }
+                    continue;
+                };
+
+                let Some(document) = document.as_ref() else {
+                    record_fuzz_refusal(&mut report.stages.load_image, "document_unavailable");
+                    if report.refusal.is_none() {
+                        report.refusal = Some("document_unavailable".to_string());
+                    }
+                    continue;
+                };
+
+                let image_result = run_fuzz_stage(&mut report.stages.load_image, || {
+                    let mut resolver = document.resolver();
+                    pdf_text::images::load_image(
+                        &mut resolver,
+                        object,
+                        limits.max_decoded_bytes / 4,
+                    )
+                    .map(|_| ())
+                    .map_err(|error| error.code().to_string())
+                });
+                remember_fuzz_outcome(
+                    &image_result,
+                    &mut report.refusal,
+                    &mut report.panicked,
+                );
+            }
+        }
+    }
+
+    if let Some(document) = document.as_ref() {
+        let page_zero = pages
+            .as_ref()
+            .and_then(|pages| pages.iter().find(|page| page.index == 0));
+        if let Some(page) = page_zero {
+            let render_result = run_fuzz_stage(&mut report.stages.render_page_0, || {
+                let scale = mutation_render_scale(page)
+                    .ok_or_else(|| "invalid_page_bounds".to_string())?;
+                let options = RenderOptions {
+                    scale,
+                    fallback_font: None,
+                };
+                let mut resolver = document.resolver();
+                let raster = rasterize_page(
+                    &mut resolver,
+                    page,
+                    &options,
+                    [255, 255, 255, 255],
+                )
+                .map_err(|_| "render_failed".to_string())?;
+                let _ = std::hint::black_box(raster);
+                Ok(())
+            });
+            remember_fuzz_outcome(
+                &render_result,
+                &mut report.refusal,
+                &mut report.panicked,
+            );
+        } else {
+            record_fuzz_refusal(&mut report.stages.render_page_0, "page_0_unavailable");
+            if report.refusal.is_none() {
+                report.refusal = Some("page_0_unavailable".to_string());
+            }
+        }
+    }
+
+    report
 }
 
 fn run_mutate(path: &Path, seed: u64, count: usize) -> u8 {
@@ -1966,11 +2464,12 @@ fn run_mutate(path: &Path, seed: u64, count: usize) -> u8 {
     let mut refused: BTreeMap<String, u64> = BTreeMap::new();
     let mut panicked = 0u64;
     let mut panic_seeds = Vec::new();
+    let mut stages = FuzzStages::default();
 
     let previous_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(|_| {}));
 
-    for _ in 0..count {
+    for _ in 0..count.min(MAX_MUTATE_CASES) {
         let case_seed = next_random(&mut master_state);
         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let mut mutated = original.clone();
@@ -1980,10 +2479,17 @@ fn run_mutate(path: &Path, seed: u64, count: usize) -> u8 {
         }));
 
         match outcome {
-            Ok(Ok(())) => ok = ok.saturating_add(1),
-            Ok(Err(code)) => {
-                let count = refused.entry(code).or_insert(0);
-                *count = count.saturating_add(1);
+            Ok(case) => {
+                stages.merge(&case.stages);
+                if case.panicked {
+                    panicked = panicked.saturating_add(1);
+                    panic_seeds.push(case_seed);
+                } else if let Some(code) = case.refusal {
+                    let occurrences = refused.entry(code).or_insert(0);
+                    *occurrences = occurrences.saturating_add(1);
+                } else {
+                    ok = ok.saturating_add(1);
+                }
             }
             Err(_) => {
                 panicked = panicked.saturating_add(1);
@@ -1997,7 +2503,7 @@ fn run_mutate(path: &Path, seed: u64, count: usize) -> u8 {
     let mut json = JsonWriter::new();
     json.begin_object();
     json.member("cases");
-    json.number(count as u64);
+    json.number(count.min(MAX_MUTATE_CASES) as u64);
     json.member("ok");
     json.number(ok);
     json.member("refused");
@@ -2015,6 +2521,8 @@ fn run_mutate(path: &Path, seed: u64, count: usize) -> u8 {
         json.number(seed);
     }
     json.end_array();
+    json.member("stages");
+    write_fuzz_stages(&mut json, &stages);
     json.end_object();
     println!("{}", json.finish());
 
