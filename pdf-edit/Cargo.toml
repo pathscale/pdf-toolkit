@@ -1,13 +1,18 @@
 [package]
-name = "pdf-edit"
+name = "pdf-toolkit-edit"
+description = "Incremental PDF updates that keep the original bytes, plus a writer and editor round-trip checker"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
 
 [dependencies]
-pdf-core = { path = "../pdf-core", default-features = false, features = ["std"] }
-pdf-write = { path = "../pdf-write" }
-pdf-text = { path = "../pdf-text" }
-pdf-raster = { path = "../pdf-raster" }
-pdf-render = { path = "../pdf-render" }
-
+pdf-core = { package = "pdf-toolkit-core", version = "0.1.0", path = "../pdf-core", default-features = false, features = ["std"] }
+pdf-write = { package = "pdf-toolkit-write", version = "0.1.0", path = "../pdf-write" }
+pdf-text = { package = "pdf-toolkit-text", version = "0.1.0", path = "../pdf-text" }
+pdf-raster = { package = "pdf-toolkit-raster", version = "0.1.0", path = "../pdf-raster" }
+pdf-render = { package = "pdf-toolkit-render", version = "0.1.0", path = "../pdf-render" }

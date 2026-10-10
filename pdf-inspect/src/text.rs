@@ -5,7 +5,7 @@ use std::path::Path;
 use pdf_core::file;
 use pdf_core::pages::{Page, PageWalk};
 use pdf_core::{Document, Limits};
-use pdf_inspect::JsonWriter;
+use pdf_toolkit_inspect::JsonWriter;
 use pdf_text::extract::{extract_text, page_receipt, page_receipt_cached, PageReceipt};
 use pdf_text::layout::BlockKind;
 

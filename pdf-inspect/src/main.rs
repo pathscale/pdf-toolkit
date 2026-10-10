@@ -15,7 +15,7 @@ use pdf_core::object::{DictRef, Object};
 use pdf_core::pages::{page_count_hint, Page, PageWalk};
 use pdf_core::source::PdfSource;
 use pdf_core::work::ObjectRef;
-use pdf_inspect::{digest_hex, format_number, JsonWriter, Sha256};
+use pdf_toolkit_inspect::{digest_hex, format_number, JsonWriter, Sha256};
 use pdf_raster::{encode_png, render_page as rasterize_page};
 use pdf_render::RenderOptions;
 

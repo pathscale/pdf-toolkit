@@ -1,12 +1,21 @@
 [package]
-name = "pdf-inspect"
+name = "pdf-toolkit-inspect"
+description = "pdf-inspect: summary, text, receipts, semantic JSON, rendering, benchmarks, fuzzing and fixture checks for PDFs"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[[bin]]
+name = "pdf-inspect"
+path = "src/main.rs"
 
 [dependencies]
-pdf-core = { path = "../pdf-core", default-features = false, features = ["std"] }
-pdf-text = { path = "../pdf-text" }
-pdf-raster = { path = "../pdf-raster" }
-pdf-render = { path = "../pdf-render", default-features = false }
-
+pdf-core = { package = "pdf-toolkit-core", version = "0.1.0", path = "../pdf-core", default-features = false, features = ["std"] }
+pdf-text = { package = "pdf-toolkit-text", version = "0.1.0", path = "../pdf-text" }
+pdf-raster = { package = "pdf-toolkit-raster", version = "0.1.0", path = "../pdf-raster" }
+pdf-render = { package = "pdf-toolkit-render", version = "0.1.0", path = "../pdf-render", default-features = false }

@@ -15,5 +15,8 @@ members = [
 version = "0.1.0"
 edition = "2021"
 license = "MIT"
-
-
+repository = "https://github.com/pathscale/pdf-toolkit"
+homepage = "https://github.com/pathscale/pdf-toolkit"
+readme = "README.md"
+keywords = ["pdf", "parser", "text-extraction", "renderer", "no-std"]
+categories = ["parser-implementations", "rendering", "text-processing", "no-std"]

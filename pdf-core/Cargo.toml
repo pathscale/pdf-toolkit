@@ -1,8 +1,14 @@
 [package]
-name = "pdf-core"
+name = "pdf-toolkit-core"
+description = "Zero-copy, bounded, no_std PDF reader core: objects, xref tables and streams, filters, page tree"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
 
 [features]
 default = ["std"]

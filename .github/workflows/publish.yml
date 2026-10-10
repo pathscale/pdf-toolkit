@@ -1,0 +1,48 @@
+name: Publish
+
+# House scheme: a version bump on the default branch is the release. No tags, no
+# manual step. The workspace version lives in the root Cargo.toml, so that file is
+# the trigger.
+on:
+  push:
+    branches: [master]
+    paths: ['Cargo.toml']
+  workflow_dispatch:
+
+jobs:
+  publish:
+    runs-on: ubicloud-standard-2
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Check the registry token
+        run: |
+          if [ -z "${CARGO_REGISTRY_TOKEN:-}" ]; then
+            echo "CARGO_REGISTRY_TOKEN is empty: gh secret set CARGO_REGISTRY_TOKEN --repo pathscale/pdf-toolkit"
+            exit 1
+          fi
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+      - run: cargo build --release --workspace
+      - run: ./target/release/pdf-inspect check fixtures/house
+      - run: cargo check -p pdf-toolkit-core -p pdf-toolkit-text -p pdf-toolkit-render --no-default-features
+
+      # The registry is the only authority on what is already released, so each
+      # crate is checked there and published only when its version is missing.
+      # Order follows the dependency graph.
+      - name: Publish missing versions
+        run: |
+          set -eu
+          version=$(cargo metadata --no-deps --format-version 1 | jq -er '.packages[] | select(.name == "pdf-toolkit-core") | .version')
+          for crate in pdf-toolkit-core pdf-toolkit-text pdf-toolkit-render pdf-toolkit-raster \
+                       pdf-toolkit-write pdf-toolkit-edit pdf-toolkit-inspect; do
+            if cargo info --registry crates-io "$crate@$version" > /dev/null 2>&1; then
+              echo "$crate $version is already on crates.io"
+            else
+              cargo publish -p "$crate" --token "$CARGO_REGISTRY_TOKEN"
+            fi
+          done
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}

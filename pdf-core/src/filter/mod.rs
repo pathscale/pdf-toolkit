@@ -196,7 +196,7 @@ pub fn decode_image_report(
             if params.columns != params.width || rows != params.height {
                 return Err(FilterError::BadParams { filter: kind });
             }
-            // Request canonical black bits from lane B, then apply the PDF
+            // Request canonical black bits from the fax decoder, then apply the PDF
             // sample polarity here, independently of the decoder's defaults.
             let fax = ccitt::CcittParams {
                 k: params.k,

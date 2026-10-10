@@ -1,13 +1,18 @@
 [package]
-name = "pdf-raster"
+name = "pdf-toolkit-raster"
+description = "Rasterize PDF pages to RGBA and PNG with tiny-skia, pure Rust"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
 
 [dependencies]
-pdf-core = { path = "../pdf-core", default-features = false }
-pdf-render = { path = "../pdf-render", default-features = false }
-pdf-text = { path = "../pdf-text", default-features = false }
+pdf-core = { package = "pdf-toolkit-core", version = "0.1.0", path = "../pdf-core", default-features = false }
+pdf-render = { package = "pdf-toolkit-render", version = "0.1.0", path = "../pdf-render", default-features = false }
+pdf-text = { package = "pdf-toolkit-text", version = "0.1.0", path = "../pdf-text", default-features = false }
 tiny-skia = { version = "0.12", features = ["png-format"] }
 zune-jpeg = "0.5"
-

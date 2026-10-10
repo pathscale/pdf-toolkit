@@ -1,13 +1,18 @@
 [package]
-name = "pdf-text"
+name = "pdf-toolkit-text"
+description = "PDF fonts, encodings, ToUnicode CMaps, content interpreter, reading order and semantic documents (no_std)"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
 
 [features]
 default = ["std"]
 std = ["pdf-core/std"]
 
 [dependencies]
-pdf-core = { path = "../pdf-core", default-features = false }
-
+pdf-core = { package = "pdf-toolkit-core", version = "0.1.0", path = "../pdf-core", default-features = false }

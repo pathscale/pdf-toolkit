@@ -13,7 +13,7 @@ use std::sync::Arc;
 
 use pdf_core::pages::{Page, PageWalk};
 use pdf_core::{Document, Limits, PdfSource, XrefKind};
-use pdf_edit::Editor;
+use pdf_toolkit_edit::Editor;
 use pdf_raster::Raster;
 use pdf_render::RenderOptions;
 use pdf_text::images::{ColorSpace, ImageData};

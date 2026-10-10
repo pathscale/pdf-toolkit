@@ -1,0 +1,34 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [master]
+
+jobs:
+  portable:
+    name: no_std cores
+    runs-on: ubicloud-standard-2
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo check -p pdf-toolkit-core -p pdf-toolkit-text -p pdf-toolkit-render --no-default-features
+
+  fixtures:
+    name: Fixtures and round trips
+    runs-on: ubicloud-standard-2
+    # The fixture set and the round-trip checker finish in seconds once built.
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo build --release --workspace
+      # Regenerating must reproduce the committed fixtures byte for byte.
+      - run: ./target/release/pdf-fixtures fixtures/house && git diff --exit-code fixtures
+      - run: ./target/release/pdf-inspect check fixtures/house
+      - run: mkdir -p target/roundtrip && ./target/release/pdf-roundtrip target/roundtrip fixtures/house
+      # Deterministic mutation fuzzing: any panic fails the job.
+      - run: |
+          for f in fixtures/house/*.pdf; do
+            ./target/release/pdf-inspect mutate "$f" --seed 1 --count 300 > /dev/null
+          done
