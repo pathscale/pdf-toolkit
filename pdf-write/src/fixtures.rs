@@ -1229,10 +1229,550 @@ fn ligatures_actualtext() -> io::Result<Fixture> {
     )
 }
 
-/// Writes all twenty-two fixtures in a fixed order. No reader is invoked.
+fn link_annotation(bounds: [f64; 4], action: Value) -> Value {
+    Value::Dict(vec![
+        ("Type".to_owned(), name("Annot")),
+        ("Subtype".to_owned(), name("Link")),
+        ("Rect".to_owned(), rect(bounds)),
+        (
+            "Border".to_owned(),
+            Value::Array(vec![Value::Int(0), Value::Int(0), Value::Int(0)]),
+        ),
+        ("A".to_owned(), action),
+    ])
+}
+
+fn named_destination_annotation(bounds: [f64; 4], destination: Value) -> Value {
+    Value::Dict(vec![
+        ("Type".to_owned(), name("Annot")),
+        ("Subtype".to_owned(), name("Link")),
+        ("Rect".to_owned(), rect(bounds)),
+        (
+            "Border".to_owned(),
+            Value::Array(vec![Value::Int(0), Value::Int(0), Value::Int(0)]),
+        ),
+        ("Dest".to_owned(), destination),
+    ])
+}
+
+fn image_dictionary(
+    width: u32,
+    height: u32,
+    color_space: Option<Value>,
+    bits_per_component: Option<u8>,
+    extra: Dict,
+) -> Dict {
+    let mut entries = vec![
+        ("Type".to_owned(), name("XObject")),
+        ("Subtype".to_owned(), name("Image")),
+        ("Width".to_owned(), Value::Int(i64::from(width))),
+        ("Height".to_owned(), Value::Int(i64::from(height))),
+    ];
+    if let Some(color_space) = color_space {
+        entries.push(("ColorSpace".to_owned(), color_space));
+    }
+    if let Some(bits_per_component) = bits_per_component {
+        entries.push((
+            "BitsPerComponent".to_owned(),
+            Value::Int(i64::from(bits_per_component)),
+        ));
+    }
+    entries.extend(extra);
+    entries
+}
+
+fn image_truth(
+    expected: &mut String,
+    object: u32,
+    kind: &str,
+    rgba: Option<&[u8]>,
+) {
+    expected.push_str(&format!("image.{object}.kind={kind}\n"));
+    if let Some(rgba) = rgba {
+        expected.push_str(&format!(
+            "image.{object}.rgba_sha256={}\n",
+            sha256::hex(rgba),
+        ));
+    }
+}
+
+fn links_outline() -> io::Result<Fixture> {
+    let mut house = House::new("1.4")?;
+    let first_plain = text("Navigation page one")?;
+    let second_plain = text("Navigation page two")?;
+    let third_plain = text("Navigation page three")?;
+    let first = house.add_page(house.pages, &first_plain, Encoding::Plain, Vec::new())?;
+    let second = house.add_page(house.pages, &second_plain, Encoding::Plain, Vec::new())?;
+    let third = house.add_page(house.pages, &third_plain, Encoding::Plain, Vec::new())?;
+
+    let uri_annotation = house.writer.alloc()?;
+    let goto_annotation = house.writer.alloc()?;
+    let named_annotation = house.writer.alloc()?;
+    let launch_annotation = house.writer.alloc()?;
+
+    house.writer.object(
+        uri_annotation,
+        &link_annotation(
+            [72.0, 700.0, 190.0, 722.0],
+            Value::Dict(vec![
+                ("S".to_owned(), name("URI")),
+                (
+                    "URI".to_owned(),
+                    Value::Str(b"https://example.test/house".to_vec()),
+                ),
+            ]),
+        ),
+    )?;
+    house.writer.object(
+        goto_annotation,
+        &link_annotation(
+            [200.0, 700.0, 310.0, 722.0],
+            Value::Dict(vec![
+                ("S".to_owned(), name("GoTo")),
+                (
+                    "D".to_owned(),
+                    Value::Array(vec![reference(third.id), name("Fit")]),
+                ),
+            ]),
+        ),
+    )?;
+    house.writer.object(
+        named_annotation,
+        &named_destination_annotation([72.0, 680.0, 200.0, 702.0], name("chapter")),
+    )?;
+    house.writer.object(
+        launch_annotation,
+        &link_annotation(
+            [72.0, 660.0, 200.0, 682.0],
+            Value::Dict(vec![
+                ("S".to_owned(), name("Launch")),
+                (
+                    "F".to_owned(),
+                    Value::Str(b"ignored-document.pdf".to_vec()),
+                ),
+            ]),
+        ),
+    )?;
+
+    house.writer.object(
+        first.id,
+        &page_value(
+            house.pages,
+            first.content,
+            vec![(
+                "Annots".to_owned(),
+                Value::Array(vec![reference(uri_annotation), reference(goto_annotation)]),
+            )],
+        ),
+    )?;
+    house.writer.object(
+        second.id,
+        &page_value(
+            house.pages,
+            second.content,
+            vec![(
+                "Annots".to_owned(),
+                Value::Array(vec![reference(named_annotation)]),
+            )],
+        ),
+    )?;
+    house.writer.object(
+        third.id,
+        &page_value(
+            house.pages,
+            third.content,
+            vec![(
+                "Annots".to_owned(),
+                Value::Array(vec![reference(launch_annotation)]),
+            )],
+        ),
+    )?;
+
+    let destination_tree = house.writer.alloc()?;
+    house.writer.object(
+        destination_tree,
+        &Value::Dict(vec![(
+            "Names".to_owned(),
+            Value::Array(vec![
+                Value::Str(b"chapter".to_vec()),
+                Value::Array(vec![reference(third.id), name("Fit")]),
+            ]),
+        )]),
+    )?;
+
+    let outline_root = house.writer.alloc()?;
+    let introduction = house.writer.alloc()?;
+    let first_detail = house.writer.alloc()?;
+    let destination = house.writer.alloc()?;
+    let named_target = house.writer.alloc()?;
+
+    house.writer.object(
+        outline_root,
+        &Value::Dict(vec![
+            ("Type".to_owned(), name("Outlines")),
+            ("First".to_owned(), reference(introduction)),
+            ("Last".to_owned(), reference(destination)),
+            ("Count".to_owned(), Value::Int(4)),
+        ]),
+    )?;
+    house.writer.object(
+        introduction,
+        &Value::Dict(vec![
+            (
+                "Title".to_owned(),
+                Value::Str(b"Introduction".to_vec()),
+            ),
+            ("Parent".to_owned(), reference(outline_root)),
+            ("Next".to_owned(), reference(destination)),
+            ("First".to_owned(), reference(first_detail)),
+            ("Last".to_owned(), reference(first_detail)),
+            ("Count".to_owned(), Value::Int(1)),
+            (
+                "Dest".to_owned(),
+                Value::Array(vec![reference(first.id), name("Fit")]),
+            ),
+        ]),
+    )?;
+    house.writer.object(
+        first_detail,
+        &Value::Dict(vec![
+            ("Title".to_owned(), Value::Str(b"First detail".to_vec())),
+            ("Parent".to_owned(), reference(introduction)),
+            (
+                "Dest".to_owned(),
+                Value::Array(vec![reference(second.id), name("Fit")]),
+            ),
+        ]),
+    )?;
+    house.writer.object(
+        destination,
+        &Value::Dict(vec![
+            ("Title".to_owned(), Value::Str(b"Destination".to_vec())),
+            ("Parent".to_owned(), reference(outline_root)),
+            ("Prev".to_owned(), reference(introduction)),
+            ("First".to_owned(), reference(named_target)),
+            ("Last".to_owned(), reference(named_target)),
+            ("Count".to_owned(), Value::Int(1)),
+            (
+                "Dest".to_owned(),
+                Value::Array(vec![reference(third.id), name("Fit")]),
+            ),
+        ]),
+    )?;
+    house.writer.object(
+        named_target,
+        &Value::Dict(vec![
+            ("Title".to_owned(), Value::Str(b"Named target".to_vec())),
+            ("Parent".to_owned(), reference(destination)),
+            (
+                "Dest".to_owned(),
+                Value::Array(vec![reference(third.id), name("Fit")]),
+            ),
+        ]),
+    )?;
+
+    let info = house.writer.alloc()?;
+    let mut title = vec![0xfe, 0xff];
+    for unit in "Wave Four Navigation".encode_utf16() {
+        title.extend_from_slice(&unit.to_be_bytes());
+    }
+    house.writer.object(
+        info,
+        &Value::Dict(vec![("Title".to_owned(), Value::HexStr(title))]),
+    )?;
+
+    let kids = [first.id, second.id, third.id];
+    house.write_base(&kids, 3)?;
+    house.writer.object(
+        house.catalog,
+        &Value::Dict(vec![
+            ("Type".to_owned(), name("Catalog")),
+            ("Pages".to_owned(), reference(house.pages)),
+            ("Outlines".to_owned(), reference(outline_root)),
+            (
+                "Names".to_owned(),
+                Value::Dict(vec![("Dests".to_owned(), reference(destination_tree))]),
+            ),
+        ]),
+    )?;
+    house.table(vec![("Info".to_owned(), reference(info))])?;
+
+    let mut expected = manifest("1.4", "table", 1, 3, 0, false);
+    for (index, plain) in [&first_plain, &second_plain, &third_plain]
+        .into_iter()
+        .enumerate()
+    {
+        text_page_truth(
+            &mut expected,
+            index,
+            LETTER,
+            LETTER,
+            0,
+            plain,
+            "Font,ProcSet",
+            match index {
+                0 => "Navigation page one",
+                1 => "Navigation page two",
+                _ => "Navigation page three",
+            },
+            "",
+            1,
+            0,
+            false,
+        );
+        expected.push_str(&format!("page.{index}.images=0\n"));
+    }
+    expected.push_str(
+        "page.0.links=uri:https://example.test/house | page:2\n\
+         page.1.links=page:2\n\
+         page.2.links=\n\
+         outline=Introduction | >First detail | Destination | >Named target\n\
+         info.title=Wave Four Navigation\n\
+         warning=action_ignored\n",
+    );
+    Ok(house.fixture(expected))
+}
+
+fn images() -> io::Result<Fixture> {
+    let mut house = House::new("1.4")?;
+    let rgb = house.writer.alloc()?;
+    let alpha = house.writer.alloc()?;
+    let gray = house.writer.alloc()?;
+    let indexed = house.writer.alloc()?;
+    let stencil = house.writer.alloc()?;
+    let jpeg = house.writer.alloc()?;
+
+    let rgb_samples = [
+        255, 0, 0, 0, 255, 0, 0, 0, 255, 255, 255, 0, 0, 255, 255, 255, 0, 255, 32, 64, 96,
+        96, 128, 160, 192, 224, 255, 17, 34, 51, 68, 85, 102, 119, 136, 153,
+    ];
+    let alpha_samples = [255, 192, 128, 64, 0, 255, 255, 192, 128, 64, 32, 16];
+    let mut rgb_rgba = Vec::with_capacity(48);
+    for (pixel, alpha) in rgb_samples.chunks_exact(3).zip(alpha_samples) {
+        rgb_rgba.extend_from_slice(pixel);
+        rgb_rgba.push(alpha);
+    }
+    let mut alpha_rgba = Vec::with_capacity(48);
+    for alpha in alpha_samples {
+        alpha_rgba.extend_from_slice(&[alpha, alpha, alpha, 255]);
+    }
+
+    house.writer.stream(
+        rgb,
+        image_dictionary(
+            4,
+            3,
+            Some(name("DeviceRGB")),
+            Some(8),
+            vec![
+                ("Filter".to_owned(), name("FlateDecode")),
+                ("SMask".to_owned(), reference(alpha)),
+            ],
+        ),
+        &encode::flate(&rgb_samples),
+    )?;
+    house.writer.stream(
+        alpha,
+        image_dictionary(
+            4,
+            3,
+            Some(name("DeviceGray")),
+            Some(8),
+            vec![("Filter".to_owned(), name("FlateDecode"))],
+        ),
+        &encode::flate(&alpha_samples),
+    )?;
+
+    // Each row is padded to a whole byte: row 0 is "10", row 1 is "01".
+    let gray_samples = [0b1000_0000, 0b0100_0000];
+    let gray_rgba = [
+        0, 0, 0, 255, 255, 255, 255, 255, 255, 255, 255, 255, 0, 0, 0, 255,
+    ];
+    house.writer.stream(
+        gray,
+        image_dictionary(
+            2,
+            2,
+            Some(name("DeviceGray")),
+            Some(1),
+            vec![
+                ("Filter".to_owned(), name("FlateDecode")),
+                (
+                    "Decode".to_owned(),
+                    Value::Array(vec![Value::Int(1), Value::Int(0)]),
+                ),
+            ],
+        ),
+        &encode::flate(&gray_samples),
+    )?;
+
+    let palette = [
+        255, 0, 0, 0, 255, 0, 0, 0, 255, 255, 255, 255,
+    ];
+    let indexed_samples = [0b0001_1011];
+    let indexed_rgba = [
+        255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 255, 255,
+    ];
+    house.writer.stream(
+        indexed,
+        image_dictionary(
+            4,
+            1,
+            Some(Value::Array(vec![
+                name("Indexed"),
+                name("DeviceRGB"),
+                Value::Int(3),
+                Value::Str(palette.to_vec()),
+            ])),
+            Some(2),
+            Vec::new(),
+        ),
+        &indexed_samples,
+    )?;
+
+    // Each row is padded to a whole byte: row 0 is "01", row 1 is "10".
+    let stencil_samples = [0b0100_0000, 0b1000_0000];
+    let stencil_rgba = [
+        0, 0, 0, 255, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 255,
+    ];
+    house.writer.stream(
+        stencil,
+        image_dictionary(
+            2,
+            2,
+            None,
+            Some(1),
+            vec![("ImageMask".to_owned(), Value::Bool(true))],
+        ),
+        &stencil_samples,
+    )?;
+
+    let jpeg_bytes = [0xff, 0xd8, 0x00, 0x7f, 0xff, 0xd9];
+    house.writer.stream(
+        jpeg,
+        image_dictionary(
+            3,
+            2,
+            Some(name("DeviceRGB")),
+            Some(8),
+            vec![("Filter".to_owned(), name("DCTDecode"))],
+        ),
+        &jpeg_bytes,
+    )?;
+
+    let resources = fixture_resources(
+        &[],
+        &[
+            ("RGB", rgb),
+            ("Gray", gray),
+            ("Indexed", indexed),
+            ("Stencil", stencil),
+            ("JPEG", jpeg),
+        ],
+    );
+    let mut plain = Vec::new();
+    plain.extend_from_slice(b"q 4 0 0 3 72 700 cm /RGB Do Q\n");
+    plain.extend_from_slice(b"q 2 0 0 2 80 680 cm /Gray Do Q\n");
+    plain.extend_from_slice(b"q 4 0 0 1 90 660 cm /Indexed Do Q\n");
+    plain.extend_from_slice(b"q 2 0 0 2 100 640 cm /Stencil Do Q\n");
+    plain.extend_from_slice(b"q 3 0 0 2 110 620 cm /JPEG Do Q\n");
+
+    let mut fixture = text_fixture(
+        house,
+        &plain,
+        resources,
+        "ProcSet,XObject",
+        "",
+        "",
+        0,
+        0,
+        true,
+        0,
+    )?;
+    fixture.expected.push_str(
+        "page.0.images=5\n\
+         page.0.links=\n\
+         outline=\n",
+    );
+    image_truth(
+        &mut fixture.expected,
+        rgb,
+        "pixels",
+        Some(rgb_rgba.as_slice()),
+    );
+    image_truth(
+        &mut fixture.expected,
+        alpha,
+        "pixels",
+        Some(alpha_rgba.as_slice()),
+    );
+    image_truth(
+        &mut fixture.expected,
+        gray,
+        "pixels",
+        Some(&gray_rgba[..]),
+    );
+    image_truth(
+        &mut fixture.expected,
+        indexed,
+        "pixels",
+        Some(&indexed_rgba[..]),
+    );
+    image_truth(
+        &mut fixture.expected,
+        stencil,
+        "pixels",
+        Some(&stencil_rgba[..]),
+    );
+    image_truth(&mut fixture.expected, jpeg, "jpeg", None);
+    Ok(fixture)
+}
+
+fn styled_spans() -> io::Result<Fixture> {
+    let mut house = House::new("1.4")?;
+    let bold = add_type1_font(&mut house, "Helvetica-Bold", None)?;
+    let italic = add_type1_font(&mut house, "Helvetica-Oblique", None)?;
+    let courier = add_type1_font(&mut house, "Courier", None)?;
+    let resources = fixture_resources(
+        &[
+            ("F1", house.font),
+            ("F2", bold),
+            ("F3", italic),
+            ("F4", courier),
+        ],
+        &[],
+    );
+
+    let plain = b"BT /F1 12 Tf 72 720 Td (Plain ) Tj \
+                   /F2 12 Tf (bold ) Tj \
+                   /F3 12 Tf (italic ) Tj \
+                   /F4 12 Tf (code ) Tj \
+                   /F1 12 Tf (exam-) Tj 0 -14 Td (ple.) Tj ET\n";
+    let mut fixture = text_fixture(
+        house,
+        plain,
+        resources,
+        "Font,ProcSet",
+        "Plain bold italic code exam- ple.",
+        "",
+        1,
+        0,
+        false,
+        0,
+    )?;
+    fixture.expected.push_str(
+        "page.0.images=0\n\
+         page.0.links=\n\
+         outline=\n\
+         page.0.spans=Plain  | bold [b] | italic [i] | code [m] | example.\n",
+    );
+    Ok(fixture)
+}
+
+/// Writes all twenty-five fixtures in a fixed order. No reader is invoked.
 pub fn write_fixtures(out: &Path) -> io::Result<usize> {
     type Builder = fn() -> io::Result<Fixture>;
-    let builders: [(&str, Builder); 22] = [
+    let builders: [(&str, Builder); 25] = [
         ("classic-one-page", classic_one_page),
         ("xref-stream-objstm", xref_stream_objstm),
         ("incremental", incremental),
@@ -1255,6 +1795,9 @@ pub fn write_fixtures(out: &Path) -> io::Result<usize> {
         ("rotated-page", rotated_page),
         ("image-only", image_only),
         ("ligatures-actualtext", ligatures_actualtext),
+        ("links-outline", links_outline),
+        ("images", images),
+        ("styled-spans", styled_spans),
     ];
     fs::create_dir_all(out)?;
     for (name, build) in builders {

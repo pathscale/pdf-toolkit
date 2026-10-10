@@ -1,0 +1,114 @@
+%PDF-1.4
+%‚„œ”
+5 0 obj
+<< /Length 51 >>
+stream
+BT /F1 12 Tf 72 720 Td (Navigation page one) Tj ET
+
+endstream
+endobj
+4 0 obj
+<< /Type /Page /Parent 2 0 R /Contents 5 0 R >>
+endobj
+7 0 obj
+<< /Length 51 >>
+stream
+BT /F1 12 Tf 72 720 Td (Navigation page two) Tj ET
+
+endstream
+endobj
+6 0 obj
+<< /Type /Page /Parent 2 0 R /Contents 7 0 R >>
+endobj
+9 0 obj
+<< /Length 53 >>
+stream
+BT /F1 12 Tf 72 720 Td (Navigation page three) Tj ET
+
+endstream
+endobj
+8 0 obj
+<< /Type /Page /Parent 2 0 R /Contents 9 0 R >>
+endobj
+10 0 obj
+<< /Type /Annot /Subtype /Link /Rect [72 700 190 722] /Border [0 0 0] /A << /S /URI /URI (https://example.test/house) >> >>
+endobj
+11 0 obj
+<< /Type /Annot /Subtype /Link /Rect [200 700 310 722] /Border [0 0 0] /A << /S /GoTo /D [8 0 R /Fit] >> >>
+endobj
+12 0 obj
+<< /Type /Annot /Subtype /Link /Rect [72 680 200 702] /Border [0 0 0] /Dest /chapter >>
+endobj
+13 0 obj
+<< /Type /Annot /Subtype /Link /Rect [72 660 200 682] /Border [0 0 0] /A << /S /Launch /F (ignored-document.pdf) >> >>
+endobj
+4 0 obj
+<< /Type /Page /Parent 2 0 R /Contents 5 0 R /Annots [10 0 R 11 0 R] >>
+endobj
+6 0 obj
+<< /Type /Page /Parent 2 0 R /Contents 7 0 R /Annots [12 0 R] >>
+endobj
+8 0 obj
+<< /Type /Page /Parent 2 0 R /Contents 9 0 R /Annots [13 0 R] >>
+endobj
+14 0 obj
+<< /Names [(chapter) [8 0 R /Fit]] >>
+endobj
+15 0 obj
+<< /Type /Outlines /First 16 0 R /Last 18 0 R /Count 4 >>
+endobj
+16 0 obj
+<< /Title (Introduction) /Parent 15 0 R /Next 18 0 R /First 17 0 R /Last 17 0 R /Count 1 /Dest [4 0 R /Fit] >>
+endobj
+17 0 obj
+<< /Title (First detail) /Parent 16 0 R /Dest [6 0 R /Fit] >>
+endobj
+18 0 obj
+<< /Title (Destination) /Parent 15 0 R /Prev 16 0 R /First 19 0 R /Last 19 0 R /Count 1 /Dest [8 0 R /Fit] >>
+endobj
+19 0 obj
+<< /Title (Named target) /Parent 18 0 R /Dest [8 0 R /Fit] >>
+endobj
+20 0 obj
+<< /Title <feff005700610076006500200046006f007500720020004e0061007600690067006100740069006f006e> >>
+endobj
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R >>
+endobj
+2 0 obj
+<< /Type /Pages /Kids [4 0 R 6 0 R 8 0 R] /Count 3 /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> /ProcSet [/PDF /Text] >> >>
+endobj
+3 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>
+endobj
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R /Outlines 15 0 R /Names << /Dests 14 0 R >> >>
+endobj
+xref
+0 21
+0000000000 65535 f 
+0000002185 00000 n 
+0000001961 00000 n 
+0000002115 00000 n 
+0000001012 00000 n 
+0000000015 00000 n 
+0000001099 00000 n 
+0000000179 00000 n 
+0000001179 00000 n 
+0000000343 00000 n 
+0000000509 00000 n 
+0000000649 00000 n 
+0000000773 00000 n 
+0000000877 00000 n 
+0000001259 00000 n 
+0000001313 00000 n 
+0000001387 00000 n 
+0000001514 00000 n 
+0000001592 00000 n 
+0000001718 00000 n 
+0000001796 00000 n 
+trailer
+<< /Info 20 0 R /Size 21 /Root 1 0 R >>
+startxref
+2278
+%%EOF
