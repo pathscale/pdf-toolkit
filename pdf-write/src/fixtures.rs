@@ -283,6 +283,153 @@ fn page_truth(
     }
 }
 
+fn fixture_resources(fonts: &[(&str, u32)], xobjects: &[(&str, u32)]) -> Value {
+    let mut entries = Vec::new();
+    if !fonts.is_empty() {
+        entries.push((
+            "Font".to_owned(),
+            Value::Dict(
+                fonts
+                    .iter()
+                    .map(|(key, number)| ((*key).to_owned(), reference(*number)))
+                    .collect(),
+            ),
+        ));
+    }
+    if !xobjects.is_empty() {
+        entries.push((
+            "XObject".to_owned(),
+            Value::Dict(
+                xobjects
+                    .iter()
+                    .map(|(key, number)| ((*key).to_owned(), reference(*number)))
+                    .collect(),
+            ),
+        ));
+    }
+    entries.push((
+        "ProcSet".to_owned(),
+        Value::Array(vec![
+            name("PDF"),
+            name("Text"),
+            name("ImageB"),
+            name("ImageC"),
+        ]),
+    ));
+    Value::Dict(entries)
+}
+
+fn add_type1_font(
+    house: &mut House,
+    base_font: &str,
+    encoding: Option<Value>,
+) -> io::Result<u32> {
+    let font = house.writer.alloc()?;
+    let mut entries = vec![
+        ("Type".to_owned(), name("Font")),
+        ("Subtype".to_owned(), name("Type1")),
+        ("BaseFont".to_owned(), name(base_font)),
+    ];
+    if let Some(encoding) = encoding {
+        entries.push(("Encoding".to_owned(), encoding));
+    }
+    house.writer.object(font, &Value::Dict(entries))?;
+    Ok(font)
+}
+
+fn append_text_line(
+    content: &mut Vec<u8>,
+    font: &str,
+    size: u32,
+    x: i32,
+    y: i32,
+    bytes: &[u8],
+) -> io::Result<()> {
+    content.extend_from_slice(format!("BT /{font} {size} Tf {x} {y} Td ").as_bytes());
+    content.extend_from_slice(&serialize_value(&Value::Str(bytes.to_vec()))?);
+    content.extend_from_slice(b" Tj ET\n");
+    Ok(())
+}
+
+fn append_hex_text_line(
+    content: &mut Vec<u8>,
+    font: &str,
+    size: u32,
+    x: i32,
+    y: i32,
+    bytes: &[u8],
+) -> io::Result<()> {
+    content.extend_from_slice(format!("BT /{font} {size} Tf {x} {y} Td ").as_bytes());
+    content.extend_from_slice(&serialize_value(&Value::HexStr(bytes.to_vec()))?);
+    content.extend_from_slice(b" Tj ET\n");
+    Ok(())
+}
+
+fn text_page_truth(
+    expected: &mut String,
+    index: usize,
+    media: [f64; 4],
+    crop: [f64; 4],
+    rotate: u16,
+    plain: &[u8],
+    resource_keys: &str,
+    text_norm: &str,
+    headings: &str,
+    columns: u8,
+    unmapped: u32,
+    ocr_required: bool,
+) {
+    expected.push_str(&format!(
+        "page.{index}.media_box={}\npage.{index}.crop_box={}\n\
+         page.{index}.rotate={rotate}\npage.{index}.contents=1\n\
+         page.{index}.content_sha256={}\npage.{index}.resource_keys={resource_keys}\n\
+         page.{index}.text_norm={text_norm}\npage.{index}.headings={headings}\n\
+         page.{index}.columns={columns}\npage.{index}.unmapped={unmapped}\n\
+         page.{index}.ocr_required={ocr_required}\n",
+        box_text(media),
+        box_text(crop),
+        sha256::hex(plain),
+    ));
+}
+
+fn text_fixture(
+    mut house: House,
+    plain: &[u8],
+    resources: Value,
+    resource_keys: &str,
+    text_norm: &str,
+    headings: &str,
+    columns: u8,
+    unmapped: u32,
+    ocr_required: bool,
+    rotate: u16,
+) -> io::Result<Fixture> {
+    let mut extra = vec![("Resources".to_owned(), resources)];
+    if rotate != 0 {
+        extra.push(("Rotate".to_owned(), Value::Int(i64::from(rotate))));
+    }
+    let page = house.add_page(house.pages, plain, Encoding::Plain, extra)?;
+    house.write_base(&[page.id], 1)?;
+    house.table(Vec::new())?;
+
+    let mut expected = manifest("1.4", "table", 1, 1, 0, false);
+    text_page_truth(
+        &mut expected,
+        0,
+        LETTER,
+        LETTER,
+        rotate,
+        plain,
+        resource_keys,
+        text_norm,
+        headings,
+        columns,
+        unmapped,
+        ocr_required,
+    );
+    Ok(house.fixture(expected))
+}
+
 fn letter_truth(expected: &mut String, index: usize, plain: &[u8]) {
     page_truth(
         expected,
@@ -702,10 +849,390 @@ fn many_pages() -> io::Result<Fixture> {
     Ok(house.fixture(expected))
 }
 
-/// Writes all fourteen fixtures in a fixed order. No reader is invoked.
+fn text_encodings() -> io::Result<Fixture> {
+    let mut house = House::new("1.4")?;
+    let bold = add_type1_font(&mut house, "Helvetica-Bold", None)?;
+    let encoding = Value::Dict(vec![
+        ("BaseEncoding".to_owned(), name("WinAnsiEncoding")),
+        (
+            "Differences".to_owned(),
+            Value::Array(vec![
+                Value::Int(128),
+                name("eacute"),
+                name("fi"),
+                name("quoteright"),
+                name("Euro"),
+                name("uni2014"),
+            ]),
+        ),
+    ]);
+    let encoded_font = add_type1_font(&mut house, "Helvetica", Some(encoding))?;
+    let resources = fixture_resources(&[("F1", encoded_font), ("F2", bold)], &[]);
+    let mut plain = Vec::new();
+    append_text_line(&mut plain, "F2", 18, 72, 750, b"Text encodings")?;
+    append_text_line(&mut plain, "F1", 11, 72, 710, b"\x91Caf\x80, \x81nal\x82")?;
+    append_text_line(&mut plain, "F1", 11, 72, 680, b"Price: \x83 12 \x84 wise.")?;
+    append_text_line(
+        &mut plain,
+        "F1",
+        11,
+        72,
+        650,
+        b"WinAnsi: d\xe9j\xe0 vu, na\xefve, \xa3 \xc4 \xf1",
+    )?;
+    text_fixture(
+        house,
+        &plain,
+        resources,
+        "Font,ProcSet",
+        "Text encodings \u{2018}Caf\u{00e9}, \u{fb01}nal\u{2019} Price: \u{20ac} 12 \u{2014} wise. WinAnsi: d\u{00e9}j\u{00e0} vu, na\u{00ef}ve, \u{00a3} \u{00c4} \u{00f1}",
+        "Text encodings",
+        1,
+        0,
+        false,
+        0,
+    )
+}
+
+fn text_kerning() -> io::Result<Fixture> {
+    let mut house = House::new("1.4")?;
+    let bold = add_type1_font(&mut house, "Helvetica-Bold", None)?;
+    let resources = fixture_resources(&[("F1", house.font), ("F2", bold)], &[]);
+    let mut plain = Vec::new();
+    append_text_line(&mut plain, "F2", 18, 72, 750, b"Text kerning")?;
+    plain.extend_from_slice(
+        b"BT /F1 11 Tf 18 TL 72 712 Td [(Kerning) -20 (stays) 20 (tight)] TJ\n\
+          T* [(Large) -300 (gap)] TJ\n\
+          T* 0.5 Tc 2 Tw 80 Tz (Tc Tw and Tz) Tj\n\
+          (Single quote line) '\n\
+          0.5 0.25 (Double quote line) \"\n\
+          ET\n",
+    );
+    text_fixture(
+        house,
+        &plain,
+        resources,
+        "Font,ProcSet",
+        "Text kerning Kerningstaystight Large gap Tc Tw and Tz Single quote line Double quote line",
+        "Text kerning",
+        1,
+        0,
+        false,
+        0,
+    )
+}
+
+fn text_type0() -> io::Result<Fixture> {
+    let mut house = House::new("1.4")?;
+    let cmap = concat!(
+        "/CIDInit /ProcSet findresource begin\n",
+        "12 dict begin\n",
+        "begincmap\n",
+        "/CIDSystemInfo << /Registry (Adobe) /Ordering (UCS) /Supplement 0 >> def\n",
+        "/CMapName /Adobe-Identity-UCS def\n",
+        "/CMapType 2 def\n",
+        "1 begincodespacerange\n",
+        "<0000> <FFFF>\n",
+        "endcodespacerange\n",
+        "4 beginbfchar\n",
+        "<0001> <0054>\n",
+        "<0002> <0079>\n",
+        "<0003> <0070>\n",
+        "<0004> <0065>\n",
+        "endbfchar\n",
+        "1 beginbfchar\n",
+        "<0030> <00660066>\n",
+        "endbfchar\n",
+        "1 beginbfrange\n",
+        "<0010> <0012> <0061>\n",
+        "endbfrange\n",
+        "1 beginbfrange\n",
+        "<0020> <0022> [<0020> <0066> <0069>]\n",
+        "endbfrange\n",
+        "endcmap\n",
+        "CMapName currentdict /CMap defineresource pop\n",
+        "end\n",
+        "end\n",
+    )
+    .as_bytes();
+    let cmap_id = house.writer.alloc()?;
+    house.writer.stream(cmap_id, Vec::new(), cmap)?;
+
+    let descriptor = house.writer.alloc()?;
+    house.writer.object(
+        descriptor,
+        &Value::Dict(vec![
+            ("Type".to_owned(), name("FontDescriptor")),
+            ("FontName".to_owned(), name("Helvetica")),
+            ("Flags".to_owned(), Value::Int(32)),
+            ("FontBBox".to_owned(), rect([0.0, -200.0, 1000.0, 900.0])),
+            ("ItalicAngle".to_owned(), Value::Int(0)),
+            ("Ascent".to_owned(), Value::Int(718)),
+            ("Descent".to_owned(), Value::Int(-207)),
+            ("CapHeight".to_owned(), Value::Int(718)),
+            ("StemV".to_owned(), Value::Int(80)),
+        ]),
+    )?;
+
+    let descendant = house.writer.alloc()?;
+    house.writer.object(
+        descendant,
+        &Value::Dict(vec![
+            ("Type".to_owned(), name("Font")),
+            ("Subtype".to_owned(), name("CIDFontType2")),
+            ("BaseFont".to_owned(), name("Helvetica")),
+            (
+                "CIDSystemInfo".to_owned(),
+                Value::Dict(vec![
+                    ("Registry".to_owned(), Value::Str(b"Adobe".to_vec())),
+                    ("Ordering".to_owned(), Value::Str(b"Identity".to_vec())),
+                    ("Supplement".to_owned(), Value::Int(0)),
+                ]),
+            ),
+            ("FontDescriptor".to_owned(), reference(descriptor)),
+            ("DW".to_owned(), Value::Int(500)),
+            (
+                "W".to_owned(),
+                Value::Array(vec![
+                    Value::Int(1),
+                    Value::Array(vec![
+                        Value::Int(600),
+                        Value::Int(500),
+                        Value::Int(500),
+                        Value::Int(500),
+                    ]),
+                    Value::Int(16),
+                    Value::Int(18),
+                    Value::Int(500),
+                ]),
+            ),
+        ]),
+    )?;
+
+    let font = house.writer.alloc()?;
+    house.writer.object(
+        font,
+        &Value::Dict(vec![
+            ("Type".to_owned(), name("Font")),
+            ("Subtype".to_owned(), name("Type0")),
+            ("BaseFont".to_owned(), name("Helvetica")),
+            ("Encoding".to_owned(), name("Identity-H")),
+            (
+                "DescendantFonts".to_owned(),
+                Value::Array(vec![reference(descendant)]),
+            ),
+            ("ToUnicode".to_owned(), reference(cmap_id)),
+        ]),
+    )?;
+
+    let resources = fixture_resources(&[("F1", font)], &[]);
+    let mut plain = Vec::new();
+    append_hex_text_line(
+        &mut plain,
+        "F1",
+        11,
+        72,
+        710,
+        &[
+            0x00, 0x01, 0x00, 0x02, 0x00, 0x03, 0x00, 0x04, 0x00, 0x20, 0x00, 0x10, 0x00,
+            0x11, 0x00, 0x12, 0x00, 0x20, 0x00, 0x30,
+        ],
+    )?;
+    text_fixture(
+        house,
+        &plain,
+        resources,
+        "Font,ProcSet",
+        "Type abc ff",
+        "",
+        1,
+        0,
+        false,
+        0,
+    )
+}
+
+fn two_columns() -> io::Result<Fixture> {
+    let mut house = House::new("1.4")?;
+    let bold = add_type1_font(&mut house, "Helvetica-Bold", None)?;
+    let resources = fixture_resources(&[("F1", house.font), ("F2", bold)], &[]);
+    let mut plain = Vec::new();
+    append_text_line(
+        &mut plain,
+        "F2",
+        18,
+        72,
+        750,
+        b"Full width heading above two text columns",
+    )?;
+    plain.extend_from_slice(
+        b"BT /F1 11 Tf 72 710 Td (Left paragraph one.) Tj ET\n\
+          BT /F1 11 Tf 360 710 Td (Right paragraph one.) Tj ET\n\
+          BT /F1 11 Tf 72 680 Td (Left paragraph two.) Tj ET\n\
+          BT /F1 11 Tf 360 680 Td (Right paragraph two.) Tj ET\n\
+          BT /F1 11 Tf 72 650 Td (Left paragraph three.) Tj ET\n\
+          BT /F1 11 Tf 360 650 Td (Right paragraph three.) Tj ET\n",
+    );
+    text_fixture(
+        house,
+        &plain,
+        resources,
+        "Font,ProcSet",
+        "Full width heading above two text columns Left paragraph one. Left paragraph two. Left paragraph three. Right paragraph one. Right paragraph two. Right paragraph three.",
+        "Full width heading above two text columns",
+        2,
+        0,
+        false,
+        0,
+    )
+}
+
+fn form_xobject() -> io::Result<Fixture> {
+    let mut house = House::new("1.4")?;
+    let mut form_content = Vec::new();
+    append_text_line(
+        &mut form_content,
+        "F1",
+        11,
+        0,
+        0,
+        b"Repeated form line.",
+    )?;
+    let form = house.writer.alloc()?;
+    house.writer.stream(
+        form,
+        vec![
+            ("Type".to_owned(), name("XObject")),
+            ("Subtype".to_owned(), name("Form")),
+            ("FormType".to_owned(), Value::Int(1)),
+            ("BBox".to_owned(), rect([0.0, -4.0, 160.0, 16.0])),
+            (
+                "Resources".to_owned(),
+                fixture_resources(&[("F1", house.font)], &[]),
+            ),
+        ],
+        &form_content,
+    )?;
+
+    let image = house.writer.alloc()?;
+    let image_bytes = [0x7f; 16];
+    house.writer.stream(
+        image,
+        vec![
+            ("Type".to_owned(), name("XObject")),
+            ("Subtype".to_owned(), name("Image")),
+            ("Width".to_owned(), Value::Int(4)),
+            ("Height".to_owned(), Value::Int(4)),
+            ("ColorSpace".to_owned(), name("DeviceRGB")),
+            ("BitsPerComponent".to_owned(), Value::Int(8)),
+            ("Filter".to_owned(), name("DCTDecode")),
+        ],
+        &image_bytes,
+    )?;
+
+    let resources = fixture_resources(&[("F1", house.font)], &[("Fm1", form), ("Im1", image)]);
+    let mut plain = Vec::new();
+    append_text_line(&mut plain, "F1", 11, 72, 740, b"Before image.")?;
+    plain.extend_from_slice(b"q 4 0 0 4 72 710 cm\nBI /W 4 /H 4 /BPC 8 /CS /G ID ");
+    plain.extend_from_slice(&[0x7f; 16]);
+    plain.extend_from_slice(b" EI\nQ\n");
+    plain.extend_from_slice(b"q 1 0 0 1 72 680 cm /Fm1 Do Q\n");
+    plain.extend_from_slice(b"q 1 0 0 1 280 650 cm /Fm1 Do Q\n");
+    append_text_line(&mut plain, "F1", 11, 72, 620, b"After image.")?;
+    text_fixture(
+        house,
+        &plain,
+        resources,
+        "Font,ProcSet,XObject",
+        "Before image. Repeated form line. Repeated form line. After image.",
+        "",
+        1,
+        0,
+        false,
+        0,
+    )
+}
+
+fn rotated_page() -> io::Result<Fixture> {
+    let house = House::new("1.4")?;
+    let resources = fixture_resources(&[("F1", house.font)], &[]);
+    let mut plain = Vec::new();
+    append_text_line(&mut plain, "F1", 11, 72, 710, b"Rotated line one.")?;
+    append_text_line(&mut plain, "F1", 11, 72, 680, b"Rotated line two.")?;
+    append_text_line(&mut plain, "F1", 11, 72, 650, b"Rotated line three.")?;
+    text_fixture(
+        house,
+        &plain,
+        resources,
+        "Font,ProcSet",
+        "Rotated line one. Rotated line two. Rotated line three.",
+        "",
+        1,
+        0,
+        false,
+        90,
+    )
+}
+
+fn image_only() -> io::Result<Fixture> {
+    let mut house = House::new("1.4")?;
+    let image = house.writer.alloc()?;
+    let image_bytes = [0xff; 16];
+    house.writer.stream(
+        image,
+        vec![
+            ("Type".to_owned(), name("XObject")),
+            ("Subtype".to_owned(), name("Image")),
+            ("Width".to_owned(), Value::Int(4)),
+            ("Height".to_owned(), Value::Int(4)),
+            ("ColorSpace".to_owned(), name("DeviceRGB")),
+            ("BitsPerComponent".to_owned(), Value::Int(8)),
+            ("Filter".to_owned(), name("DCTDecode")),
+        ],
+        &image_bytes,
+    )?;
+    let resources = fixture_resources(&[], &[("Im1", image)]);
+    let plain = b"q 64 0 0 64 72 700 cm /Im1 Do Q\n".to_vec();
+    text_fixture(
+        house,
+        &plain,
+        resources,
+        "ProcSet,XObject",
+        "",
+        "",
+        // A page with no text lines has no columns.
+        0,
+        0,
+        true,
+        0,
+    )
+}
+
+fn ligatures_actualtext() -> io::Result<Fixture> {
+    let house = House::new("1.4")?;
+    let resources = fixture_resources(&[("F1", house.font)], &[]);
+    let mut plain = Vec::new();
+    plain.extend_from_slice(b"/Span << /ActualText (Hello) >> BDC\n");
+    append_text_line(&mut plain, "F1", 11, 72, 710, b"World")?;
+    plain.extend_from_slice(b"EMC\n");
+    text_fixture(
+        house,
+        &plain,
+        resources,
+        "Font,ProcSet",
+        "Hello",
+        "",
+        1,
+        0,
+        false,
+        0,
+    )
+}
+
+/// Writes all twenty-two fixtures in a fixed order. No reader is invoked.
 pub fn write_fixtures(out: &Path) -> io::Result<usize> {
     type Builder = fn() -> io::Result<Fixture>;
-    let builders: [(&str, Builder); 14] = [
+    let builders: [(&str, Builder); 22] = [
         ("classic-one-page", classic_one_page),
         ("xref-stream-objstm", xref_stream_objstm),
         ("incremental", incremental),
@@ -720,6 +1247,14 @@ pub fn write_fixtures(out: &Path) -> io::Result<usize> {
         ("bad-startxref", bad_startxref),
         ("junk-header", junk_header),
         ("many-pages", many_pages),
+        ("text-encodings", text_encodings),
+        ("text-kerning", text_kerning),
+        ("text-type0", text_type0),
+        ("two-columns", two_columns),
+        ("form-xobject", form_xobject),
+        ("rotated-page", rotated_page),
+        ("image-only", image_only),
+        ("ligatures-actualtext", ligatures_actualtext),
     ];
     fs::create_dir_all(out)?;
     for (name, build) in builders {
