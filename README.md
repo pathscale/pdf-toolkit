@@ -1,20 +1,32 @@
 # pdf-toolkit
 
-`pdf-toolkit` is a Rust workspace for PDF primitives, text extraction,
-inspection, writing, and a graphical interface. The workspace is currently a
-scaffold. It does not yet implement PDF parsing, extraction, inspection,
-writing, or a GUI.
+A pure Rust PDF reader, built for agents and for the chuzz browser: fast, bounded and safe by construction.
+No C libraries, no threads in the core, no JavaScript or actions ever executed. Layout fidelity targets 80 to
+90 percent; speed and clean internals come first.
 
 ## Crates
 
-- `pdf-core`: foundational PDF types and primitives. It is `no_std` and uses
-  `alloc`; its optional `std` feature is reserved for integrations such as file
-  I/O.
-- `pdf-text`: text extraction APIs.
-- `pdf-inspect`: document inspection APIs.
-- `pdf-write`: PDF writing APIs.
-- `pdf-gui`: graphical user interface APIs.
+- `pdf-core` (no_std + alloc): zero-copy object model over one shared `Arc<[u8]>`, xref tables, xref streams,
+  hybrid files and `/Prev` chains, object streams, stream filters (Flate via miniz_oxide, LZW, ASCII85,
+  ASCIIHex, RunLength, PNG and TIFF predictors), a caller-owned `Resolver` with a byte-capped object stream
+  cache, and the page tree walk with inheritance. Every limit is a named refusal (`Limits`, `DocError`).
+- `pdf-text` (no_std + alloc): fonts (Type1, TrueType, Type3, Type0/CID), encodings and `/Differences`,
+  ToUnicode CMaps, a content stream interpreter producing positioned glyphs, layout with columns, reading order
+  and headings, and `extract::extract_text` for plain text with a lossy note.
+- `pdf-inspect` (binary): `summary`, `streams`, `text`, `receipt`, `bench`, `mutate` (deterministic mutation
+  fuzzing) and `check` (fixture manifests).
+- `pdf-write`: a minimal serializer and `pdf-fixtures`, which writes the house fixture set with ground-truth
+  manifests. It does not depend on the reader.
+- `pdf-gui`: placeholder.
 
-Each crate currently contains only a minimal library placeholder. The workspace
-uses stable Rust and is licensed under MIT. See `NOTICE` for the current
-third-party import record and the attribution format for future imports.
+## Checking
+
+```sh
+cargo build --release
+./target/release/pdf-fixtures fixtures/house
+./target/release/pdf-inspect check fixtures/house
+./target/release/pdf-inspect mutate fixtures/house/hybrid.pdf --seed 1 --count 2000
+./target/release/pdf-inspect bench some.pdf
+```
+
+Behaviour is proven by fixtures, not unit tests. See `NOTICE` for imported data.
