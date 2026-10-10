@@ -2,7 +2,6 @@
 
 use crate::source::{PdfSource, SourceError};
 use alloc::sync::Arc;
-use alloc::vec::Vec;
 use core::fmt;
 use std::fs::File;
 use std::io::Read;
@@ -50,17 +49,18 @@ pub fn open(path: impl AsRef<Path>, max_bytes: u64) -> Result<PdfSource, FileOpe
         });
     }
 
-    let mut bytes = Vec::new();
-    file.take(max_bytes.saturating_add(1))
-        .read_to_end(&mut bytes)
-        .map_err(FileOpenError::Io)?;
-    let observed = bytes.len() as u64;
-    if observed > max_bytes {
-        return Err(FileOpenError::TooLarge {
-            limit: max_bytes,
-            observed,
-        });
+    // Read straight into the shared allocation: a Vec then Arc::from would hold the
+    // file twice at peak. repeat_n is TrustedLen, so collect allocates exactly once.
+    let length = usize::try_from(file_size).map_err(|_| FileOpenError::TooLarge {
+        limit: max_bytes,
+        observed: file_size,
+    })?;
+    let mut bytes: Arc<[u8]> = core::iter::repeat_n(0u8, length).collect();
+    let mut file = file;
+    match Arc::get_mut(&mut bytes) {
+        Some(buffer) => file.read_exact(buffer).map_err(FileOpenError::Io)?,
+        None => unreachable!("a freshly collected Arc is unique"),
     }
 
-    PdfSource::new(Arc::<[u8]>::from(bytes)).map_err(FileOpenError::Source)
+    PdfSource::new(bytes).map_err(FileOpenError::Source)
 }
