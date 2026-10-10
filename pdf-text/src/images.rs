@@ -155,10 +155,19 @@ fn read_image(
         Some(value) => value.get().as_bool()
             .ok_or_else(|| wrong(object.id(), "ImageMask boolean"))?,
     };
-    let mut bits_per_component = resolver.resolve_dict_key(dict, b"BitsPerComponent")?
-        .and_then(|value| value.get().as_i64())
-        .and_then(|number| u8::try_from(number).ok())
-        .unwrap_or(if image_mask { 1 } else { 0 });
+    let decoded_result = decode(resolver, object, budget);
+    // JPX carries its own precision. Do not even resolve the PDF entry.
+    let mut bits_per_component = if matches!(
+        &decoded_result,
+        Ok(decoded) if decoded.image == Some(FilterKind::Jpx)
+    ) {
+        0
+    } else {
+        resolver.resolve_dict_key(dict, b"BitsPerComponent")?
+            .and_then(|value| value.get().as_i64())
+            .and_then(|number| u8::try_from(number).ok())
+            .unwrap_or(if image_mask { 1 } else { 0 })
+    };
 
     let mut color = if image_mask {
         ColorSpec::simple(ColorSpace::Gray)
@@ -203,7 +212,7 @@ fn read_image(
         data: ImageData::Unsupported("decode"),
         soft_mask: None,
     };
-    let mut decoded = match decode(resolver, object, budget) {
+    let mut decoded = match decoded_result {
         Ok(decoded) => decoded,
         Err(error) => {
             recover(resolver, object, error, "image_decode_failed")?;
@@ -259,6 +268,25 @@ fn read_image(
         } else {
             if decoded.truncated {
                 warn(resolver, object, "image_truncated");
+            }
+            #[cfg(feature = "jpx")]
+            if codec == FilterKind::Jpx {
+                let result = decode_jpx(
+                    resolver, object, dict, &decoded.bytes, &color, &mut image, budget,
+                );
+                match result {
+                    Ok(true) => return Ok((image, None)),
+                    Ok(false) => return Ok((image, soft)),
+                    Err(error) => {
+                        let reason = match &error {
+                            DocError::Unsupported { feature: "jpx_components" } => "jpx_components",
+                            _ => "jpx",
+                        };
+                        recover(resolver, object, error, "jpx_decode")?;
+                        image.data = ImageData::Unsupported(reason);
+                        return Ok((image, soft));
+                    }
+                }
             }
             image.data = match codec {
                 FilterKind::Dct => ImageData::Jpeg(decoded.bytes),
@@ -353,6 +381,387 @@ fn read_image(
     }
     image.data = ImageData::Pixels { rgba };
     Ok((image, soft))
+}
+
+#[cfg(feature = "jpx")]
+fn decode_jpx(
+    resolver: &mut Resolver<'_>,
+    object: &Object,
+    dict: DictRef<'_>,
+    bytes: &[u8],
+    color: &ColorSpec,
+    image: &mut Image,
+    budget: &mut Budget,
+) -> Result<bool, DocError> {
+    use hayro_jpeg2000::{DecodeSettings, DecoderContext};
+
+    let header = JpxHeader::read(bytes)?;
+    let has_pdf_color = resolver.resolve_dict_key(dict, b"ColorSpace")?
+        .map(|value| !value.get().is_null()).unwrap_or(false);
+    let settings = DecodeSettings {
+        resolve_palette_indices: !matches!(color.space, ColorSpace::Indexed { .. }),
+        ..DecodeSettings::default()
+    };
+    let source = hayro_jpeg2000::Image::new(bytes, &settings).map_err(jpx_error)?;
+    let width = source.width();
+    let height = source.height();
+    let space = if has_pdf_color {
+        color.space
+    } else {
+        match source.color_space().num_channels() {
+            1 => ColorSpace::Gray,
+            3 => ColorSpace::Rgb,
+            4 => ColorSpace::Cmyk,
+            _ => return Err(jpx_components()),
+        }
+    };
+    let count = channels(space);
+    // Up to four colour planes, plus a separate opacity plane.
+    if count == 0 || (image.image_mask && count != 1) {
+        return Err(jpx_components());
+    }
+    let stream_count = usize::from(source.color_space().num_channels())
+        .checked_add(usize::from(source.has_alpha()))
+        .ok_or_else(jpx_components)?;
+    if !(1..=5).contains(&stream_count) {
+        return Err(jpx_components());
+    }
+
+    let maximum = resolver.document().limits().max_decoded_bytes.min(isize::MAX as u64);
+    let pixels = u64::from(width).checked_mul(u64::from(height))
+        .ok_or_else(|| size_error(maximum))?;
+    // The public decoder hides the raw component count. SIZ supplies it,
+    // including planes that a palette or channel definition might replace.
+    let plane_bytes = pixels.checked_mul(header.count.max(stream_count) as u64)
+        .and_then(|size| size.checked_mul(4))
+        .ok_or_else(|| size_error(maximum))?;
+    check(LimitKind::DecodedBytes, plane_bytes, maximum)?;
+    budget.charge(usize::try_from(plane_bytes).map_err(|_| size_error(maximum))?)?;
+    if width != image.width || height != image.height {
+        return Err(wrong(object.id(), "JPX dimensions matching image dictionary"));
+    }
+    let layout = SampleLayout::new(width, height, count, 8, maximum)?;
+    budget.charge(layout.rgba)?;
+
+    let in_data = image_integer(resolver, dict, b"SMaskInData", 0, object.id())?;
+    if !matches!(in_data, 0 | 1 | 2) {
+        return Err(wrong(object.id(), "SMaskInData in 0..2"));
+    }
+    let has_pdf_soft = resolver.resolve_dict_key(dict, b"SMask")?
+        .map(|value| !value.get().is_null() && !value.get().as_name()
+            .map(|name| name.eq_bytes(b"None")).unwrap_or(false))
+        .unwrap_or(false);
+    let use_stream_alpha = in_data != 0 || !has_pdf_soft;
+    let alpha_size = usize::try_from(pixels).map_err(|_| size_error(maximum))?;
+
+    let mut context = DecoderContext::default();
+    let decoded = source.decode(&mut context).map_err(jpx_error)?;
+    let components = decoded.components();
+    if !(1..=5).contains(&components.len()) {
+        return Err(jpx_components());
+    }
+    // An explicit PDF space can consume all four planes as CMYK even when
+    // the raw codestream was guessed to be RGB with opacity.
+    let alpha_index = if components.len() == count {
+        None
+    } else if source.has_alpha() && components.len() == count.saturating_add(1) {
+        Some(count)
+    } else {
+        return Err(jpx_components());
+    };
+    if in_data != 0 && alpha_index.is_none() {
+        return Err(jpx_components());
+    }
+    let use_alpha = use_stream_alpha && alpha_index.is_some();
+    if use_alpha {
+        budget.charge(alpha_size)?;
+    }
+    let mut planes = [None; 5];
+    for (index, component) in components.iter().enumerate() {
+        let geometry = header.geometry.get(index).copied().ok_or_else(jpx_components)?;
+        let plane = JpxPlane::new(component, width, height, geometry)?;
+        *planes.get_mut(index).ok_or_else(jpx_components)? = Some(plane);
+    }
+    let first = planes.first().and_then(|plane| *plane).ok_or_else(jpx_components)?;
+    let depth = components.first().ok_or_else(jpx_components)?.bit_depth();
+    let mut pairs = if has_pdf_color {
+        read_decode(resolver, dict, count, space, 8, object.id())?
+    } else {
+        [DecodePair { low: 0.0, high: 1.0 }; 4]
+    };
+    if matches!(space, ColorSpace::Indexed { .. }) {
+        let explicit_decode = resolver.resolve_dict_key(dict, b"Decode")?
+            .map(|value| !value.get().is_null()).unwrap_or(false);
+        if !explicit_decode {
+            pairs.first_mut().ok_or_else(jpx_components)?.high = first.maximum;
+        }
+    }
+    let palette = match color.lookup.as_ref() {
+        Some(value) => read_lookup(resolver, value, space, budget)?,
+        None => Vec::new(),
+    };
+    let mut rgba = zeroed(layout.rgba, maximum)?;
+    let mut soft_mask = if use_alpha {
+        Some(zeroed(alpha_size, maximum)?)
+    } else {
+        None
+    };
+    for (y, row) in rgba.chunks_exact_mut(layout.row_rgba).enumerate() {
+        for (x, pixel) in row.chunks_exact_mut(4).enumerate() {
+            let opacity = if use_alpha {
+                let index = alpha_index.ok_or_else(jpx_components)?;
+                planes.get(index).and_then(|plane| *plane).ok_or_else(jpx_components)?
+                    .fraction(x, y, width, height)?
+            } else {
+                1.0
+            };
+            let mut fractions = [0.0; 4];
+            for (slot, plane) in fractions.iter_mut().zip(planes.iter()).take(count) {
+                let fraction = plane.ok_or_else(jpx_components)?.fraction(x, y, width, height)?;
+                // SMaskInData 2 supplies premultiplied colour. The pixel API
+                // stores straight alpha, so undo that before applying Decode.
+                *slot = if in_data == 2 {
+                    if opacity > 0.0 { (fraction / opacity).clamp(0.0, 1.0) } else { 0.0 }
+                } else {
+                    fraction
+                };
+            }
+            let first = fractions.first().copied().ok_or_else(jpx_components)?;
+            let pair = pairs.first().copied().ok_or_else(jpx_components)?;
+            let mut value = if image.image_mask {
+                [0, 0, 0, 255u8.saturating_sub(jpx_byte(pair.map(first)))]
+            } else if let ColorSpace::Indexed { base, hival } = space {
+                let index = (pair.map(first).clamp(0.0, f64::from(hival)) + 0.5) as usize;
+                let base = base_space(base);
+                let start = index.checked_mul(channels(base)).ok_or_else(jpx_components)?;
+                let end = start.checked_add(channels(base)).ok_or_else(jpx_components)?;
+                let values = palette.get(start..end)
+                    .ok_or_else(|| wrong(object.id(), "JPX Indexed lookup entry"))?;
+                let [r, g, b] = rgb(base, values).ok_or_else(jpx_components)?;
+                [r, g, b, 255]
+            } else {
+                let mut values = [0u8; 4];
+                for (slot, (fraction, pair)) in values.iter_mut()
+                    .zip(fractions.iter().zip(pairs.iter())).take(count)
+                {
+                    *slot = jpx_byte(pair.map(*fraction));
+                }
+                let [r, g, b] = rgb(space, &values).ok_or_else(jpx_components)?;
+                [r, g, b, 255]
+            };
+            if use_alpha {
+                let alpha = jpx_byte(opacity);
+                let offset = y.checked_mul(usize::try_from(width)
+                    .map_err(|_| size_error(maximum))?)
+                    .and_then(|row| row.checked_add(x))
+                    .ok_or_else(|| size_error(maximum))?;
+                let slot = soft_mask.as_mut().and_then(|mask| mask.get_mut(offset))
+                    .ok_or_else(jpx_components)?;
+                *slot = alpha;
+                if let Some(current) = value.get_mut(3) {
+                    *current = (u16::from(*current).saturating_mul(u16::from(alpha)) / 255) as u8;
+                }
+            }
+            pixel.copy_from_slice(&value);
+        }
+    }
+    image.color_space = space;
+    image.bits_per_component = depth;
+    image.has_soft_mask |= use_alpha;
+    image.soft_mask = soft_mask;
+    image.data = ImageData::Pixels { rgba };
+    Ok(in_data != 0)
+}
+
+#[cfg(feature = "jpx")]
+fn jpx_byte(fraction: f64) -> u8 {
+    (fraction.clamp(0.0, 1.0) * 255.0 + 0.5) as u8
+}
+
+#[cfg(feature = "jpx")]
+fn jpx_components() -> DocError {
+    DocError::Unsupported { feature: "jpx_components" }
+}
+
+#[cfg(feature = "jpx")]
+fn jpx_error(error: hayro_jpeg2000::DecodeError) -> DocError {
+    match error {
+        hayro_jpeg2000::DecodeError::Validation(
+            hayro_jpeg2000::ValidationError::TooManyChannels,
+        ) => jpx_components(),
+        _ => DocError::Malformed { offset: 0, what: "jpx_decode" },
+    }
+}
+
+#[cfg(feature = "jpx")]
+#[derive(Clone, Copy)]
+struct JpxPlane<'a> {
+    samples: &'a [f32],
+    width: u32,
+    height: u32,
+    maximum: f64,
+}
+
+#[cfg(feature = "jpx")]
+impl<'a> JpxPlane<'a> {
+    fn new(
+        component: &'a hayro_jpeg2000::ComponentData,
+        width: u32,
+        height: u32,
+        geometry: (u32, u32),
+    ) -> Result<Self, DocError> {
+        let samples = component.samples();
+        let full_size = u64::from(width).checked_mul(u64::from(height))
+            .ok_or_else(jpx_components)?;
+        // Hayro normally expands subsampled components itself. If a compact
+        // plane is returned, retain its SIZ geometry for nearest sampling.
+        let (width, height) = if samples.len() as u64 == full_size {
+            (width, height)
+        } else {
+            geometry
+        };
+        if width == 0 || height == 0
+            || u64::from(width).checked_mul(u64::from(height)) != Some(samples.len() as u64)
+        {
+            return Err(jpx_components());
+        }
+        let depth = component.bit_depth();
+        let maximum = 1u32.checked_shl(u32::from(depth))
+            .and_then(|value| value.checked_sub(1))
+            .filter(|value| *value != 0).ok_or_else(jpx_components)?;
+        Ok(Self { samples, width, height, maximum: f64::from(maximum) })
+    }
+
+    fn fraction(
+        self,
+        x: usize,
+        y: usize,
+        width: u32,
+        height: u32,
+    ) -> Result<f64, DocError> {
+        let source_x = (x as u64).checked_mul(u64::from(self.width))
+            .and_then(|value| value.checked_div(u64::from(width)))
+            .ok_or_else(jpx_components)?;
+        let source_y = (y as u64).checked_mul(u64::from(self.height))
+            .and_then(|value| value.checked_div(u64::from(height)))
+            .ok_or_else(jpx_components)?;
+        let offset = source_y.checked_mul(u64::from(self.width))
+            .and_then(|row| row.checked_add(source_x))
+            .and_then(|offset| usize::try_from(offset).ok())
+            .ok_or_else(jpx_components)?;
+        let sample = self.samples.get(offset).copied()
+            .filter(|value| value.is_finite()).ok_or_else(jpx_components)?;
+        Ok((f64::from(sample) / self.maximum).clamp(0.0, 1.0))
+    }
+}
+
+#[cfg(feature = "jpx")]
+struct JpxHeader {
+    count: usize,
+    geometry: [(u32, u32); 5],
+}
+
+#[cfg(feature = "jpx")]
+impl JpxHeader {
+    fn read(bytes: &[u8]) -> Result<Self, DocError> {
+        let stream = jpx_codestream(bytes)?;
+        if !stream.starts_with(b"\xff\x4f\xff\x51") {
+            return Err(jpx_error(hayro_jpeg2000::FormatError::InvalidSignature.into()));
+        }
+        let count = usize::from(jpx_u16(stream, 40)?);
+        if !(1..=5).contains(&count) {
+            return Err(jpx_components());
+        }
+        let end = count.checked_mul(3).and_then(|size| size.checked_add(42))
+            .ok_or_else(jpx_components)?;
+        let length = usize::from(jpx_u16(stream, 4)?);
+        if length.checked_add(4) != Some(end) || stream.get(..end).is_none() {
+            return Err(DocError::Malformed { offset: 4, what: "jpx_decode" });
+        }
+        let right = jpx_u32(stream, 8)?;
+        let bottom = jpx_u32(stream, 12)?;
+        let left = jpx_u32(stream, 16)?;
+        let top = jpx_u32(stream, 20)?;
+        if right <= left || bottom <= top {
+            return Err(DocError::Malformed { offset: 8, what: "jpx_decode" });
+        }
+        let mut geometry = [(0, 0); 5];
+        for (slot, entry) in geometry.iter_mut()
+            .zip(stream.get(42..end).ok_or_else(jpx_components)?.chunks_exact(3))
+        {
+            let sx = u32::from(entry.get(1).copied().ok_or_else(jpx_components)?);
+            let sy = u32::from(entry.get(2).copied().ok_or_else(jpx_components)?);
+            if sx == 0 || sy == 0 {
+                return Err(jpx_components());
+            }
+            let ceil = |value: u32, step: u32| {
+                (value / step).saturating_add(u32::from(value % step != 0))
+            };
+            *slot = (
+                ceil(right, sx).saturating_sub(ceil(left, sx)),
+                ceil(bottom, sy).saturating_sub(ceil(top, sy)),
+            );
+        }
+        Ok(Self { count, geometry })
+    }
+}
+
+#[cfg(feature = "jpx")]
+fn jpx_codestream(bytes: &[u8]) -> Result<&[u8], DocError> {
+    if bytes.starts_with(b"\xff\x4f\xff\x51") {
+        return Ok(bytes);
+    }
+    if !bytes.starts_with(b"\x00\x00\x00\x0c\x6a\x50\x20\x20") {
+        return Err(DocError::Malformed { offset: 0, what: "jpx_decode" });
+    }
+    let mut remaining = bytes;
+    let mut codestream = None;
+    while !remaining.is_empty() {
+        let size = jpx_u32(remaining, 0)?;
+        let kind = remaining.get(4..8)
+            .ok_or(DocError::Malformed { offset: 0, what: "jpx_decode" })?;
+        let (size, header) = match size {
+            0 => (remaining.len(), 8),
+            1 => {
+                let high = u64::from(jpx_u32(remaining, 8)?);
+                let low = u64::from(jpx_u32(remaining, 12)?);
+                let size = usize::try_from((high << 32) | low)
+                    .map_err(|_| DocError::Malformed { offset: 8, what: "jpx_decode" })?;
+                (size, 16)
+            }
+            size => (
+                usize::try_from(size)
+                    .map_err(|_| DocError::Malformed { offset: 0, what: "jpx_decode" })?,
+                8,
+            ),
+        };
+        let payload = remaining.get(header..size)
+            .ok_or(DocError::Malformed { offset: 0, what: "jpx_decode" })?;
+        if kind == b"jp2c" {
+            codestream = Some(payload);
+        }
+        remaining = remaining.get(size..)
+            .ok_or(DocError::Malformed { offset: 0, what: "jpx_decode" })?;
+    }
+    codestream.ok_or(DocError::Malformed { offset: 0, what: "jpx_decode" })
+}
+
+#[cfg(feature = "jpx")]
+fn jpx_u16(bytes: &[u8], offset: usize) -> Result<u16, DocError> {
+    let end = offset.checked_add(2).ok_or_else(jpx_components)?;
+    match bytes.get(offset..end) {
+        Some([a, b]) => Ok(u16::from_be_bytes([*a, *b])),
+        _ => Err(DocError::Malformed { offset: offset as u64, what: "jpx_decode" }),
+    }
+}
+
+#[cfg(feature = "jpx")]
+fn jpx_u32(bytes: &[u8], offset: usize) -> Result<u32, DocError> {
+    let end = offset.checked_add(4).ok_or_else(jpx_components)?;
+    match bytes.get(offset..end) {
+        Some([a, b, c, d]) => Ok(u32::from_be_bytes([*a, *b, *c, *d])),
+        _ => Err(DocError::Malformed { offset: offset as u64, what: "jpx_decode" }),
+    }
 }
 
 fn image_params(

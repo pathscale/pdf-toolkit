@@ -16,6 +16,7 @@ categories.workspace = true
 default = ["std", "text"]
 std = ["pdf-core/std", "pdf-text?/std"]
 text = ["dep:pdf-text"]
+jpx = ["text", "pdf-text/jpx"]
 render = ["text", "dep:pdf-render"]
 raster = ["render", "std", "dep:pdf-raster"]
 write = ["dep:pdf-write"]
