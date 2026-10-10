@@ -8,13 +8,13 @@ MIT.
 ## Crates
 
 Most users want the umbrella crate, `pdf-toolkit`, with features: `text` (default), `render`, `raster`, `write`,
-`edit`, `jpx` (JPEG 2000 images through ps-hayro-jpeg2000); `default-features = false` gives the no_std reader alone. Its modules are the layered crates below, which
+`edit`, `jpx` (JPEG 2000 images through ps-hayro-jpeg2000), `jxl` (JPEG XL images, filter /JXLDecode, through ps-jxl-oxide); `default-features = false` gives the no_std reader alone. Its modules are the layered crates below, which
 can also be used directly (embedders such as a browser take only the no_std core and text layers).
 
 | Crate | What it does |
 |---|---|
 | `pdf-toolkit-core` (no_std + alloc) | Zero-copy object model over one shared `Arc<[u8]>`; xref tables, xref streams, hybrid files and `/Prev` chains; object streams; filters (Flate, LZW, ASCII85, ASCIIHex, RunLength, PNG/TIFF predictors, CCITT G3/G4, JBIG2); page tree with inheritance; explicit xref repair mode. Every limit is a named refusal. |
-| `pdf-toolkit-text` (no_std + alloc) | Type1, TrueType, Type3 and Type0/CID fonts, encodings, ToUnicode CMaps, a content interpreter producing positioned glyphs, layout with columns, reading order and headings, plain text extraction, a semantic document (styled spans, links, outline), annotation listing, and image XObjects to RGBA or JPEG payloads (JPEG 2000 with the `jpx` feature). |
+| `pdf-toolkit-text` (no_std + alloc) | Type1, TrueType, Type3 and Type0/CID fonts, encodings, ToUnicode CMaps, a content interpreter producing positioned glyphs, layout with columns, reading order and headings, plain text extraction, a semantic document (styled spans, links, outline), annotation listing, and image XObjects to RGBA or JPEG payloads (JPEG 2000 with the `jpx` feature, JPEG XL with `jxl`). |
 | `pdf-toolkit-render` (no_std + alloc) | Page display lists: paths, clips, colours, shadings, images and glyph outlines from embedded TrueType, CFF (via skrifa) and Type 1 fonts; annotation appearance streams with multiply blending. |
 | `pdf-toolkit-raster` | Rasterizes display lists to RGBA and PNG with tiny-skia; JPEG via zune-jpeg. |
 | `pdf-toolkit-write` | Deterministic writer: standard fonts, subset-embedded TrueType, images with alpha, links, annotations with appearance streams, outlines, xref streams and object streams. |
