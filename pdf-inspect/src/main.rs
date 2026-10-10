@@ -1,0 +1,1665 @@
+use std::alloc::{GlobalAlloc, Layout, System};
+use std::collections::BTreeMap;
+use std::ffi::{OsStr, OsString};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
+use std::time::Instant;
+
+use pdf_core::document::{Document, Resolver, XrefKind};
+use pdf_core::error::{DocError, Warning};
+use pdf_core::file;
+use pdf_core::limits::Limits;
+use pdf_core::object::{DictRef, Object};
+use pdf_core::pages::{page_count_hint, Page, PageWalk};
+use pdf_core::source::PdfSource;
+use pdf_core::work::ObjectRef;
+use pdf_inspect::{digest_hex, format_number, JsonWriter, Sha256};
+
+struct CountingAllocator;
+
+static CURRENT_BYTES: AtomicUsize = AtomicUsize::new(0);
+static PEAK_BYTES: AtomicUsize = AtomicUsize::new(0);
+
+#[global_allocator]
+static GLOBAL_ALLOCATOR: CountingAllocator = CountingAllocator;
+
+unsafe impl GlobalAlloc for CountingAllocator {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        let pointer = unsafe { System.alloc(layout) };
+        if !pointer.is_null() {
+            record_allocation(layout.size());
+        }
+        pointer
+    }
+
+    unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+        let pointer = unsafe { System.alloc_zeroed(layout) };
+        if !pointer.is_null() {
+            record_allocation(layout.size());
+        }
+        pointer
+    }
+
+    unsafe fn dealloc(&self, pointer: *mut u8, layout: Layout) {
+        unsafe { System.dealloc(pointer, layout) };
+        record_free(layout.size());
+    }
+
+    unsafe fn realloc(&self, pointer: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+        let result = unsafe { System.realloc(pointer, layout, new_size) };
+        if !result.is_null() {
+            if new_size >= layout.size() {
+                record_allocation(new_size.saturating_sub(layout.size()));
+            } else {
+                record_free(layout.size().saturating_sub(new_size));
+            }
+        }
+        result
+    }
+}
+
+fn record_allocation(size: usize) {
+    let current = CURRENT_BYTES
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
+            Some(value.saturating_add(size))
+        })
+        .map(|previous| previous.saturating_add(size))
+        .unwrap_or(usize::MAX);
+
+    let mut peak = PEAK_BYTES.load(Ordering::Relaxed);
+    while current > peak {
+        match PEAK_BYTES.compare_exchange_weak(
+            peak,
+            current,
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+        ) {
+            Ok(_) => break,
+            Err(observed) => peak = observed,
+        }
+    }
+}
+
+fn record_free(size: usize) {
+    let _ = CURRENT_BYTES.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
+        Some(value.saturating_sub(size))
+    });
+}
+
+fn reset_peak_bytes() {
+    PEAK_BYTES.store(CURRENT_BYTES.load(Ordering::Relaxed), Ordering::Relaxed);
+}
+
+fn peak_bytes() -> u64 {
+    PEAK_BYTES.load(Ordering::Relaxed) as u64
+}
+
+fn main() -> std::process::ExitCode {
+    std::process::ExitCode::from(run())
+}
+
+fn run() -> u8 {
+    let args: Vec<OsString> = std::env::args_os().skip(1).collect();
+    let Some(command_arg) = args.first() else {
+        print_usage();
+        return 1;
+    };
+    let Some(command) = command_arg.to_str() else {
+        print_usage();
+        return 1;
+    };
+
+    match command {
+        "summary" => match parse_summary_args(&args) {
+            Some((path, limits)) => run_summary(&path, limits),
+            None => {
+                print_usage();
+                1
+            }
+        },
+        "streams" => match parse_single_path(&args) {
+            Some(path) => run_streams(&path, Limits::default()),
+            None => {
+                print_usage();
+                1
+            }
+        },
+        "bench" => match parse_bench_args(&args) {
+            Some((paths, repeat)) => run_bench(&paths, repeat, Limits::default()),
+            None => {
+                print_usage();
+                1
+            }
+        },
+        "mutate" => match parse_mutate_args(&args) {
+            Some((path, seed, count)) => run_mutate(&path, seed, count),
+            None => {
+                print_usage();
+                1
+            }
+        },
+        "check" => match parse_single_path(&args) {
+            Some(path) => run_check(&path),
+            None => {
+                print_usage();
+                1
+            }
+        },
+        _ => {
+            print_usage();
+            1
+        }
+    }
+}
+
+fn print_usage() {
+    eprintln!(
+        "usage:\n  pdf-inspect summary FILE [--max-decoded N] [--max-depth N] \
+         [--max-prev-chain N] [--max-pages N]\n  pdf-inspect streams FILE\n  \
+         pdf-inspect bench FILE... [--repeat N]\n  \
+         pdf-inspect mutate FILE --seed N --count K\n  pdf-inspect check DIR"
+    );
+}
+
+fn parse_single_path(args: &[OsString]) -> Option<PathBuf> {
+    if args.len() != 2 {
+        return None;
+    }
+    args.get(1).map(PathBuf::from)
+}
+
+fn parse_summary_args(args: &[OsString]) -> Option<(PathBuf, Limits)> {
+    let mut path = None;
+    let mut limits = Limits::default();
+    let mut index = 1usize;
+
+    while index < args.len() {
+        let argument = args.get(index)?;
+        let text = argument.to_str()?;
+        match text {
+            "--max-decoded" => {
+                let value = parse_u64_argument(args.get(index.saturating_add(1))?)?;
+                limits.max_decoded_bytes = value;
+                index = index.saturating_add(2);
+            }
+            "--max-depth" => {
+                let value = parse_u32_argument(args.get(index.saturating_add(1))?)?;
+                limits.max_depth = value;
+                index = index.saturating_add(2);
+            }
+            "--max-prev-chain" => {
+                let value = parse_u32_argument(args.get(index.saturating_add(1))?)?;
+                limits.max_prev_chain = value;
+                index = index.saturating_add(2);
+            }
+            "--max-pages" => {
+                let value = parse_u32_argument(args.get(index.saturating_add(1))?)?;
+                limits.max_pages = value;
+                index = index.saturating_add(2);
+            }
+            value if value.starts_with("--") => return None,
+            _ => {
+                if path.is_some() {
+                    return None;
+                }
+                path = Some(PathBuf::from(argument));
+                index = index.saturating_add(1);
+            }
+        }
+    }
+
+    path.map(|path| (path, limits))
+}
+
+fn parse_bench_args(args: &[OsString]) -> Option<(Vec<PathBuf>, usize)> {
+    let mut paths = Vec::new();
+    let mut repeat = 3usize;
+    let mut index = 1usize;
+
+    while index < args.len() {
+        let argument = args.get(index)?;
+        let text = argument.to_str()?;
+        if text == "--repeat" {
+            repeat = usize::try_from(parse_u64_argument(
+                args.get(index.saturating_add(1))?,
+            )?)
+            .ok()?;
+            if repeat == 0 {
+                return None;
+            }
+            index = index.saturating_add(2);
+        } else if text.starts_with("--") {
+            return None;
+        } else {
+            paths.push(PathBuf::from(argument));
+            index = index.saturating_add(1);
+        }
+    }
+
+    if paths.is_empty() {
+        None
+    } else {
+        Some((paths, repeat))
+    }
+}
+
+fn parse_mutate_args(args: &[OsString]) -> Option<(PathBuf, u64, usize)> {
+    let mut path = None;
+    let mut seed = None;
+    let mut count = None;
+    let mut index = 1usize;
+
+    while index < args.len() {
+        let argument = args.get(index)?;
+        let text = argument.to_str()?;
+        match text {
+            "--seed" => {
+                seed = Some(parse_u64_argument(args.get(index.saturating_add(1))?)?);
+                index = index.saturating_add(2);
+            }
+            "--count" => {
+                count = Some(usize::try_from(parse_u64_argument(
+                    args.get(index.saturating_add(1))?,
+                )?)
+                .ok()?);
+                index = index.saturating_add(2);
+            }
+            value if value.starts_with("--") => return None,
+            _ => {
+                if path.is_some() {
+                    return None;
+                }
+                path = Some(PathBuf::from(argument));
+                index = index.saturating_add(1);
+            }
+        }
+    }
+
+    Some((path?, seed?, count?))
+}
+
+fn parse_u64_argument(argument: &OsStr) -> Option<u64> {
+    argument.to_str()?.parse().ok()
+}
+
+fn parse_u32_argument(argument: &OsStr) -> Option<u32> {
+    u32::try_from(parse_u64_argument(argument)?).ok()
+}
+
+#[derive(Clone)]
+struct RefusalReport {
+    code: String,
+    message: String,
+}
+
+fn refusal_from_error(error: &DocError) -> RefusalReport {
+    RefusalReport {
+        code: error.code().to_string(),
+        message: error.to_string(),
+    }
+}
+
+fn remember_refusal(slot: &mut Option<RefusalReport>, error: &DocError) {
+    if slot.is_none() {
+        *slot = Some(refusal_from_error(error));
+    }
+}
+
+fn object_ref_text(id: ObjectRef) -> String {
+    format!("{} {}", id.number(), id.generation())
+}
+
+#[derive(Clone)]
+struct WarningRecord {
+    code: &'static str,
+    offset: Option<u64>,
+    object: Option<ObjectRef>,
+}
+
+fn warning_record(warning: &Warning) -> WarningRecord {
+    WarningRecord {
+        code: warning.what,
+        offset: warning.offset,
+        object: warning.object,
+    }
+}
+
+fn append_resolver_warnings(
+    resolver: &mut Resolver<'_>,
+    warnings: &mut Vec<WarningRecord>,
+) {
+    for warning in resolver.take_warnings() {
+        warnings.push(warning_record(&warning));
+    }
+}
+
+fn sorted_dict_keys(dict: DictRef<'_>) -> Vec<Vec<u8>> {
+    let mut keys = Vec::new();
+    for (name, _) in dict.iter() {
+        keys.push(name.decoded().into_owned());
+    }
+    keys.sort();
+    keys.dedup();
+    keys
+}
+
+fn page_resource_keys(page: &Page) -> Vec<Vec<u8>> {
+    let Some(resources) = page.resources.as_ref() else {
+        return Vec::new();
+    };
+    let Some(dict) = resources.get().as_dict() else {
+        return Vec::new();
+    };
+    sorted_dict_keys(dict)
+}
+
+struct PageErrorRecord {
+    index_hint: u32,
+    code: String,
+    message: String,
+}
+
+struct WalkReport {
+    page_count_hint: Option<u32>,
+    pages: Vec<Page>,
+    errors: Vec<PageErrorRecord>,
+    warnings: Vec<WarningRecord>,
+    refusal: Option<RefusalReport>,
+}
+
+fn inspect_pages(document: &Document) -> WalkReport {
+    let mut warnings = document
+        .warnings()
+        .iter()
+        .map(warning_record)
+        .collect::<Vec<_>>();
+    let mut resolver = document.resolver();
+    let page_count_hint = page_count_hint(&mut resolver).ok();
+    append_resolver_warnings(&mut resolver, &mut warnings);
+
+    let mut pages = Vec::new();
+    let mut errors = Vec::new();
+    let mut refusal = None;
+    {
+        match PageWalk::new(&mut resolver) {
+            Ok(walk) => {
+                let mut yielded = 0u32;
+                for item in walk {
+                    match item {
+                        Ok(page) => pages.push(page),
+                        Err(error) => {
+                            errors.push(PageErrorRecord {
+                                index_hint: yielded,
+                                code: error.code().to_string(),
+                                message: error.to_string(),
+                            });
+                            remember_refusal(&mut refusal, &error);
+                        }
+                    }
+                    yielded = yielded.saturating_add(1);
+                }
+            }
+            Err(error) => {
+                errors.push(PageErrorRecord {
+                    index_hint: 0,
+                    code: error.code().to_string(),
+                    message: error.to_string(),
+                });
+                remember_refusal(&mut refusal, &error);
+            }
+        }
+    }
+    append_resolver_warnings(&mut resolver, &mut warnings);
+
+    WalkReport {
+        page_count_hint,
+        pages,
+        errors,
+        warnings,
+        refusal,
+    }
+}
+
+fn write_file_info(json: &mut JsonWriter, source: &PdfSource) {
+    json.begin_object();
+    json.member("bytes");
+    json.number(source.bytes().len() as u64);
+    json.member("sha256");
+    json.string(&digest_hex(
+        source.identity().digest().as_bytes(),
+    ));
+    json.member("version");
+    json.string(&source.header().version().to_string());
+    json.end_object();
+}
+
+fn write_refusal(json: &mut JsonWriter, refusal: Option<&RefusalReport>) {
+    match refusal {
+        Some(refusal) => {
+            json.begin_object();
+            json.member("code");
+            json.string(&refusal.code);
+            json.member("message");
+            json.string(&refusal.message);
+            json.end_object();
+        }
+        None => json.null(),
+    }
+}
+
+fn write_warnings(json: &mut JsonWriter, warnings: &[WarningRecord]) {
+    json.begin_array();
+    for warning in warnings {
+        json.begin_object();
+        json.member("code");
+        json.string(warning.code);
+        json.member("offset");
+        match warning.offset {
+            Some(offset) => json.number(offset),
+            None => json.null(),
+        }
+        json.member("object");
+        match warning.object {
+            Some(id) => json.string(&object_ref_text(id)),
+            None => json.null(),
+        }
+        json.end_object();
+    }
+    json.end_array();
+}
+
+fn write_page_box(json: &mut JsonWriter, bounds: [f64; 4]) {
+    json.begin_array();
+    for value in bounds {
+        json.float(value);
+    }
+    json.end_array();
+}
+
+fn write_page_summary(json: &mut JsonWriter, page: &Page) {
+    json.begin_object();
+    json.member("index");
+    json.number(page.index as u64);
+    json.member("id");
+    json.string(&object_ref_text(page.id));
+    json.member("media_box");
+    write_page_box(json, page.media_box);
+    json.member("crop_box");
+    write_page_box(json, page.crop_box);
+    json.member("rotate");
+    json.number(page.rotate as u64);
+    json.member("user_unit");
+    json.float(page.user_unit);
+    json.member("contents");
+    json.number(page.contents.len() as u64);
+    json.member("resource_keys");
+    json.begin_array();
+    for key in page_resource_keys(page) {
+        json.bytes_string(&key);
+    }
+    json.end_array();
+    json.member("annots");
+    json.number(page.annots as u64);
+    json.end_object();
+}
+
+fn write_page_errors(json: &mut JsonWriter, errors: &[PageErrorRecord]) {
+    json.begin_array();
+    for error in errors {
+        json.begin_object();
+        json.member("index_hint");
+        json.number(error.index_hint as u64);
+        json.member("code");
+        json.string(&error.code);
+        json.member("message");
+        json.string(&error.message);
+        json.end_object();
+    }
+    json.end_array();
+}
+
+fn xref_kind_name(kind: XrefKind) -> &'static str {
+    match kind {
+        XrefKind::Table => "table",
+        XrefKind::Stream => "stream",
+        XrefKind::Hybrid => "hybrid",
+    }
+}
+
+fn run_summary(path: &Path, limits: Limits) -> u8 {
+    let source = match file::open(path, limits.max_file_bytes) {
+        Ok(source) => source,
+        Err(error) => {
+            eprintln!("{error}");
+            return 3;
+        }
+    };
+
+    let document = Document::open(source.clone(), limits);
+    let mut json = JsonWriter::new();
+    json.begin_object();
+    json.member("file");
+    write_file_info(&mut json, &source);
+
+    match document {
+        Err(error) => {
+            json.member("xref");
+            json.null();
+            json.member("encrypted");
+            json.null();
+            json.member("trailer_keys");
+            json.begin_array();
+            json.end_array();
+            json.member("root");
+            json.null();
+            json.member("info");
+            json.null();
+            json.member("page_count_hint");
+            json.null();
+            json.member("pages");
+            json.begin_array();
+            json.end_array();
+            json.member("page_errors");
+            json.begin_array();
+            json.end_array();
+            json.member("warnings");
+            json.begin_array();
+            json.end_array();
+            json.member("refusal");
+            write_refusal(&mut json, Some(&refusal_from_error(&error)));
+        }
+        Ok(document) => {
+            json.member("xref");
+            json.begin_object();
+            json.member("kind");
+            json.string(xref_kind_name(document.xref().kind()));
+            json.member("size");
+            json.number(document.xref().size() as u64);
+            json.member("sections");
+            json.number(document.xref().sections() as u64);
+            let counts = document.xref().counts();
+            json.member("free");
+            json.number(counts.free as u64);
+            json.member("in_use");
+            json.number(counts.in_use as u64);
+            json.member("compressed");
+            json.number(counts.compressed as u64);
+            json.member("object_streams");
+            json.number(counts.object_streams as u64);
+            json.end_object();
+
+            json.member("encrypted");
+            json.boolean(document.encrypted());
+
+            json.member("trailer_keys");
+            let trailer_keys = document
+                .trailer()
+                .dict()
+                .map(sorted_dict_keys)
+                .unwrap_or_default();
+            json.begin_array();
+            for key in trailer_keys {
+                json.bytes_string(&key);
+            }
+            json.end_array();
+
+            json.member("root");
+            match document.root_ref() {
+                Some(id) => json.string(&object_ref_text(id)),
+                None => json.null(),
+            }
+            json.member("info");
+            match document.info_ref() {
+                Some(id) => json.string(&object_ref_text(id)),
+                None => json.null(),
+            }
+
+            let report = inspect_pages(&document);
+            json.member("page_count_hint");
+            match report.page_count_hint {
+                Some(count) => json.number(count as u64),
+                None => json.null(),
+            }
+            json.member("pages");
+            json.begin_array();
+            for page in &report.pages {
+                write_page_summary(&mut json, page);
+            }
+            json.end_array();
+            json.member("page_errors");
+            write_page_errors(&mut json, &report.errors);
+            json.member("warnings");
+            write_warnings(&mut json, &report.warnings);
+            json.member("refusal");
+            write_refusal(&mut json, report.refusal.as_ref());
+        }
+    }
+
+    println!("{}", json.finish());
+    0
+}
+
+struct StreamRecord {
+    id: ObjectRef,
+    filters: Vec<Vec<u8>>,
+    raw_bytes: Option<u64>,
+    decoded_bytes: Option<u64>,
+    truncated: Option<bool>,
+    image: Option<Vec<u8>>,
+    refusal: Option<RefusalReport>,
+}
+
+fn stream_filter_names(
+    resolver: &mut Resolver<'_>,
+    object: &Object,
+) -> Vec<Vec<u8>> {
+    let Some(dict) = object.dict() else {
+        return Vec::new();
+    };
+    let Some(filter_value) = dict.get(b"Filter") else {
+        return Vec::new();
+    };
+    let Ok(resolved) = resolver.resolve(filter_value) else {
+        return Vec::new();
+    };
+
+    let root = resolved.get();
+    if let Some(name) = root.as_name() {
+        return vec![name.decoded().into_owned()];
+    }
+
+    let Some(array) = root.as_array() else {
+        return Vec::new();
+    };
+    let mut names = Vec::new();
+    for item in array.iter() {
+        if let Ok(value) = resolver.resolve(item) {
+            if let Some(name) = value.get().as_name() {
+                names.push(name.decoded().into_owned());
+            }
+        }
+    }
+    names
+}
+
+fn write_stream_record(json: &mut JsonWriter, stream: &StreamRecord) {
+    json.begin_object();
+    json.member("id");
+    json.string(&object_ref_text(stream.id));
+    json.member("filters");
+    json.begin_array();
+    for name in &stream.filters {
+        json.bytes_string(name);
+    }
+    json.end_array();
+    json.member("raw_bytes");
+    match stream.raw_bytes {
+        Some(count) => json.number(count),
+        None => json.null(),
+    }
+    json.member("decoded_bytes");
+    match stream.decoded_bytes {
+        Some(count) => json.number(count),
+        None => json.null(),
+    }
+    json.member("truncated");
+    match stream.truncated {
+        Some(value) => json.boolean(value),
+        None => json.null(),
+    }
+    json.member("image");
+    match stream.image.as_ref() {
+        Some(name) => json.bytes_string(name),
+        None => json.null(),
+    }
+    json.member("refusal");
+    write_refusal(json, stream.refusal.as_ref());
+    json.end_object();
+}
+
+fn run_streams(path: &Path, limits: Limits) -> u8 {
+    let source = match file::open(path, limits.max_file_bytes) {
+        Ok(source) => source,
+        Err(error) => {
+            eprintln!("{error}");
+            return 3;
+        }
+    };
+    let document = match Document::open(source, limits) {
+        Ok(document) => document,
+        Err(error) => {
+            let refusal = refusal_from_error(&error);
+            let mut json = JsonWriter::new();
+            json.begin_object();
+            json.member("pages");
+            json.begin_array();
+            json.end_array();
+            json.member("warnings");
+            json.begin_array();
+            json.end_array();
+            json.member("refusal");
+            write_refusal(&mut json, Some(&refusal));
+            json.end_object();
+            println!("{}", json.finish());
+            return 0;
+        }
+    };
+
+    let mut report = inspect_pages(&document);
+    let mut resolver = document.resolver();
+    let mut page_streams: Vec<(Page, Vec<StreamRecord>)> = Vec::new();
+
+    for page in &report.pages {
+        let mut streams = Vec::new();
+        for id in &page.contents {
+            match resolver.get(*id) {
+                Ok(object) => {
+                    let raw_bytes = object.stream_raw().map(|bytes| bytes.len() as u64);
+                    let filters = stream_filter_names(&mut resolver, &object);
+                    match resolver.decode_stream(&object) {
+                        Ok(decoded) => streams.push(StreamRecord {
+                            id: *id,
+                            filters,
+                            raw_bytes,
+                            decoded_bytes: Some(decoded.bytes.len() as u64),
+                            truncated: Some(decoded.truncated),
+                            image: decoded.image.map(|image| image.name().as_bytes().to_vec()),
+                            refusal: None,
+                        }),
+                        Err(error) => {
+                            remember_refusal(&mut report.refusal, &error);
+                            streams.push(StreamRecord {
+                                id: *id,
+                                filters,
+                                raw_bytes,
+                                decoded_bytes: None,
+                                truncated: None,
+                                image: None,
+                                refusal: Some(refusal_from_error(&error)),
+                            });
+                        }
+                    }
+                }
+                Err(error) => {
+                    remember_refusal(&mut report.refusal, &error);
+                    streams.push(StreamRecord {
+                        id: *id,
+                        filters: Vec::new(),
+                        raw_bytes: None,
+                        decoded_bytes: None,
+                        truncated: None,
+                        image: None,
+                        refusal: Some(refusal_from_error(&error)),
+                    });
+                }
+            }
+        }
+        page_streams.push((page.clone(), streams));
+    }
+    append_resolver_warnings(&mut resolver, &mut report.warnings);
+
+    let mut json = JsonWriter::new();
+    json.begin_object();
+    json.member("pages");
+    json.begin_array();
+    for (page, streams) in &page_streams {
+        json.begin_object();
+        json.member("index");
+        json.number(page.index as u64);
+        json.member("id");
+        json.string(&object_ref_text(page.id));
+        json.member("streams");
+        json.begin_array();
+        for stream in streams {
+            write_stream_record(&mut json, stream);
+        }
+        json.end_array();
+        json.end_object();
+    }
+    json.end_array();
+    json.member("page_errors");
+    write_page_errors(&mut json, &report.errors);
+    json.member("warnings");
+    write_warnings(&mut json, &report.warnings);
+    json.member("refusal");
+    write_refusal(&mut json, report.refusal.as_ref());
+    json.end_object();
+    println!("{}", json.finish());
+    0
+}
+
+#[derive(Clone)]
+struct BenchSample {
+    bytes: u64,
+    open_ms: f64,
+    first_page_ms: f64,
+    pages_ms: f64,
+    decode_ms: f64,
+    pages: u64,
+    decoded_bytes: u64,
+    refusal: Option<String>,
+}
+
+fn record_bench_page(
+    result: Result<Page, DocError>,
+    pages: &mut Vec<Page>,
+    refusal: &mut Option<String>,
+) {
+    match result {
+        Ok(page) => pages.push(page),
+        Err(error) => {
+            if refusal.is_none() {
+                *refusal = Some(error.code().to_string());
+            }
+        }
+    }
+}
+
+fn bench_sample(path: &Path, limits: Limits) -> Result<BenchSample, String> {
+    let overall_start = Instant::now();
+    let source = file::open(path, limits.max_file_bytes).map_err(|error| error.to_string())?;
+    let bytes = source.bytes().len() as u64;
+    let document = Document::open(source, limits);
+    let open_ms = overall_start.elapsed().as_secs_f64() * 1000.0;
+    let mut first_page_ms = open_ms;
+    let mut pages_ms = 0.0;
+    let mut decode_ms = 0.0;
+    let mut pages = Vec::new();
+    let mut decoded_bytes = 0u64;
+    let mut refusal = None;
+
+    if let Err(error) = &document {
+        refusal = Some(error.code().to_string());
+    }
+
+    if let Ok(document) = document {
+        let mut resolver = document.resolver();
+        let walk_start = Instant::now();
+        {
+            match PageWalk::new(&mut resolver) {
+                Ok(walk) => {
+                    let mut walk = walk;
+                    match walk.next() {
+                        Some(item) => record_bench_page(item, &mut pages, &mut refusal),
+                        None => {}
+                    }
+                    first_page_ms = overall_start.elapsed().as_secs_f64() * 1000.0;
+                    for item in walk {
+                        record_bench_page(item, &mut pages, &mut refusal);
+                    }
+                }
+                Err(error) => {
+                    if refusal.is_none() {
+                        refusal = Some(error.code().to_string());
+                    }
+                    first_page_ms = overall_start.elapsed().as_secs_f64() * 1000.0;
+                }
+            }
+        }
+        pages_ms = walk_start.elapsed().as_secs_f64() * 1000.0;
+
+        let decode_start = Instant::now();
+        for page in &pages {
+            for id in &page.contents {
+                match resolver.get(*id) {
+                    Ok(object) => match resolver.decode_stream(&object) {
+                        Ok(decoded) => {
+                            decoded_bytes =
+                                decoded_bytes.saturating_add(decoded.bytes.len() as u64);
+                        }
+                        Err(error) => {
+                            if refusal.is_none() {
+                                refusal = Some(error.code().to_string());
+                            }
+                        }
+                    },
+                    Err(error) => {
+                        if refusal.is_none() {
+                            refusal = Some(error.code().to_string());
+                        }
+                    }
+                }
+            }
+        }
+        decode_ms = decode_start.elapsed().as_secs_f64() * 1000.0;
+    }
+
+    Ok(BenchSample {
+        bytes,
+        open_ms,
+        first_page_ms,
+        pages_ms,
+        decode_ms,
+        pages: pages.len() as u64,
+        decoded_bytes,
+        refusal,
+    })
+}
+
+fn median_f64(values: impl Iterator<Item = f64>) -> f64 {
+    let mut values = values.collect::<Vec<_>>();
+    values.sort_by(f64::total_cmp);
+    let Some(middle) = values.len().checked_div(2) else {
+        return 0.0;
+    };
+    if values.is_empty() {
+        return 0.0;
+    }
+    if values.len() % 2 == 1 {
+        values[middle]
+    } else {
+        let lower = values.get(middle.saturating_sub(1)).copied().unwrap_or(0.0);
+        let upper = values.get(middle).copied().unwrap_or(lower);
+        lower + (upper - lower) / 2.0
+    }
+}
+
+fn median_u64(values: impl Iterator<Item = u64>) -> u64 {
+    let mut values = values.collect::<Vec<_>>();
+    values.sort_unstable();
+    let Some(middle) = values.len().checked_div(2) else {
+        return 0;
+    };
+    if values.is_empty() {
+        return 0;
+    }
+    if values.len() % 2 == 1 {
+        values[middle]
+    } else {
+        let lower = values.get(middle.saturating_sub(1)).copied().unwrap_or(0);
+        let upper = values.get(middle).copied().unwrap_or(lower);
+        lower.saturating_add(upper.saturating_sub(lower) / 2)
+    }
+}
+
+fn run_bench(paths: &[PathBuf], repeat: usize, limits: Limits) -> u8 {
+    for path in paths {
+        reset_peak_bytes();
+        let mut samples = Vec::new();
+        for _ in 0..repeat {
+            match bench_sample(path, limits) {
+                Ok(sample) => samples.push(sample),
+                Err(error) => {
+                    eprintln!("{error}");
+                    return 3;
+                }
+            }
+        }
+
+        let peak = peak_bytes();
+        let bytes = samples.first().map(|sample| sample.bytes).unwrap_or(0);
+        let open_ms = median_f64(samples.iter().map(|sample| sample.open_ms));
+        let first_page_ms = median_f64(samples.iter().map(|sample| sample.first_page_ms));
+        let pages_ms = median_f64(samples.iter().map(|sample| sample.pages_ms));
+        let decode_ms = median_f64(samples.iter().map(|sample| sample.decode_ms));
+        let pages = median_u64(samples.iter().map(|sample| sample.pages));
+        let decoded_bytes = median_u64(samples.iter().map(|sample| sample.decoded_bytes));
+        let elapsed_seconds = (open_ms + pages_ms) / 1000.0;
+        let mb_per_s = if elapsed_seconds > 0.0 {
+            bytes as f64 / 1_000_000.0 / elapsed_seconds
+        } else {
+            0.0
+        };
+        let pages_per_s = if elapsed_seconds > 0.0 {
+            pages as f64 / elapsed_seconds
+        } else {
+            0.0
+        };
+        let refusal = samples.iter().find_map(|sample| sample.refusal.as_ref());
+
+        let mut json = JsonWriter::new();
+        json.begin_object();
+        json.member("file");
+        json.string(&path.to_string_lossy());
+        json.member("bytes");
+        json.number(bytes);
+        json.member("open_ms");
+        json.float(open_ms);
+        json.member("first_page_ms");
+        json.float(first_page_ms);
+        json.member("pages_ms");
+        json.float(pages_ms);
+        json.member("decode_ms");
+        json.float(decode_ms);
+        json.member("pages");
+        json.number(pages);
+        json.member("decoded_bytes");
+        json.number(decoded_bytes);
+        json.member("mb_per_s");
+        json.float(mb_per_s);
+        json.member("pages_per_s");
+        json.float(pages_per_s);
+        json.member("peak_bytes");
+        json.number(peak);
+        json.member("refusal");
+        match refusal {
+            Some(code) => json.string(code),
+            None => json.null(),
+        }
+        json.end_object();
+        println!("{}", json.finish());
+    }
+    0
+}
+
+fn next_random(state: &mut u64) -> u64 {
+    if *state == 0 {
+        *state = 0x9e3779b97f4a7c15;
+    }
+    let mut value = *state;
+    value ^= value << 13;
+    value ^= value >> 7;
+    value ^= value << 17;
+    *state = value;
+    value
+}
+
+fn random_below(state: &mut u64, upper: usize) -> usize {
+    if upper == 0 {
+        return 0;
+    }
+    (next_random(state) as usize) % upper
+}
+
+fn find_startxref_target(bytes: &[u8]) -> Option<usize> {
+    let marker = b"startxref";
+    if bytes.len() < marker.len() {
+        return None;
+    }
+    let position = bytes
+        .windows(marker.len())
+        .rposition(|window| window == marker)?;
+    let mut index = position.saturating_add(marker.len());
+    while let Some(byte) = bytes.get(index) {
+        if !byte.is_ascii_whitespace() {
+            break;
+        }
+        index = index.saturating_add(1);
+    }
+
+    let mut value = 0u64;
+    let mut found_digit = false;
+    while let Some(byte) = bytes.get(index).copied() {
+        if !byte.is_ascii_digit() {
+            break;
+        }
+        found_digit = true;
+        value = value
+            .saturating_mul(10)
+            .saturating_add((byte - b'0') as u64);
+        index = index.saturating_add(1);
+    }
+    if !found_digit {
+        None
+    } else {
+        usize::try_from(value).ok()
+    }
+}
+
+fn mutate_digit_run(bytes: &mut [u8], state: &mut u64) -> bool {
+    let tail_start = bytes.len().saturating_sub(4096);
+    let startxref = find_startxref_target(bytes);
+    let mut all = Vec::new();
+    let mut tail = Vec::new();
+    let mut near_startxref = Vec::new();
+    let mut index = 0usize;
+
+    while index < bytes.len() {
+        let is_digit = bytes
+            .get(index)
+            .map(|byte| byte.is_ascii_digit())
+            .unwrap_or(false);
+        if !is_digit {
+            index = index.saturating_add(1);
+            continue;
+        }
+
+        let start = index;
+        while bytes
+            .get(index)
+            .map(|byte| byte.is_ascii_digit())
+            .unwrap_or(false)
+        {
+            index = index.saturating_add(1);
+        }
+        let range = (start, index);
+        all.push(range);
+        if start >= tail_start {
+            tail.push(range);
+        }
+        if let Some(target) = startxref {
+            if start.abs_diff(target) <= 64 {
+                near_startxref.push(range);
+            }
+        }
+    }
+
+    let candidates = if !near_startxref.is_empty() {
+        &near_startxref
+    } else if !tail.is_empty() {
+        &tail
+    } else {
+        &all
+    };
+    if candidates.is_empty() {
+        return false;
+    }
+
+    let candidate = candidates.get(random_below(state, candidates.len()));
+    let Some((start, end)) = candidate.copied() else {
+        return false;
+    };
+    for position in start..end {
+        if let Some(byte) = bytes.get_mut(position) {
+            *byte = b'0' + (next_random(state) % 10) as u8;
+        }
+    }
+    true
+}
+
+fn mutate_bytes(bytes: &mut Vec<u8>, state: &mut u64) {
+    if bytes.is_empty() {
+        return;
+    }
+    match next_random(state) % 5 {
+        0 => {
+            let flips = 1usize.saturating_add((next_random(state) % 8) as usize);
+            for _ in 0..flips {
+                let index = random_below(state, bytes.len());
+                if let Some(byte) = bytes.get_mut(index) {
+                    let mask = 1u8.saturating_add((next_random(state) % 255) as u8);
+                    *byte ^= mask;
+                }
+            }
+        }
+        1 => {
+            let end = bytes.len().saturating_add(1);
+            let new_len = random_below(state, end);
+            bytes.truncate(new_len);
+        }
+        2 => {
+            if !mutate_digit_run(bytes, state) {
+                let index = random_below(state, bytes.len());
+                if let Some(byte) = bytes.get_mut(index) {
+                    *byte ^= 1;
+                }
+            }
+        }
+        3 => {
+            let start = random_below(state, bytes.len());
+            let available = bytes.len().saturating_sub(start).min(4096);
+            if available > 0 {
+                let length = 1usize.saturating_add(random_below(
+                    state,
+                    available,
+                ));
+                let insert_at = random_below(state, bytes.len().saturating_add(1));
+                let end = start.saturating_add(length);
+                if let Some(range) = bytes.get(start..end) {
+                    let duplicate = range.to_vec();
+                    let capacity = bytes.len().saturating_add(duplicate.len());
+                    let mut expanded = Vec::with_capacity(capacity);
+                    if let Some(prefix) = bytes.get(..insert_at) {
+                        expanded.extend_from_slice(prefix);
+                    }
+                    expanded.extend_from_slice(&duplicate);
+                    if let Some(suffix) = bytes.get(insert_at..) {
+                        expanded.extend_from_slice(suffix);
+                    }
+                    *bytes = expanded;
+                }
+            }
+        }
+        _ => {
+            let start = random_below(state, bytes.len());
+            let available = bytes.len().saturating_sub(start).min(4096);
+            if available > 0 {
+                let length = 1usize.saturating_add(random_below(
+                    state,
+                    available,
+                ));
+                let end = start.saturating_add(length);
+                if let Some(range) = bytes.get_mut(start..end) {
+                    range.fill(0);
+                }
+            }
+        }
+    }
+}
+
+fn run_mutated(bytes: Vec<u8>, limits: Limits) -> Result<(), String> {
+    let source = PdfSource::new(Arc::<[u8]>::from(bytes)).map_err(|_| "source".to_string())?;
+    let document = Document::open(source, limits).map_err(|error| error.code().to_string())?;
+    let mut resolver = document.resolver();
+    let mut pages = Vec::new();
+    let mut refusal = None;
+
+    {
+        match PageWalk::new(&mut resolver) {
+            Ok(walk) => {
+                for item in walk {
+                    match item {
+                        Ok(page) => pages.push(page),
+                        Err(error) => {
+                            if refusal.is_none() {
+                                refusal = Some(error.code().to_string());
+                            }
+                        }
+                    }
+                }
+            }
+            Err(error) => return Err(error.code().to_string()),
+        }
+    }
+
+    for page in &pages {
+        for id in &page.contents {
+            match resolver.get(*id) {
+                Ok(object) => {
+                    if let Err(error) = resolver.decode_stream(&object) {
+                        if refusal.is_none() {
+                            refusal = Some(error.code().to_string());
+                        }
+                    }
+                }
+                Err(error) => {
+                    if refusal.is_none() {
+                        refusal = Some(error.code().to_string());
+                    }
+                }
+            }
+        }
+    }
+
+    match refusal {
+        Some(code) => Err(code),
+        None => Ok(()),
+    }
+}
+
+fn run_mutate(path: &Path, seed: u64, count: usize) -> u8 {
+    let source = match file::open(path, Limits::default().max_file_bytes) {
+        Ok(source) => source,
+        Err(error) => {
+            eprintln!("{error}");
+            return 3;
+        }
+    };
+    let original = source.bytes().to_vec();
+    let mut master_state = seed;
+    let mut ok = 0u64;
+    let mut refused: BTreeMap<String, u64> = BTreeMap::new();
+    let mut panicked = 0u64;
+    let mut panic_seeds = Vec::new();
+
+    let previous_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(|_| {}));
+
+    for _ in 0..count {
+        let case_seed = next_random(&mut master_state);
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let mut mutated = original.clone();
+            let mut case_state = case_seed;
+            mutate_bytes(&mut mutated, &mut case_state);
+            run_mutated(mutated, Limits::default())
+        }));
+
+        match outcome {
+            Ok(Ok(())) => ok = ok.saturating_add(1),
+            Ok(Err(code)) => {
+                let count = refused.entry(code).or_insert(0);
+                *count = count.saturating_add(1);
+            }
+            Err(_) => {
+                panicked = panicked.saturating_add(1);
+                panic_seeds.push(case_seed);
+            }
+        }
+    }
+
+    std::panic::set_hook(previous_hook);
+
+    let mut json = JsonWriter::new();
+    json.begin_object();
+    json.member("cases");
+    json.number(count as u64);
+    json.member("ok");
+    json.number(ok);
+    json.member("refused");
+    json.begin_object();
+    for (code, occurrences) in refused {
+        json.member(&code);
+        json.number(occurrences);
+    }
+    json.end_object();
+    json.member("panicked");
+    json.number(panicked);
+    json.member("panic_seeds");
+    json.begin_array();
+    for seed in panic_seeds {
+        json.number(seed);
+    }
+    json.end_array();
+    json.end_object();
+    println!("{}", json.finish());
+
+    if panicked > 0 {
+        2
+    } else {
+        0
+    }
+}
+
+struct Manifest {
+    expectations: Vec<(String, String)>,
+    limit_errors: Vec<(String, String)>,
+    limits: Limits,
+}
+
+fn parse_manifest(text: &str) -> Result<Manifest, String> {
+    let mut manifest = Manifest {
+        expectations: Vec::new(),
+        limit_errors: Vec::new(),
+        limits: Limits::default(),
+    };
+
+    for (line_number, line) in text.lines().enumerate() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        let Some((key, value)) = trimmed.split_once('=') else {
+            return Err(format!("line {} has no '='", line_number.saturating_add(1)));
+        };
+        let key = key.trim().to_string();
+        let value = value.trim().to_string();
+        if key.is_empty() {
+            return Err(format!("line {} has an empty key", line_number.saturating_add(1)));
+        }
+
+        if key.starts_with("limit.") {
+            if !apply_limit_override(&mut manifest.limits, &key, &value) {
+                manifest.limit_errors.push((key, value));
+            }
+        } else {
+            manifest.expectations.push((key, value));
+        }
+    }
+    Ok(manifest)
+}
+
+fn apply_limit_override(limits: &mut Limits, key: &str, value: &str) -> bool {
+    let Ok(number) = value.parse::<u64>() else {
+        return false;
+    };
+    match key {
+        "limit.max_decoded_bytes" => limits.max_decoded_bytes = number,
+        "limit.max_prev_chain" => {
+            let Ok(number) = u32::try_from(number) else {
+                return false;
+            };
+            limits.max_prev_chain = number;
+        }
+        "limit.max_depth" => {
+            let Ok(number) = u32::try_from(number) else {
+                return false;
+            };
+            limits.max_depth = number;
+        }
+        "limit.max_pages" => {
+            let Ok(number) = u32::try_from(number) else {
+                return false;
+            };
+            limits.max_pages = number;
+        }
+        "limit.max_page_tree_depth" => {
+            let Ok(number) = u32::try_from(number) else {
+                return false;
+            };
+            limits.max_page_tree_depth = number;
+        }
+        _ => return false,
+    }
+    true
+}
+
+fn box_manifest(bounds: [f64; 4]) -> String {
+    let mut parts = Vec::new();
+    for value in bounds {
+        parts.push(format_number(value));
+    }
+    parts.join(" ")
+}
+
+fn resource_keys_manifest(page: &Page) -> String {
+    let keys = page_resource_keys(page);
+    let mut parts = Vec::new();
+    for key in keys {
+        parts.push(String::from_utf8_lossy(&key).into_owned());
+    }
+    parts.join(",")
+}
+
+fn actual_fixture_values(
+    path: &Path,
+    limits: Limits,
+) -> Result<(BTreeMap<String, String>, Vec<String>), String> {
+    let source = file::open(path, limits.max_file_bytes).map_err(|error| error.to_string())?;
+    let mut actuals = BTreeMap::new();
+    actuals.insert(
+        "version".to_string(),
+        source.header().version().to_string(),
+    );
+
+    let document = match Document::open(source, limits) {
+        Ok(document) => {
+            actuals.insert("refusal".to_string(), "none".to_string());
+            document
+        }
+        Err(error) => {
+            actuals.insert("refusal".to_string(), error.code().to_string());
+            return Ok((actuals, Vec::new()));
+        }
+    };
+
+    actuals.insert(
+        "xref_kind".to_string(),
+        xref_kind_name(document.xref().kind()).to_string(),
+    );
+    actuals.insert(
+        "xref_sections".to_string(),
+        document.xref().sections().to_string(),
+    );
+    actuals.insert(
+        "encrypted".to_string(),
+        document.encrypted().to_string(),
+    );
+
+    let mut report = inspect_pages(&document);
+    actuals.insert("pages".to_string(), report.pages.len().to_string());
+    actuals.insert(
+        "page_errors".to_string(),
+        report.errors.len().to_string(),
+    );
+
+    let mut resolver = document.resolver();
+    for page in &report.pages {
+        let prefix = format!("page.{}", page.index);
+        actuals.insert(
+            format!("{prefix}.media_box"),
+            box_manifest(page.media_box),
+        );
+        actuals.insert(
+            format!("{prefix}.crop_box"),
+            box_manifest(page.crop_box),
+        );
+        actuals.insert(
+            format!("{prefix}.rotate"),
+            page.rotate.to_string(),
+        );
+        actuals.insert(
+            format!("{prefix}.contents"),
+            page.contents.len().to_string(),
+        );
+        actuals.insert(
+            format!("{prefix}.resource_keys"),
+            resource_keys_manifest(page),
+        );
+
+        let mut hasher = Sha256::new();
+        let mut content_refusal = None;
+        for id in &page.contents {
+            match resolver.get(*id) {
+                Ok(object) => match resolver.decode_stream(&object) {
+                    Ok(decoded) => hasher.update(&decoded.bytes),
+                    Err(error) => {
+                        if content_refusal.is_none() {
+                            content_refusal = Some(error.code().to_string());
+                        }
+                    }
+                },
+                Err(error) => {
+                    if content_refusal.is_none() {
+                        content_refusal = Some(error.code().to_string());
+                    }
+                }
+            }
+        }
+        actuals.insert(
+            format!("{prefix}.content_refusal"),
+            content_refusal
+                .clone()
+                .unwrap_or_else(|| "none".to_string()),
+        );
+        if content_refusal.is_none() {
+            actuals.insert(
+                format!("{prefix}.content_sha256"),
+                digest_hex(&hasher.finalize()),
+            );
+        }
+    }
+
+    append_resolver_warnings(&mut resolver, &mut report.warnings);
+    let warnings = report
+        .warnings
+        .iter()
+        .map(|warning| warning.code.to_string())
+        .collect::<Vec<_>>();
+    Ok((actuals, warnings))
+}
+
+fn run_check(directory: &Path) -> u8 {
+    let entries = match std::fs::read_dir(directory) {
+        Ok(entries) => entries,
+        Err(error) => {
+            eprintln!("{error}");
+            return 3;
+        }
+    };
+
+    let mut pdf_paths = Vec::new();
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(error) => {
+                eprintln!("{error}");
+                return 3;
+            }
+        };
+        let path = entry.path();
+        if path.extension() == Some(OsStr::new("pdf")) {
+            pdf_paths.push(path);
+        }
+    }
+    pdf_paths.sort_by(|left, right| left.file_name().cmp(&right.file_name()));
+
+    let mut passed_fixtures = 0u64;
+    let mut failed_fixtures = 0u64;
+    let mut checked_keys = 0u64;
+
+    for pdf_path in pdf_paths {
+        let Some(stem) = pdf_path.file_stem() else {
+            continue;
+        };
+        let fixture_name = stem.to_string_lossy().into_owned();
+        let mut expect_name = stem.to_os_string();
+        expect_name.push(".expect");
+        let expect_path = directory.join(expect_name);
+        if !expect_path.is_file() {
+            continue;
+        }
+
+        let manifest_text = match std::fs::read_to_string(&expect_path) {
+            Ok(text) => text,
+            Err(error) => {
+                eprintln!("{error}");
+                return 3;
+            }
+        };
+        let manifest = match parse_manifest(&manifest_text) {
+            Ok(manifest) => manifest,
+            Err(error) => {
+                println!("FAIL {fixture_name} manifest expected=valid got={error}");
+                failed_fixtures = failed_fixtures.saturating_add(1);
+                checked_keys = checked_keys.saturating_add(1);
+                continue;
+            }
+        };
+
+        let mut fixture_failed = false;
+        for (key, expected) in &manifest.limit_errors {
+            println!("FAIL {fixture_name} {key} expected={expected} got=invalid_limit");
+            fixture_failed = true;
+            checked_keys = checked_keys.saturating_add(1);
+        }
+
+        let (actuals, warnings) = match actual_fixture_values(&pdf_path, manifest.limits) {
+            Ok(values) => values,
+            Err(error) => {
+                eprintln!("{error}");
+                return 3;
+            }
+        };
+
+        for (key, expected) in &manifest.expectations {
+            let actual = if key == "warning" {
+                if warnings.iter().any(|warning| warning == expected) {
+                    Some(expected.clone())
+                } else {
+                    None
+                }
+            } else {
+                actuals.get(key).cloned()
+            };
+            let got = actual
+                .as_ref()
+                .cloned()
+                .unwrap_or_else(|| "unavailable".to_string());
+
+            if actual.as_deref() == Some(expected.as_str()) {
+                println!("PASS {fixture_name} {key}");
+            } else {
+                println!("FAIL {fixture_name} {key} expected={expected} got={got}");
+                fixture_failed = true;
+            }
+            checked_keys = checked_keys.saturating_add(1);
+        }
+
+        if fixture_failed {
+            failed_fixtures = failed_fixtures.saturating_add(1);
+        } else {
+            passed_fixtures = passed_fixtures.saturating_add(1);
+        }
+    }
+
+    println!(
+        "fixtures: {passed_fixtures} passed, {failed_fixtures} failed, {checked_keys} keys"
+    );
+    if failed_fixtures > 0 {
+        1
+    } else {
+        0
+    }
+}
+
