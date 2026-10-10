@@ -7,6 +7,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::io;
 use std::ops::Range;
 
+pub mod doc;
 pub mod encode;
 pub mod fixtures;
 pub mod sha256;
@@ -49,7 +50,7 @@ fn name_bytes(out: &mut Vec<u8>, name: &str) {
         if !(33..=126).contains(&byte)
             || matches!(
                 byte,
-                b'#' | b'(' | b')' | b'<' | b'>' | b'[' | b']'
+                b'#' | b'(' | b')' | b'\\' | b'<' | b'>' | b'[' | b']'
                     | b'{' | b'}' | b'/' | b'%'
             )
         {
