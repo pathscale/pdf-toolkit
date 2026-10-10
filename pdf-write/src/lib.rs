@@ -9,6 +9,7 @@ use std::ops::Range;
 
 pub mod doc;
 pub mod encode;
+pub mod encode_jpx;
 pub(crate) mod encrypt;
 pub mod fixtures;
 pub mod sha256;
@@ -481,4 +482,3 @@ impl Writer {
         Err(invalid("cycle layout did not converge"))
     }
 }
-
