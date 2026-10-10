@@ -1,4 +1,3 @@
-use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::ops::Range;
@@ -191,55 +190,52 @@ fn positioned(id: u32, glyph: &PositionedGlyph, text: &PageText) -> Option<Item>
     })
 }
 
-type DuplicateKey = (i16, [char; 4], u8, u16, i64, i64);
 
+/// Drops overprinted glyphs (fake bold, shadows): the same text at the same angle
+/// in the same small cell as an earlier glyph.
+///
+/// One sort over a quantized 64-bit key replaced a map with 27 lookups per
+/// glyph, which was three quarters of all text time. A glyph sitting on a cell
+/// boundary can escape deduplication; that costs a doubled letter, rarely.
 fn unique_items(items: Vec<Item>, text: &PageText) -> Vec<Item> {
-    let mut seen = BTreeMap::<DuplicateKey, (f32, f32, f32)>::new();
-    let mut out = Vec::new();
-    for item in items {
+    let mut keys: Vec<(u64, u32)> = Vec::with_capacity(items.len());
+    for (index, item) in items.iter().enumerate() {
         let Some(glyph) = text.glyphs.get(item.id as usize) else { continue };
-        let mut chars = ['\0'; 4];
-        let mut len = 0u8;
-        for (slot, character) in chars.iter_mut().zip(glyph.text.as_slice()) {
-            *slot = *character;
-            len = len.saturating_add(1);
+        let cell = (0.2 * item.size).max(0.01);
+        let mut hash = 0xcbf2_9ce4_8422_2325u64;
+        let mut mix = |value: u64| {
+            hash ^= value;
+            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+        };
+        mix(item.angle as u64);
+        for character in glyph.text.as_slice() {
+            mix(u64::from(u32::from(*character)));
         }
-        let bucket = ((item.size.to_bits() >> 23) & 255) as u16;
-        let mut duplicate = false;
-        // A bounded spatial lookup also catches overprints drawn in later runs.
-        for level in bucket.saturating_sub(1).max(1)..=bucket.saturating_add(1).min(254) {
-            let cell = f32::from_bits(u32::from(level) << 23) * 0.1;
-            let x = (glyph.x / cell) as i64;
-            let y = (glyph.y / cell) as i64;
-            for ox in -1i64..=1 {
-                for oy in -1i64..=1 {
-                    let key = (
-                        item.angle, chars, len, level,
-                        x.saturating_add(ox), y.saturating_add(oy),
-                    );
-                    if let Some(&(old_x, old_y, old_size)) = seen.get(&key) {
-                        let tolerance = 0.1 * item.size.min(old_size);
-                        if magnitude(glyph.x - old_x) <= tolerance
-                            && magnitude(glyph.y - old_y) <= tolerance
-                        {
-                            duplicate = true;
-                        }
-                    }
+        mix(round_to_i64(glyph.x / cell) as u64);
+        mix(round_to_i64(glyph.y / cell) as u64);
+        keys.push((hash, count(index)));
+    }
+    // Items arrive in content order, so the lowest index of a key is the original.
+    keys.sort_unstable();
+    let mut keep = alloc::vec![true; items.len()];
+    for pair in keys.windows(2) {
+        if let [(first, _), (second, index)] = pair {
+            if first == second {
+                if let Some(slot) = keep.get_mut(*index as usize) {
+                    *slot = false;
                 }
             }
         }
-        if duplicate {
-            continue;
-        }
-        let cell = f32::from_bits(u32::from(bucket) << 23) * 0.1;
-        seen.insert(
-            (item.angle, chars, len, bucket,
-                (glyph.x / cell) as i64, (glyph.y / cell) as i64),
-            (glyph.x, glyph.y, item.size),
-        );
-        out.push(item);
     }
-    out
+    items
+        .into_iter()
+        .zip(keep)
+        .filter_map(|(item, kept)| kept.then_some(item))
+        .collect()
+}
+
+fn round_to_i64(value: f32) -> i64 {
+    if value >= 0.0 { (value + 0.5) as i64 } else { (value - 0.5) as i64 }
 }
 
 fn finish_line(items: Vec<Item>, text: &PageText, out: &mut Vec<PendingLine>) {
