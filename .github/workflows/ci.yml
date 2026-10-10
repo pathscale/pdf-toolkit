@@ -1,9 +1,8 @@
 name: CI
 
+# Manual only: the gate is the local run (fixtures, round trips, fuzzing) before a PR merges.
 on:
-  pull_request:
-  push:
-    branches: [master]
+  workflow_dispatch:
 
 jobs:
   portable:

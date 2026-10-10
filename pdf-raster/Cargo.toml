@@ -11,8 +11,8 @@ keywords.workspace = true
 categories.workspace = true
 
 [dependencies]
-pdf-core = { package = "pdf-toolkit-core", version = "0.2.1", path = "../pdf-core", default-features = false }
-pdf-render = { package = "pdf-toolkit-render", version = "0.2.1", path = "../pdf-render", default-features = false }
-pdf-text = { package = "pdf-toolkit-text", version = "0.2.1", path = "../pdf-text", default-features = false }
+pdf-core = { package = "pdf-toolkit-core", version = "0.3.0", path = "../pdf-core", default-features = false }
+pdf-render = { package = "pdf-toolkit-render", version = "0.3.0", path = "../pdf-render", default-features = false }
+pdf-text = { package = "pdf-toolkit-text", version = "0.3.0", path = "../pdf-text", default-features = false }
 tiny-skia = { version = "0.12", features = ["png-format"] }
 zune-jpeg = "0.5"

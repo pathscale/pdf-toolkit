@@ -1,12 +1,9 @@
 name: Publish
 
-# House scheme: a version bump on the default branch is the release. No tags, no
-# manual step. The workspace version lives in the root Cargo.toml, so that file is
-# the trigger.
+# House scheme: the workspace version in the root Cargo.toml is the release, and only
+# versions missing from crates.io are published. Manual only; releases are normally
+# published locally after the merge.
 on:
-  push:
-    branches: [master]
-    paths: ['Cargo.toml']
   workflow_dispatch:
 
 jobs:
