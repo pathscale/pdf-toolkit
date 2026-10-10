@@ -3,3 +3,11 @@ name = "pdf-text"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+
+[features]
+default = ["std"]
+std = ["pdf-core/std"]
+
+[dependencies]
+pdf-core = { path = "../pdf-core", default-features = false }
+
