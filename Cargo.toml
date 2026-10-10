@@ -3,6 +3,8 @@ resolver = "2"
 members = [
     "pdf-core",
     "pdf-text",
+    "pdf-render",
+    "pdf-raster",
     "pdf-inspect",
     "pdf-write",
     "pdf-gui",
@@ -12,3 +14,4 @@ members = [
 version = "0.1.0"
 edition = "2021"
 license = "MIT"
+

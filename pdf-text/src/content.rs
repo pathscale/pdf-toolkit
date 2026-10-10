@@ -275,6 +275,61 @@ impl<'a> Content<'a> {
         }
     }
 
+    /// Reads an unfiltered inline payload with a caller-computed sample length.
+    /// The exact length also prevents binary sample bytes from being mistaken
+    /// for an EI marker by the following next_op call.
+    pub fn inline_bytes(&mut self, length: usize) -> Result<&'a [u8], DocError> {
+        check(
+            LimitKind::DecodedBytes,
+            length as u64,
+            self.scan.limits.max_decoded_bytes,
+        )?;
+        let data = self.inline_data.ok_or(DocError::Malformed {
+            offset: self.scan.position() as u64,
+            what: "inline_image_state",
+        })?;
+        if data.length.is_some_and(|declared| declared != length) {
+            return Err(DocError::Malformed {
+                offset: data.start as u64,
+                what: "inline_image_length",
+            });
+        }
+        let end = data.start.checked_add(length).ok_or_else(|| {
+            refusal(
+                LimitKind::DecodedBytes,
+                u64::MAX,
+                self.scan.limits.max_decoded_bytes,
+            )
+        })?;
+        let bytes = self.scan.input.get(data.start..end).ok_or(
+            DocError::Malformed {
+                offset: data.start as u64,
+                what: "inline_image_length",
+            },
+        )?;
+        let mut marker = end;
+        let cap = end.saturating_add(1024).min(self.scan.input.len());
+        while marker < cap
+            && self.scan.input.get(marker).copied().map(whitespace).unwrap_or(false)
+        {
+            marker = marker.saturating_add(1);
+        }
+        let after = marker.checked_add(2).ok_or(DocError::Malformed {
+            offset: marker as u64,
+            what: "inline_image_end",
+        })?;
+        if self.scan.input.get(marker..after) != Some(b"EI")
+            || !self.scan.input.get(after).copied().map(whitespace).unwrap_or(true)
+        {
+            return Err(DocError::Malformed {
+                offset: marker as u64,
+                what: "inline_image_end",
+            });
+        }
+        self.inline_data = Some(InlineData { start: data.start, length: Some(length) });
+        Ok(bytes)
+    }
+
     pub fn dropped_operands(&self) -> u64 {
         self.dropped
     }
@@ -420,7 +475,20 @@ pub struct Values<'a> {
 
 impl<'a> Values<'a> {
     pub fn new(bytes: &'a [u8], limits: &Limits) -> Self {
-        Self { scan: Scan::new(bytes, *limits, ContentCursor::default()) }
+        Self::resume(bytes, limits, ContentCursor::default())
+    }
+
+    pub fn resume(bytes: &'a [u8], limits: &Limits, cursor: ContentCursor) -> Self {
+        Self { scan: Scan::new(bytes, *limits, cursor) }
+    }
+
+    pub fn cursor(&self) -> ContentCursor {
+        ContentCursor {
+            offset: self.scan.position(),
+            tokens: self.scan.tokens,
+            inline_header: false,
+            inline_data: None,
+        }
     }
 
     pub fn next_value(&mut self) -> Result<Option<Operand<'a>>, DocError> {
@@ -474,7 +542,7 @@ impl Iterator for NameBytes<'_> {
     }
 }
 
-pub(crate) fn decode_name<'a>(
+pub fn decode_name<'a>(
     raw: &'a [u8],
     buffer: &'a mut Vec<u8>,
     maximum: u64,
@@ -488,7 +556,7 @@ pub(crate) fn decode_name<'a>(
 }
 
 /// Decodes a PDF string into a caller-owned reusable buffer only when needed.
-pub(crate) fn decode_string<'a>(
+pub fn decode_string<'a>(
     raw: &'a [u8],
     buffer: &'a mut Vec<u8>,
     maximum: u64,
