@@ -1237,6 +1237,13 @@ fn angle(x: f64, y: f64) -> i16 {
     if !x.is_finite() || !y.is_finite() || (x == 0.0 && y == 0.0) {
         return 0;
     }
+    // Nearly every glyph runs along an axis; skip the series for those.
+    if y == 0.0 {
+        return if x > 0.0 { 0 } else { 180 };
+    }
+    if x == 0.0 {
+        return if y > 0.0 { 90 } else { -90 };
+    }
     let ax = x.abs();
     let ay = y.abs();
     let mut radians = if ax >= ay {
