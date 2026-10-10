@@ -1,0 +1,325 @@
+use alloc::borrow::Cow;
+use alloc::vec::Vec;
+use core::fmt;
+
+mod ascii85;
+mod asciihex;
+mod flate;
+mod lzw;
+mod predictor;
+mod runlength;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FilterKind {
+    Flate,
+    Lzw,
+    Ascii85,
+    AsciiHex,
+    RunLength,
+    Dct,
+    Jpx,
+    Jbig2,
+    CcittFax,
+    Crypt,
+}
+
+impl FilterKind {
+    pub fn from_name(name: &[u8]) -> Option<FilterKind> {
+        match name {
+            b"FlateDecode" | b"Fl" => Some(Self::Flate),
+            b"LZWDecode" | b"LZW" => Some(Self::Lzw),
+            b"ASCII85Decode" | b"A85" => Some(Self::Ascii85),
+            b"ASCIIHexDecode" | b"AHx" => Some(Self::AsciiHex),
+            b"RunLengthDecode" | b"RL" => Some(Self::RunLength),
+            b"DCTDecode" | b"DCT" => Some(Self::Dct),
+            b"JPXDecode" => Some(Self::Jpx),
+            b"JBIG2Decode" => Some(Self::Jbig2),
+            b"CCITTFaxDecode" | b"CCF" => Some(Self::CcittFax),
+            b"Crypt" => Some(Self::Crypt),
+            _ => None,
+        }
+    }
+
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Flate => "FlateDecode",
+            Self::Lzw => "LZWDecode",
+            Self::Ascii85 => "ASCII85Decode",
+            Self::AsciiHex => "ASCIIHexDecode",
+            Self::RunLength => "RunLengthDecode",
+            Self::Dct => "DCTDecode",
+            Self::Jpx => "JPXDecode",
+            Self::Jbig2 => "JBIG2Decode",
+            Self::CcittFax => "CCITTFaxDecode",
+            Self::Crypt => "Crypt",
+        }
+    }
+
+    pub const fn is_image_codec(self) -> bool {
+        matches!(self, Self::Dct | Self::Jpx | Self::Jbig2 | Self::CcittFax)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct DecodeParams {
+    pub predictor: u8,
+    pub colors: u8,
+    pub bits_per_component: u8,
+    pub columns: u32,
+    pub early_change: bool,
+}
+
+impl Default for DecodeParams {
+    fn default() -> Self {
+        Self {
+            predictor: 1,
+            colors: 1,
+            bits_per_component: 8,
+            columns: 1,
+            early_change: true,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct FilterStep {
+    pub kind: FilterKind,
+    pub params: DecodeParams,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Decoded {
+    pub bytes: Vec<u8>,
+    pub image: Option<FilterKind>,
+    pub truncated: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum FilterError {
+    OutputLimit { limit: u64 },
+    Unsupported { filter: FilterKind },
+    BadParams { filter: FilterKind },
+    Corrupt { filter: FilterKind, offset: u64 },
+}
+
+impl FilterError {
+    pub const fn code(&self) -> &'static str {
+        match self {
+            Self::OutputLimit { .. } => "output_limit",
+            Self::Unsupported { .. } => "unsupported",
+            Self::BadParams { .. } => "bad_params",
+            Self::Corrupt { .. } => "corrupt",
+        }
+    }
+}
+
+impl fmt::Display for FilterError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::OutputLimit { limit } => {
+                write!(formatter, "decoded output exceeds the {limit} byte limit")
+            }
+            Self::Unsupported { filter } => {
+                write!(formatter, "unsupported filter {}", filter.name())
+            }
+            Self::BadParams { filter } => {
+                write!(formatter, "invalid parameters for {}", filter.name())
+            }
+            Self::Corrupt { filter, offset } => {
+                write!(formatter, "corrupt {} input at byte {offset}", filter.name())
+            }
+        }
+    }
+}
+
+#[cfg(feature = "std")]
+impl std::error::Error for FilterError {}
+
+/// Applies filters in order, stopping before the first image codec.
+///
+/// Each filter's output, including predictor input, is bounded by `max_output`.
+/// Corrupt or incomplete input preserves recovered bytes when possible.
+pub fn decode(
+    input: &[u8],
+    steps: &[FilterStep],
+    max_output: u64,
+) -> Result<Decoded, FilterError> {
+    let mut data = Cow::Borrowed(input);
+    let mut truncated = false;
+    let mut image = None;
+
+    for step in steps {
+        if step.kind.is_image_codec() {
+            check_size(data.len(), max_output)?;
+            image = Some(step.kind);
+            break;
+        }
+
+        if step.kind == FilterKind::Crypt {
+            if step.params != DecodeParams::default() {
+                return Err(FilterError::Unsupported {
+                    filter: FilterKind::Crypt,
+                });
+            }
+            check_size(data.len(), max_output)?;
+            continue;
+        }
+
+        let layout = match step.kind {
+            FilterKind::Flate | FilterKind::Lzw => {
+                predictor::Layout::new(step.params, step.kind)?
+            }
+            _ => None,
+        };
+
+        let mut decoded = match step.kind {
+            FilterKind::Flate => flate::decode(data.as_ref(), max_output)?,
+            FilterKind::Lzw => {
+                lzw::decode(data.as_ref(), step.params.early_change, max_output)?
+            }
+            FilterKind::Ascii85 => ascii85::decode(data.as_ref(), max_output)?,
+            FilterKind::AsciiHex => asciihex::decode(data.as_ref(), max_output)?,
+            FilterKind::RunLength => runlength::decode(data.as_ref(), max_output)?,
+            _ => {
+                return Err(FilterError::Unsupported {
+                    filter: step.kind,
+                });
+            }
+        };
+
+        if let Some(layout) = layout {
+            let predicted = predictor::decode(decoded.bytes, layout, step.kind)?;
+            decoded.bytes = predicted.bytes;
+            decoded.truncated |= predicted.truncated;
+        }
+
+        truncated |= decoded.truncated;
+        data = Cow::Owned(decoded.bytes);
+    }
+
+    check_size(data.len(), max_output)?;
+    let bytes = match data {
+        Cow::Owned(bytes) => bytes,
+        Cow::Borrowed(bytes) => {
+            let mut output = Output::new(max_output);
+            output.extend(bytes)?;
+            output.into_vec()
+        }
+    };
+
+    Ok(Decoded {
+        bytes,
+        image,
+        truncated,
+    })
+}
+
+fn addressable_limit(max_output: u64) -> usize {
+    usize::try_from(max_output)
+        .unwrap_or(usize::MAX)
+        .min(isize::MAX as usize)
+}
+
+fn check_size(size: usize, max_output: u64) -> Result<(), FilterError> {
+    if size > addressable_limit(max_output) {
+        Err(FilterError::OutputLimit { limit: max_output })
+    } else {
+        Ok(())
+    }
+}
+
+/// Reserves geometrically without requesting capacity beyond the output cap.
+///
+/// The public API has no allocation-failure variant, so an allocation that
+/// cannot be satisfied is reported through the same named output refusal.
+fn reserve_to(
+    bytes: &mut Vec<u8>,
+    size: usize,
+    max_output: u64,
+) -> Result<(), FilterError> {
+    check_size(size, max_output)?;
+    if size <= bytes.capacity() {
+        return Ok(());
+    }
+
+    let capacity = bytes
+        .capacity()
+        .saturating_mul(2)
+        .max(64)
+        .max(size)
+        .min(addressable_limit(max_output));
+    bytes
+        .try_reserve_exact(capacity.saturating_sub(bytes.len()))
+        .map_err(|_| FilterError::OutputLimit { limit: max_output })
+}
+
+struct Output {
+    bytes: Vec<u8>,
+    max_output: u64,
+}
+
+impl Output {
+    fn new(max_output: u64) -> Self {
+        Self {
+            bytes: Vec::new(),
+            max_output,
+        }
+    }
+
+    fn prepare(&mut self, additional: usize) -> Result<usize, FilterError> {
+        let size = self
+            .bytes
+            .len()
+            .checked_add(additional)
+            .ok_or(FilterError::OutputLimit {
+                limit: self.max_output,
+            })?;
+        reserve_to(&mut self.bytes, size, self.max_output)?;
+        Ok(size)
+    }
+
+    fn push(&mut self, byte: u8) -> Result<(), FilterError> {
+        self.prepare(1)?;
+        self.bytes.push(byte);
+        Ok(())
+    }
+
+    fn extend(&mut self, bytes: &[u8]) -> Result<(), FilterError> {
+        self.prepare(bytes.len())?;
+        self.bytes.extend_from_slice(bytes);
+        Ok(())
+    }
+
+    fn repeat(&mut self, byte: u8, count: usize) -> Result<(), FilterError> {
+        let size = self.prepare(count)?;
+        self.bytes.resize(size, byte);
+        Ok(())
+    }
+
+    fn into_vec(self) -> Vec<u8> {
+        self.bytes
+    }
+}
+
+fn finish(
+    bytes: Vec<u8>,
+    truncated: bool,
+    filter: FilterKind,
+    offset: usize,
+) -> Result<Decoded, FilterError> {
+    if truncated && bytes.is_empty() {
+        return Err(FilterError::Corrupt {
+            filter,
+            offset: offset as u64,
+        });
+    }
+    Ok(Decoded {
+        bytes,
+        image: None,
+        truncated,
+    })
+}
+
+fn is_whitespace(byte: u8) -> bool {
+    matches!(byte, 0 | 9 | 10 | 12 | 13 | 32)
+}
