@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
-use pdf_core::document::{Document, Resolver, XrefKind};
+use pdf_core::document::{Document, Resolver, XrefEntry, XrefKind};
 use pdf_core::error::{DocError, Warning};
 use pdf_core::file;
 use pdf_core::limits::Limits;
@@ -134,6 +134,22 @@ fn run() -> u8 {
                 1
             }
         },
+        "semantic" => match parse_single_path(&args) {
+            Some(path) => run_semantic(&path, Limits::default()),
+            None => {
+                print_usage();
+                1
+            }
+        },
+        "image" => match parse_image_args(&args) {
+            Some((path, object_number, output)) => {
+                run_image(&path, object_number, &output, Limits::default())
+            }
+            None => {
+                print_usage();
+                1
+            }
+        },
         "streams" => match parse_single_path(&args) {
             Some(path) => run_streams(&path, Limits::default()),
             None => {
@@ -174,6 +190,7 @@ fn print_usage() {
         "usage:\n  pdf-inspect summary FILE [--max-decoded N] [--max-depth N] \
          [--max-prev-chain N] [--max-pages N]\n  pdf-inspect streams FILE\n  \
          pdf-inspect text FILE\n  pdf-inspect receipt FILE\n  \
+         pdf-inspect semantic FILE\n  pdf-inspect image FILE OBJ_NUM OUT\n  \
          pdf-inspect bench FILE... [--repeat N]\n  \
          pdf-inspect mutate FILE --seed N --count K\n  pdf-inspect check DIR"
     );
@@ -184,6 +201,17 @@ fn parse_single_path(args: &[OsString]) -> Option<PathBuf> {
         return None;
     }
     args.get(1).map(PathBuf::from)
+}
+
+fn parse_image_args(args: &[OsString]) -> Option<(PathBuf, u32, PathBuf)> {
+    if args.len() != 4 {
+        return None;
+    }
+    Some((
+        PathBuf::from(args.get(1)?),
+        parse_u32_argument(args.get(2)?)?,
+        PathBuf::from(args.get(3)?),
+    ))
 }
 
 fn parse_summary_args(args: &[OsString]) -> Option<(PathBuf, Limits)> {
@@ -542,6 +570,354 @@ fn xref_kind_name(kind: XrefKind) -> &'static str {
         XrefKind::Stream => "stream",
         XrefKind::Hybrid => "hybrid",
     }
+}
+
+fn write_semantic_bbox(json: &mut JsonWriter, bbox: [f32; 4]) {
+    json.begin_array();
+    for value in bbox {
+        json.float(f64::from(value));
+    }
+    json.end_array();
+}
+
+fn write_semantic_target(
+    json: &mut JsonWriter,
+    target: Option<&pdf_text::semantic::LinkTarget>,
+) {
+    let Some(target) = target else {
+        json.null();
+        return;
+    };
+
+    json.begin_object();
+    match target {
+        pdf_text::semantic::LinkTarget::Uri(uri) => {
+            json.member("uri");
+            json.string(uri);
+        }
+        pdf_text::semantic::LinkTarget::Page { index, y } => {
+            json.member("page");
+            json.number(*index as u64);
+            json.member("y");
+            match y {
+                Some(value) => json.float(f64::from(*value)),
+                None => json.null(),
+            }
+        }
+    }
+    json.end_object();
+}
+
+fn semantic_kind_text(kind: pdf_text::semantic::SemanticKind) -> String {
+    match kind {
+        pdf_text::semantic::SemanticKind::Paragraph => "paragraph".to_string(),
+        pdf_text::semantic::SemanticKind::Heading(level) => format!("heading:{level}"),
+        pdf_text::semantic::SemanticKind::ListItem => "list_item".to_string(),
+        pdf_text::semantic::SemanticKind::Caption => "caption".to_string(),
+    }
+}
+
+fn write_semantic_document(json: &mut JsonWriter, document: &pdf_text::semantic::SemanticDoc) {
+    json.begin_object();
+    json.member("semantic_version");
+    json.number(1);
+
+    json.member("info");
+    json.begin_object();
+    json.member("title");
+    match document.info.title.as_deref() {
+        Some(title) => json.string(title),
+        None => json.null(),
+    }
+    json.member("author");
+    match document.info.author.as_deref() {
+        Some(author) => json.string(author),
+        None => json.null(),
+    }
+    json.member("subject");
+    match document.info.subject.as_deref() {
+        Some(subject) => json.string(subject),
+        None => json.null(),
+    }
+    json.member("pages");
+    json.number(document.info.pages as u64);
+    json.member("encrypted");
+    json.boolean(document.info.encrypted);
+    json.end_object();
+
+    json.member("outline");
+    json.begin_array();
+    for item in &document.outline {
+        json.begin_object();
+        json.member("title");
+        json.string(&item.title);
+        json.member("level");
+        json.number(item.level as u64);
+        json.member("target");
+        write_semantic_target(json, item.target.as_ref());
+        json.end_object();
+    }
+    json.end_array();
+
+    json.member("pages");
+    json.begin_array();
+    for page in &document.pages {
+        json.begin_object();
+        json.member("index");
+        json.number(page.index as u64);
+        json.member("width");
+        json.float(f64::from(page.width));
+        json.member("height");
+        json.float(f64::from(page.height));
+        json.member("refusal");
+        match page.refusal {
+            Some(refusal) => json.string(refusal),
+            None => json.null(),
+        }
+
+        json.member("blocks");
+        json.begin_array();
+        for block in &page.blocks {
+            json.begin_object();
+            json.member("kind");
+            json.string(&semantic_kind_text(block.kind));
+            json.member("bbox");
+            write_semantic_bbox(json, block.bbox);
+            json.member("spans");
+            json.begin_array();
+            for span in &block.spans {
+                json.begin_object();
+                json.member("text");
+                json.string(&span.text);
+                json.member("bold");
+                json.boolean(span.style.bold);
+                json.member("italic");
+                json.boolean(span.style.italic);
+                json.member("monospace");
+                json.boolean(span.style.monospace);
+                json.member("size");
+                json.float(f64::from(span.size));
+                json.member("link");
+                match span.link {
+                    Some(link) => json.number(u64::from(link)),
+                    None => json.null(),
+                }
+                json.end_object();
+            }
+            json.end_array();
+            json.end_object();
+        }
+        json.end_array();
+
+        json.member("images");
+        json.begin_array();
+        for image in &page.images {
+            json.begin_object();
+            json.member("bbox");
+            write_semantic_bbox(json, image.bbox);
+            json.member("object");
+            match image.object {
+                Some(object) => json.string(&object_ref_text(object)),
+                None => json.null(),
+            }
+            json.member("width");
+            json.number(image.width as u64);
+            json.member("height");
+            json.number(image.height as u64);
+            json.member("inline");
+            json.boolean(image.inline);
+            json.end_object();
+        }
+        json.end_array();
+
+        json.member("links");
+        json.begin_array();
+        for link in &page.links {
+            json.begin_object();
+            json.member("bbox");
+            write_semantic_bbox(json, link.bbox);
+            match &link.target {
+                pdf_text::semantic::LinkTarget::Uri(uri) => {
+                    json.member("uri");
+                    json.string(uri);
+                }
+                pdf_text::semantic::LinkTarget::Page { index, y } => {
+                    json.member("page");
+                    json.number(*index as u64);
+                    json.member("y");
+                    match y {
+                        Some(value) => json.float(f64::from(*value)),
+                        None => json.null(),
+                    }
+                }
+            }
+            json.end_object();
+        }
+        json.end_array();
+        json.end_object();
+    }
+    json.end_array();
+    json.end_object();
+}
+
+fn run_semantic(path: &Path, limits: Limits) -> u8 {
+    let source = match file::open(path, limits.max_file_bytes) {
+        Ok(source) => source,
+        Err(error) => {
+            eprintln!("{error}");
+            return 3;
+        }
+    };
+    let document = match pdf_text::semantic::semantic_document(source, limits) {
+        Ok(document) => document,
+        Err(error) => {
+            eprintln!("{error}");
+            return 3;
+        }
+    };
+
+    let mut json = JsonWriter::new();
+    write_semantic_document(&mut json, &document);
+    println!("{}", json.finish());
+    0
+}
+
+fn image_kind(data: &pdf_text::images::ImageData) -> String {
+    match data {
+        pdf_text::images::ImageData::Jpeg(_) => "jpeg".to_string(),
+        pdf_text::images::ImageData::Pixels { .. } => "pixels".to_string(),
+        pdf_text::images::ImageData::Unsupported(why) => format!("unsupported:{why}"),
+    }
+}
+
+fn image_output_path(base: &Path, suffix: &str) -> PathBuf {
+    let mut output = base.as_os_str().to_os_string();
+    output.push(suffix);
+    PathBuf::from(output)
+}
+
+fn invalid_image_data() -> std::io::Error {
+    std::io::Error::new(std::io::ErrorKind::InvalidData, "invalid decoded image data")
+}
+
+fn write_image_output(
+    base: &Path,
+    image: &pdf_text::images::Image,
+) -> Result<(), std::io::Error> {
+    match &image.data {
+        pdf_text::images::ImageData::Jpeg(bytes) => {
+            std::fs::write(image_output_path(base, ".jpg"), bytes)
+        }
+        pdf_text::images::ImageData::Pixels { rgba } => {
+            let pixel_count = u64::from(image.width)
+                .checked_mul(u64::from(image.height))
+                .ok_or_else(invalid_image_data)?;
+            let pixel_count = usize::try_from(pixel_count).map_err(|_| invalid_image_data())?;
+            let rgba_len = pixel_count.checked_mul(4).ok_or_else(invalid_image_data)?;
+            if rgba.len() != rgba_len {
+                return Err(invalid_image_data());
+            }
+
+            let soft_mask = image.soft_mask.as_deref();
+            if soft_mask.is_some_and(|mask| mask.len() != pixel_count) {
+                return Err(invalid_image_data());
+            }
+            let has_alpha = soft_mask.is_some()
+                || rgba
+                    .chunks_exact(4)
+                    .any(|pixel| pixel.get(3).copied().unwrap_or(255) < 255);
+
+            let (suffix, header) = if has_alpha {
+                (
+                    ".pam",
+                    format!(
+                        "P7\nWIDTH {}\nHEIGHT {}\nDEPTH 4\nMAXVAL 255\nTUPLTYPE RGB_ALPHA\nENDHDR\n",
+                        image.width, image.height
+                    ),
+                )
+            } else {
+                (
+                    ".ppm",
+                    format!("P6\n{} {}\n255\n", image.width, image.height),
+                )
+            };
+            let mut output = header.into_bytes();
+            for (index, pixel) in rgba.chunks_exact(4).enumerate() {
+                let rgb = pixel.get(..3).ok_or_else(invalid_image_data)?;
+                output.extend_from_slice(rgb);
+                if has_alpha {
+                    let pixel_alpha = pixel.get(3).copied().unwrap_or(255);
+                    let alpha = soft_mask
+                        .and_then(|mask| mask.get(index))
+                        .copied()
+                        .map(|mask_alpha| {
+                            (u16::from(pixel_alpha)
+                                .saturating_mul(u16::from(mask_alpha))
+                                / 255) as u8
+                        })
+                        .unwrap_or(pixel_alpha);
+                    output.push(alpha);
+                }
+            }
+            std::fs::write(image_output_path(base, suffix), output)
+        }
+        pdf_text::images::ImageData::Unsupported(_) => Ok(()),
+    }
+}
+
+fn run_image(path: &Path, object_number: u32, output: &Path, limits: Limits) -> u8 {
+    let source = match file::open(path, limits.max_file_bytes) {
+        Ok(source) => source,
+        Err(error) => {
+            eprintln!("{error}");
+            return 3;
+        }
+    };
+    let document = match Document::open(source, limits) {
+        Ok(document) => document,
+        Err(error) => {
+            eprintln!("{error}");
+            return 3;
+        }
+    };
+    let object = match document.xref().get(object_number) {
+        Some(XrefEntry::InUse { generation, .. }) => ObjectRef::new(object_number, generation),
+        Some(XrefEntry::Compressed { .. }) => ObjectRef::new(object_number, 0),
+        _ => {
+            eprintln!("missing object {object_number}");
+            return 3;
+        }
+    };
+
+    let mut resolver = document.resolver();
+    let image = match pdf_text::images::load_image(
+        &mut resolver,
+        object,
+        limits.max_decoded_bytes / 4,
+    ) {
+        Ok(image) => image,
+        Err(error) => {
+            eprintln!("{error}");
+            return 3;
+        }
+    };
+    if let Err(error) = write_image_output(output, &image) {
+        eprintln!("{error}");
+        return 3;
+    }
+
+    let kind = image_kind(&image.data);
+    let mut json = JsonWriter::new();
+    json.begin_object();
+    json.member("width");
+    json.number(image.width as u64);
+    json.member("height");
+    json.number(image.height as u64);
+    json.member("kind");
+    json.string(&kind);
+    json.end_object();
+    println!("{}", json.finish());
+    0
 }
 
 fn run_summary(path: &Path, limits: Limits) -> u8 {
@@ -1263,7 +1639,8 @@ fn mutate_bytes(bytes: &mut Vec<u8>, state: &mut u64) {
 
 fn run_mutated(bytes: Vec<u8>, limits: Limits) -> Result<(), String> {
     let source = PdfSource::new(Arc::<[u8]>::from(bytes)).map_err(|_| "source".to_string())?;
-    let document = Document::open(source, limits).map_err(|error| error.code().to_string())?;
+    let document =
+        Document::open(source.clone(), limits).map_err(|error| error.code().to_string())?;
     let mut resolver = document.resolver();
     let mut pages = Vec::new();
     let mut refusal = None;
@@ -1306,6 +1683,32 @@ fn run_mutated(bytes: Vec<u8>, limits: Limits) -> Result<(), String> {
     }
 
     let _ = text::scan_text(&document, &pages, &mut refusal);
+
+    match pdf_text::semantic::semantic_document(source, limits) {
+        Ok(semantic) => {
+            let mut image_resolver = document.resolver();
+            for page in &semantic.pages {
+                for image in &page.images {
+                    if let Some(object) = image.object {
+                        if let Err(error) = pdf_text::images::load_image(
+                            &mut image_resolver,
+                            object,
+                            limits.max_decoded_bytes / 4,
+                        ) {
+                            if refusal.is_none() {
+                                refusal = Some(error.code().to_string());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        Err(error) => {
+            if refusal.is_none() {
+                refusal = Some(error.code().to_string());
+            }
+        }
+    }
 
     match refusal {
         Some(code) => Err(code),
@@ -1477,6 +1880,135 @@ fn resource_keys_manifest(page: &Page) -> String {
     parts.join(",")
 }
 
+fn semantic_spans_manifest(block: &pdf_text::semantic::SemanticBlock) -> String {
+    let mut spans = Vec::new();
+    for span in &block.spans {
+        let mut value = span.text.clone();
+        if span.style.bold {
+            value.push_str("[b]");
+        }
+        if span.style.italic {
+            value.push_str("[i]");
+        }
+        if span.style.monospace {
+            value.push_str("[m]");
+        }
+        spans.push(value);
+    }
+    spans.join(" | ")
+}
+
+fn add_semantic_fixture_values(
+    actuals: &mut BTreeMap<String, String>,
+    semantic: &pdf_text::semantic::SemanticDoc,
+    resolver: &mut Resolver<'_>,
+    limits: Limits,
+) {
+    actuals.insert(
+        "info.title".to_string(),
+        semantic.info.title.clone().unwrap_or_default(),
+    );
+
+    let mut outline = Vec::new();
+    for item in &semantic.outline {
+        let prefix = ">".repeat(usize::from(item.level.saturating_sub(1)));
+        outline.push(format!("{prefix}{}", item.title));
+    }
+    actuals.insert("outline".to_string(), outline.join(" | "));
+
+    for page in &semantic.pages {
+        let prefix = format!("page.{}", page.index);
+        let mut links = Vec::new();
+        for link in &page.links {
+            match &link.target {
+                pdf_text::semantic::LinkTarget::Uri(uri) => links.push(format!("uri:{uri}")),
+                pdf_text::semantic::LinkTarget::Page { index, .. } => {
+                    links.push(format!("page:{index}"));
+                }
+            }
+        }
+        actuals.insert(format!("{prefix}.links"), links.join(" | "));
+        actuals.insert(
+            format!("{prefix}.images"),
+            page.images.len().to_string(),
+        );
+        actuals.insert(
+            format!("{prefix}.spans"),
+            page.blocks
+                .first()
+                .map(semantic_spans_manifest)
+                .unwrap_or_default(),
+        );
+
+    }
+
+    // Every image object, painted or not (a soft mask is never painted itself):
+    // fixtures are small, so a scan over the xref is cheap and finds them all.
+    let size = resolver.document().xref().size();
+    for number in 1..size {
+        let Some(pdf_core::XrefEntry::InUse { generation, .. }) =
+            resolver.document().xref().get(number)
+        else {
+            continue;
+        };
+        let object = pdf_core::ObjectRef::new(number, generation);
+        let is_image = resolver
+            .get(object)
+            .ok()
+            .and_then(|found| {
+                found
+                    .dict()
+                    .and_then(|dict| dict.get(b"Subtype"))
+                    .and_then(|value| value.as_name())
+                    .map(|name| name.eq_bytes(b"Image"))
+            })
+            .unwrap_or(false);
+        if !is_image {
+            continue;
+        }
+        if let Ok(image) =
+            pdf_text::images::load_image(resolver, object, limits.max_decoded_bytes / 4)
+        {
+            let kind = image_kind(&image.data);
+            actuals.insert(format!("image.{number}.kind"), kind);
+            if let pdf_text::images::ImageData::Pixels { rgba } = &image.data {
+                let mut hasher = Sha256::new();
+                hasher.update(rgba);
+                actuals.insert(
+                    format!("image.{number}.rgba_sha256"),
+                    digest_hex(&hasher.finalize()),
+                );
+            }
+        }
+    }
+}
+
+/// Builds the semantic document through SemanticReader so its warnings (ignored
+/// actions, dropped link schemes) reach the fixture check.
+fn semantic_with_warnings(
+    source: PdfSource,
+    limits: Limits,
+) -> (Option<pdf_text::semantic::SemanticDoc>, Vec<String>) {
+    let Ok(mut reader) = pdf_text::semantic::SemanticReader::open(source, limits) else {
+        return (None, Vec::new());
+    };
+    let info = reader.info().clone();
+    let outline = reader.outline();
+    let mut pages = Vec::new();
+    while let Some(page) = reader.next_page() {
+        pages.push(page);
+    }
+    let warnings = reader
+        .take_warnings()
+        .iter()
+        .map(|warning| warning.what.to_string())
+        .collect();
+    (
+        Some(pdf_text::semantic::SemanticDoc { info, outline, pages }),
+        warnings,
+    )
+}
+
 fn actual_fixture_values(
     path: &Path,
     limits: Limits,
@@ -1488,6 +2020,7 @@ fn actual_fixture_values(
         source.header().version().to_string(),
     );
 
+    let (semantic, semantic_warnings) = semantic_with_warnings(source.clone(), limits);
     let document = match Document::open(source, limits) {
         Ok(document) => {
             actuals.insert("refusal".to_string(), "none".to_string());
@@ -1521,6 +2054,10 @@ fn actual_fixture_values(
 
     let mut resolver = document.resolver();
     let mut text_resolver = document.resolver();
+    let mut image_resolver = document.resolver();
+    if let Some(semantic) = semantic.as_ref() {
+        add_semantic_fixture_values(&mut actuals, semantic, &mut image_resolver, limits);
+    }
     for page in &report.pages {
         let prefix = format!("page.{}", page.index);
         actuals.insert(
@@ -1581,11 +2118,13 @@ fn actual_fixture_values(
 
     append_resolver_warnings(&mut resolver, &mut report.warnings);
     append_resolver_warnings(&mut text_resolver, &mut report.warnings);
-    let warnings = report
+    append_resolver_warnings(&mut image_resolver, &mut report.warnings);
+    let mut warnings = report
         .warnings
         .iter()
         .map(|warning| warning.code.to_string())
         .collect::<Vec<_>>();
+    warnings.extend(semantic_warnings);
     Ok((actuals, warnings))
 }
 
