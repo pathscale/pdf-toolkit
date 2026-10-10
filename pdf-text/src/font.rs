@@ -829,7 +829,11 @@ fn load_simple_widths(
         let width = if let Some(width) = explicit {
             width
         } else {
-            loader.warn("widths_missing");
+            // A standard 14 font may omit /Widths: Adobe's metrics are the
+            // specified widths then, so only other fonts warn.
+            if family.is_none() {
+                loader.warn("widths_missing");
+            }
             if missing_width != 0.0 {
                 missing_width
             } else if data.kind != FontKind::Type3 {
@@ -837,11 +841,11 @@ fn load_simple_widths(
                     .and_then(|text| text.as_slice().first().copied())
                     .unwrap_or('\u{fffd}');
                 match standard14::width(data.name.bytes(), character) {
-                    Some(width) => {
-                        if family != Some(Family::Courier) {
-                            loader.warn("standard14_approx_widths");
-                        }
-                        width
+                    Some(width) => width,
+                    None if family.is_some() => {
+                        // A glyph the font does not have: half an em keeps text flowing.
+                        loader.warn("standard14_glyph_missing");
+                        500.0
                     }
                     None => 0.0,
                 }

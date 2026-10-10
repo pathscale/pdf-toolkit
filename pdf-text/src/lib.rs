@@ -7,6 +7,7 @@ extern crate std;
 
 pub mod data {
     pub mod encodings;
+    pub mod standard14;
 }
 
 pub mod font;
