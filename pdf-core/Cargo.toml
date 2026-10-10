@@ -7,3 +7,6 @@ license.workspace = true
 [features]
 default = ["std"]
 std = []
+
+[dependencies]
+miniz_oxide = { version = "0.8", default-features = false, features = ["with-alloc"] }
