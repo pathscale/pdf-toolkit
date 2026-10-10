@@ -237,7 +237,7 @@ pub(super) fn run_receipt(path: &Path, limits: Limits) -> u8 {
         }
     }
     json.end_object();
-    println!("{}", json.finish());
+    out!("{}", json.finish());
     0
 }
 

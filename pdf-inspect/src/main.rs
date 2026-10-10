@@ -19,6 +19,16 @@ use pdf_toolkit_inspect::{digest_hex, format_number, JsonWriter, Sha256};
 use pdf_raster::{encode_png, render_page as rasterize_page};
 use pdf_render::RenderOptions;
 
+/// println! that ends the process quietly once stdout is closed, for example by `head`.
+macro_rules! out {
+    ($($arg:tt)*) => {{
+        use std::io::Write as _;
+        if writeln!(std::io::stdout().lock(), $($arg)*).is_err() {
+            std::process::exit(0);
+        }
+    }};
+}
+
 mod text;
 
 struct CountingAllocator;
@@ -999,7 +1009,7 @@ fn run_semantic(path: &Path, limits: Limits, repair: bool) -> u8 {
             Ok(document) => write_semantic_document(&mut json, &document),
             Err(_) => write_repaired_semantic_document(&mut json, &repaired),
         }
-        println!("{}", json.finish());
+        out!("{}", json.finish());
         return 0;
     }
 
@@ -1013,7 +1023,7 @@ fn run_semantic(path: &Path, limits: Limits, repair: bool) -> u8 {
 
     let mut json = JsonWriter::new();
     write_semantic_document(&mut json, &document);
-    println!("{}", json.finish());
+    out!("{}", json.finish());
     0
 }
 
@@ -1032,7 +1042,7 @@ fn run_repair(path: &Path, limits: Limits) -> u8 {
         match Document::open_with(source, limits, pdf_core::OpenMode::Repair) {
             Ok(document) => document,
             Err(error) => {
-                println!("{{\"strict\":{:?},\"repair\":{:?}}}", strict, error.code());
+                out!("{{\"strict\":{:?},\"repair\":{:?}}}", strict, error.code());
                 return 1;
             }
         };
@@ -1057,7 +1067,7 @@ fn run_repair(path: &Path, limits: Limits) -> u8 {
     let resolver_warnings = resolver.take_warnings();
     warnings.extend(resolver_warnings.iter().map(|w| w.what));
     warnings.dedup();
-    println!(
+    out!(
         "{{\"strict\":{:?},\"pages\":{pages},\"page_errors\":{page_errors},\"glyphs\":{glyphs},\"warnings\":{:?}}}",
         strict, warnings
     );
@@ -1198,7 +1208,7 @@ fn run_image(path: &Path, object_number: u32, output: &Path, limits: Limits) -> 
     json.member("kind");
     json.string(&kind);
     json.end_object();
-    println!("{}", json.finish());
+    out!("{}", json.finish());
     0
 }
 
@@ -1419,7 +1429,7 @@ fn run_summary(path: &Path, limits: Limits, repair: bool) -> u8 {
     }
     json.end_object();
 
-    println!("{}", json.finish());
+    out!("{}", json.finish());
     0
 }
 
@@ -1524,7 +1534,7 @@ fn run_streams(path: &Path, limits: Limits) -> u8 {
             json.member("refusal");
             write_refusal(&mut json, Some(&refusal));
             json.end_object();
-            println!("{}", json.finish());
+            out!("{}", json.finish());
             return 0;
         }
     };
@@ -1608,7 +1618,7 @@ fn run_streams(path: &Path, limits: Limits) -> u8 {
     json.member("refusal");
     write_refusal(&mut json, report.refusal.as_ref());
     json.end_object();
-    println!("{}", json.finish());
+    out!("{}", json.finish());
     0
 }
 
@@ -1862,7 +1872,7 @@ fn run_bench(paths: &[PathBuf], repeat: usize, limits: Limits) -> u8 {
             None => json.null(),
         }
         json.end_object();
-        println!("{}", json.finish());
+        out!("{}", json.finish());
     }
     0
 }
@@ -2525,7 +2535,7 @@ fn run_mutate(path: &Path, seed: u64, count: usize) -> u8 {
     json.member("stages");
     write_fuzz_stages(&mut json, &stages);
     json.end_object();
-    println!("{}", json.finish());
+    out!("{}", json.finish());
 
     if panicked > 0 {
         2
@@ -3097,7 +3107,7 @@ fn run_check(directory: &Path) -> u8 {
         let manifest = match parse_manifest(&manifest_text) {
             Ok(manifest) => manifest,
             Err(error) => {
-                println!("FAIL {fixture_name} manifest expected=valid got={error}");
+                out!("FAIL {fixture_name} manifest expected=valid got={error}");
                 failed_fixtures = failed_fixtures.saturating_add(1);
                 checked_keys = checked_keys.saturating_add(1);
                 continue;
@@ -3106,7 +3116,7 @@ fn run_check(directory: &Path) -> u8 {
 
         let mut fixture_failed = false;
         for (key, expected) in &manifest.limit_errors {
-            println!("FAIL {fixture_name} {key} expected={expected} got=invalid_limit");
+            out!("FAIL {fixture_name} {key} expected={expected} got=invalid_limit");
             fixture_failed = true;
             checked_keys = checked_keys.saturating_add(1);
         }
@@ -3147,9 +3157,9 @@ fn run_check(directory: &Path) -> u8 {
                 actual.as_deref() == Some(expected.as_str())
             };
             if matches_expected {
-                println!("PASS {fixture_name} {key}");
+                out!("PASS {fixture_name} {key}");
             } else {
-                println!("FAIL {fixture_name} {key} expected={expected} got={got}");
+                out!("FAIL {fixture_name} {key} expected={expected} got={got}");
                 fixture_failed = true;
             }
             checked_keys = checked_keys.saturating_add(1);
@@ -3162,7 +3172,7 @@ fn run_check(directory: &Path) -> u8 {
         }
     }
 
-    println!(
+    out!(
         "fixtures: {passed_fixtures} passed, {failed_fixtures} failed, {checked_keys} keys"
     );
     if failed_fixtures > 0 {
