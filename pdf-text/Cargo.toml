@@ -16,5 +16,5 @@ std = ["pdf-core/std"]
 jpx = ["dep:hayro-jpeg2000"]
 
 [dependencies]
-pdf-core = { package = "pdf-toolkit-core", version = "0.1.0", path = "../pdf-core", default-features = false }
+pdf-core = { package = "pdf-toolkit-core", version = "0.2.0", path = "../pdf-core", default-features = false }
 hayro-jpeg2000 = { version = "0.4.1", default-features = false, optional = true }
