@@ -156,10 +156,10 @@ fn read_image(
             .ok_or_else(|| wrong(object.id(), "ImageMask boolean"))?,
     };
     let decoded_result = decode(resolver, object, budget);
-    // JPX carries its own precision. Do not even resolve the PDF entry.
+    // JPX and JXL carry their own precision. Do not resolve the PDF entry.
     let mut bits_per_component = if matches!(
         &decoded_result,
-        Ok(decoded) if decoded.image == Some(FilterKind::Jpx)
+        Ok(decoded) if matches!(decoded.image, Some(FilterKind::Jpx | FilterKind::Jxl))
     ) {
         0
     } else {
@@ -171,6 +171,13 @@ fn read_image(
 
     let mut color = if image_mask {
         ColorSpec::simple(ColorSpace::Gray)
+    } else if matches!(
+        &decoded_result,
+        Ok(decoded) if decoded.image == Some(FilterKind::Jxl)
+    ) {
+        // JXL's header owns its colour encoding, including when the feature
+        // is disabled. Do not follow the PDF ColorSpace entry.
+        ColorSpec::simple(ColorSpace::Unsupported)
     } else {
         match read_color(resolver, dict) {
             Ok(color) => color,
@@ -288,9 +295,20 @@ fn read_image(
                     }
                 }
             }
+            #[cfg(feature = "jxl")]
+            if codec == FilterKind::Jxl {
+                if let Err(error) = decode_jxl(
+                    resolver, object, dict, &decoded.bytes, &mut image, max_pixels, budget,
+                ) {
+                    recover(resolver, object, error, "jxl_decode")?;
+                    image.data = ImageData::Unsupported("jxl");
+                }
+                return Ok((image, soft));
+            }
             image.data = match codec {
                 FilterKind::Dct => ImageData::Jpeg(decoded.bytes),
                 FilterKind::Jpx => ImageData::Unsupported("jpx"),
+                FilterKind::Jxl => ImageData::Unsupported("jxl"),
                 _ => ImageData::Unsupported("codec"),
             };
             return Ok((image, soft));
@@ -381,6 +399,139 @@ fn read_image(
     }
     image.data = ImageData::Pixels { rgba };
     Ok((image, soft))
+}
+
+#[cfg(feature = "jxl")]
+fn decode_jxl(
+    resolver: &mut Resolver<'_>,
+    object: &Object,
+    dict: DictRef<'_>,
+    bytes: &[u8],
+    image: &mut Image,
+    max_pixels: u64,
+    budget: &mut Budget,
+) -> Result<(), DocError> {
+    use jxl_oxide::{EnumColourEncoding, JxlImage, NullCms, RenderingIntent};
+
+    if image.image_mask {
+        return Err(DocError::Unsupported { feature: "jxl" });
+    }
+    // The decoder shares its input as Arc<[u8]> spans; this is the one copy of the codestream.
+    let mut source = JxlImage::builder()
+        .read_bytes(alloc::sync::Arc::from(bytes))
+        .map_err(|_| jxl_decode_error())?;
+
+    let width = source.width();
+    let height = source.height();
+    let maximum = resolver.document().limits().max_decoded_bytes.min(isize::MAX as u64);
+    let pixels = u64::from(width).checked_mul(u64::from(height))
+        .ok_or_else(|| size_error(maximum))?;
+    if pixels > max_pixels {
+        return Err(refusal(
+            LimitKind::DecodedBytes,
+            pixels.saturating_mul(4),
+            max_pixels.saturating_mul(4),
+        ));
+    }
+    if width != image.width || height != image.height {
+        return Err(wrong(object.id(), "JXL dimensions matching image dictionary"));
+    }
+    let metadata = &source.image_header().metadata;
+    let space = if metadata.grayscale() { ColorSpace::Gray } else { ColorSpace::Rgb };
+    let count = channels(space);
+    let has_alpha = source.pixel_format().has_alpha();
+    let associated_alpha = metadata.ec_info.iter()
+        .find_map(|info| info.alpha_associated()).unwrap_or(false);
+    // Include every extra plane, even those omitted from the output stream.
+    // XYB decoding can use three working colour planes for a gray image.
+    let plane_count = count.max(3).checked_add(metadata.ec_info.len())
+        .ok_or_else(|| size_error(maximum))?;
+    let plane_bytes = pixels.checked_mul(plane_count as u64)
+        .and_then(|size| size.checked_mul(4))
+        .ok_or_else(|| size_error(maximum))?;
+    check(LimitKind::DecodedBytes, plane_bytes, maximum)?;
+    budget.charge(usize::try_from(plane_bytes).map_err(|_| size_error(maximum))?)?;
+    let layout = SampleLayout::new(width, height, count, 8, maximum)?;
+    budget.charge(layout.rgba)?;
+    let has_pdf_soft = resolver.resolve_dict_key(dict, b"SMask")?
+        .map(|value| !value.get().is_null() && !value.get().as_name()
+            .map(|name| name.eq_bytes(b"None")).unwrap_or(false))
+        .unwrap_or(false);
+    let use_alpha = has_alpha && !has_pdf_soft;
+    let alpha_size = usize::try_from(pixels).map_err(|_| size_error(maximum))?;
+    if use_alpha {
+        budget.charge(alpha_size)?;
+    }
+
+    source.set_cms(NullCms);
+    source.request_color_encoding(if space == ColorSpace::Gray {
+        EnumColourEncoding::gray_srgb(RenderingIntent::Relative)
+    } else {
+        EnumColourEncoding::srgb(RenderingIntent::Relative)
+    });
+    if source.num_loaded_keyframes() == 0 {
+        return Err(jxl_decode_error());
+    }
+    let rendered = source.render_frame(0).map_err(|_| jxl_decode_error())?;
+    let mut stream = rendered.stream();
+    let stream_count = count.checked_add(usize::from(has_alpha))
+        .ok_or_else(jxl_decode_error)?;
+    if stream.width() != width || stream.height() != height
+        || usize::try_from(stream.channels()).ok() != Some(stream_count)
+        || stream_count > 4
+    {
+        return Err(jxl_decode_error());
+    }
+    let mut rgba = zeroed(layout.rgba, maximum)?;
+    let mut soft_mask = if use_alpha {
+        Some(zeroed(alpha_size, maximum)?)
+    } else {
+        None
+    };
+    for (index, pixel) in rgba.chunks_exact_mut(4).enumerate() {
+        let mut samples = [0u8; 4];
+        let output = samples.get_mut(..stream_count).ok_or_else(jxl_decode_error)?;
+        if stream.write_to_buffer(output) != stream_count {
+            return Err(jxl_decode_error());
+        }
+        let alpha = if has_alpha {
+            samples.get(count).copied().ok_or_else(jxl_decode_error)?
+        } else {
+            255
+        };
+        let mut values = [0u8; 4];
+        for (slot, sample) in values.iter_mut().zip(samples.iter()).take(count) {
+            // The pixel API stores straight alpha, including when a PDF
+            // soft mask replaces the codestream's opacity.
+            *slot = if associated_alpha {
+                if alpha == 0 {
+                    0
+                } else {
+                    ((u32::from(*sample) * 255 + u32::from(alpha) / 2)
+                        / u32::from(alpha)).min(255) as u8
+                }
+            } else {
+                *sample
+            };
+        }
+        let [r, g, b] = rgb(space, &values).ok_or_else(jxl_decode_error)?;
+        let opacity = if use_alpha { alpha } else { 255 };
+        pixel.copy_from_slice(&[r, g, b, opacity]);
+        if let Some(mask) = &mut soft_mask {
+            *mask.get_mut(index).ok_or_else(jxl_decode_error)? = alpha;
+        }
+    }
+    image.color_space = space;
+    image.bits_per_component = 8;
+    image.has_soft_mask |= use_alpha;
+    image.soft_mask = soft_mask;
+    image.data = ImageData::Pixels { rgba };
+    Ok(())
+}
+
+#[cfg(feature = "jxl")]
+fn jxl_decode_error() -> DocError {
+    DocError::Malformed { offset: 0, what: "jxl_decode" }
 }
 
 #[cfg(feature = "jpx")]

@@ -13,6 +13,9 @@ mod lzw;
 mod predictor;
 mod runlength;
 
+/// Filter name from the PDF Association's JPEG XL proposal.
+pub const JXL_DECODE_NAME: &str = "JXLDecode";
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum FilterKind {
     Flate,
@@ -22,6 +25,7 @@ pub enum FilterKind {
     RunLength,
     Dct,
     Jpx,
+    Jxl,
     Jbig2,
     CcittFax,
     Crypt,
@@ -29,6 +33,9 @@ pub enum FilterKind {
 
 impl FilterKind {
     pub fn from_name(name: &[u8]) -> Option<FilterKind> {
+        if name == JXL_DECODE_NAME.as_bytes() {
+            return Some(Self::Jxl);
+        }
         match name {
             b"FlateDecode" | b"Fl" => Some(Self::Flate),
             b"LZWDecode" | b"LZW" => Some(Self::Lzw),
@@ -53,6 +60,7 @@ impl FilterKind {
             Self::RunLength => "RunLengthDecode",
             Self::Dct => "DCTDecode",
             Self::Jpx => "JPXDecode",
+            Self::Jxl => JXL_DECODE_NAME,
             Self::Jbig2 => "JBIG2Decode",
             Self::CcittFax => "CCITTFaxDecode",
             Self::Crypt => "Crypt",
@@ -60,7 +68,7 @@ impl FilterKind {
     }
 
     pub const fn is_image_codec(self) -> bool {
-        matches!(self, Self::Dct | Self::Jpx | Self::Jbig2 | Self::CcittFax)
+        matches!(self, Self::Dct | Self::Jpx | Self::Jxl | Self::Jbig2 | Self::CcittFax)
     }
 }
 
@@ -482,3 +490,4 @@ fn finish(
 fn is_whitespace(byte: u8) -> bool {
     matches!(byte, 0 | 9 | 10 | 12 | 13 | 32)
 }
+

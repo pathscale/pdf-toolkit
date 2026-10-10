@@ -17,6 +17,7 @@ default = ["std", "text"]
 std = ["pdf-core/std", "pdf-text?/std"]
 text = ["dep:pdf-text"]
 jpx = ["text", "pdf-text/jpx"]
+jxl = ["text", "pdf-text/jxl"]
 render = ["text", "dep:pdf-render"]
 raster = ["render", "std", "dep:pdf-raster"]
 write = ["dep:pdf-write"]
@@ -29,3 +30,4 @@ pdf-render = { package = "pdf-toolkit-render", version = "0.2.1", path = "../pdf
 pdf-raster = { package = "pdf-toolkit-raster", version = "0.2.1", path = "../pdf-raster", optional = true }
 pdf-write = { package = "pdf-toolkit-write", version = "0.2.1", path = "../pdf-write", optional = true }
 pdf-edit = { package = "pdf-toolkit-edit", version = "0.2.1", path = "../pdf-edit", optional = true }
+
