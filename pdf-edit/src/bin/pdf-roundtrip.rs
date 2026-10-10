@@ -20,6 +20,9 @@ use pdf_text::images::{ColorSpace, ImageData};
 use pdf_text::semantic::{Link, LinkTarget, OutlineItem, SemanticDoc};
 use pdf_write::doc::{Color, DocumentBuilder, StandardFont, WriteOptions};
 
+#[path = "../roundtrip_edits.rs"]
+mod editing;
+
 type CheckResult<T> = Result<T, String>;
 
 const MAX_FILE_BYTES: u64 = 32 << 20;
@@ -785,6 +788,7 @@ fn main() -> ExitCode {
         return report.finish();
     };
     let jpeg = jpeg_program();
+    editing::run(&mut report, &config, font.clone());
     for (name, compress, object_streams) in [
         ("writer-table-plain", false, false),
         ("writer-table-flate", true, false),

@@ -1,6 +1,6 @@
 //! Bounded, append-only PDF revisions.
 //!
-//! Page indices refer to the original document's page tree. Changes to a page's
+//! Page indices refer to the current pending page order. Changes to a page's
 //! dictionary, annotation arrays and content arrays are read from pending objects.
 //! Methods without a Result return retain their first error for save(). A failed
 //! add_object returns object reference 0 0, which is never allocated.
@@ -16,13 +16,19 @@ use pdf_core::{
 };
 use pdf_write::{Dict, Value};
 
+mod annotations;
+mod import;
+mod pages;
 mod section;
 mod value;
+
+use import::StreamData;
+use pages::PageEntry;
 
 struct Pending {
     id: ObjectRef,
     value: Value,
-    data: Option<Arc<[u8]>>,
+    data: Option<StreamData>,
     cost: u64,
 }
 
@@ -36,6 +42,9 @@ pub struct Editor {
     first_id: Option<Vec<u8>>,
     info_new: Option<ObjectRef>,
     error: Option<DocError>,
+    pages_root: ObjectRef,
+    pages: Vec<PageEntry>,
+    order_changed: bool,
 }
 
 pub(crate) fn malformed(what: &'static str) -> DocError {
@@ -129,6 +138,7 @@ impl Editor {
         }
         let prev = section::startxref(&bytes)?;
         let first_id = first_id(&document)?;
+        let (pages_root, pages) = pages::initial(&document)?;
         let editor = Self {
             bytes,
             document,
@@ -139,8 +149,12 @@ impl Editor {
             first_id,
             info_new: None,
             error: None,
+            pages_root,
+            pages,
+            order_changed: false,
         };
         editor.reference(root)?;
+        editor.reference(pages_root)?;
         let catalog = editor.document.resolver().get(root)?;
         if catalog.is_stream() || catalog.dict().is_none() {
             return Err(malformed("catalog"));
@@ -226,14 +240,8 @@ impl Editor {
             u64::from(index).saturating_add(1),
             u64::from(self.document.limits().max_pages),
         )?;
-        let mut resolver = self.document.resolver();
-        for page in pdf_core::pages::PageWalk::new(&mut resolver)? {
-            let page = page?;
-            if page.index == index {
-                return Ok(page.id);
-            }
-        }
-        Err(malformed("page index"))
+        self.pages.get(index as usize).map(|page| page.id)
+            .ok_or_else(|| malformed("page index"))
     }
 
     fn array_slot(
@@ -501,7 +509,7 @@ impl Editor {
         let page_cost = self.cost(page_id, &page_value, None)?;
         let total = self.changed_size(&[(id, cost), (page_id, page_cost)])?;
         self.install(Pending {
-            id, value: stream, data: Some(Arc::from(content)), cost,
+            id, value: stream, data: Some(StreamData::owned(Arc::from(content))), cost,
         });
         self.install(Pending {
             id: page_id, value: page_value, data: None, cost: page_cost,

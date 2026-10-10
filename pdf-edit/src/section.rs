@@ -114,6 +114,12 @@ fn trailer(editor: &Editor, size: u32, second_id: Vec<u8>) -> Result<Dict, DocEr
 }
 
 pub(crate) fn save(editor: &Editor) -> Result<Vec<u8>, DocError> {
+    let page_updates = editor.page_updates()?;
+    let mut objects: BTreeMap<_, _> = editor.pending.iter()
+        .map(|(number, pending)| (*number, pending)).collect();
+    for pending in &page_updates {
+        objects.insert(pending.id.number(), pending);
+    }
     let limits = editor.document.limits();
     check(
         LimitKind::PrevChain,
@@ -127,7 +133,7 @@ pub(crate) fn save(editor: &Editor) -> Result<Vec<u8>, DocError> {
     // Also terminates a trailing comment or an EOF without a final newline.
     output.append(b"\n")?;
     let mut entries = BTreeMap::new();
-    for pending in editor.pending.values() {
+    for pending in objects.values() {
         let offset = output.position();
         output.object(
             pending.id,
