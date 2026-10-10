@@ -3,6 +3,9 @@
 use std::collections::BTreeMap;
 use std::io;
 
+#[path = "encode_scan.rs"]
+pub mod scan;
+
 pub fn flate(input: &[u8]) -> Vec<u8> {
     miniz_oxide::deflate::compress_to_vec_zlib(input, 6)
 }

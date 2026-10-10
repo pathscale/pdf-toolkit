@@ -7,6 +7,7 @@ use std::path::Path;
 use crate::{encode, serialize_value, sha256, Dict, Value, Writer, XrefCompression};
 
 mod render;
+mod scan;
 
 const LETTER: [f64; 4] = [0.0, 0.0, 612.0, 792.0];
 const SMALL: [f64; 4] = [0.0, 0.0, 420.0, 595.0];
@@ -1771,10 +1772,10 @@ fn styled_spans() -> io::Result<Fixture> {
     Ok(fixture)
 }
 
-/// Writes all twenty-nine fixtures in a fixed order. No reader is invoked.
+/// Writes all thirty fixtures in a fixed order. No reader is invoked.
 pub fn write_fixtures(out: &Path) -> io::Result<usize> {
     type Builder = fn() -> io::Result<Fixture>;
-    let builders: [(&str, Builder); 29] = [
+    let builders: [(&str, Builder); 30] = [
         ("classic-one-page", classic_one_page),
         ("xref-stream-objstm", xref_stream_objstm),
         ("incremental", incremental),
@@ -1804,6 +1805,7 @@ pub fn write_fixtures(out: &Path) -> io::Result<usize> {
         ("render-images", render::images),
         ("render-truetype", render::truetype),
         ("render-rotated", render::rotated),
+        ("scan-codecs", scan::codecs),
     ];
     fs::create_dir_all(out)?;
     for (name, build) in builders {
