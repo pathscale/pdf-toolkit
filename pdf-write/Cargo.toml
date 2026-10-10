@@ -3,3 +3,7 @@ name = "pdf-write"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+
+[dependencies]
+miniz_oxide = "0.8"
+

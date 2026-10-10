@@ -1,0 +1,14 @@
+version=1.4
+xref_kind=table
+xref_sections=1
+encrypted=false
+refusal=none
+pages=1
+page_errors=0
+warning=offsets_shifted
+page.0.media_box=0 0 612 792
+page.0.crop_box=0 0 612 792
+page.0.rotate=0
+page.0.contents=1
+page.0.resource_keys=Font,ProcSet
+page.0.content_sha256=673eadd2eaa8c83adb386e19bc966f26d7d862279a8bb8a9e546b8ec90a2d8d6
