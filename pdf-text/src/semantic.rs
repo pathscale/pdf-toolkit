@@ -136,8 +136,7 @@ impl SemanticReader {
             pages: count,
             encrypted: document.encrypted(),
         };
-        // Encrypted metadata is ciphertext, even if the page spine is readable.
-        if !document.encrypted() {
+        if document.decryptable() {
             if let Some(dict) = document.trailer().dict() {
                 if let Some(value) = links::read_key(&mut resolver, dict, b"Info")? {
                     if let Some(dict) = value.get().as_dict() {
@@ -273,7 +272,8 @@ fn info_string(
     budget: &mut Budget,
 ) -> Result<Option<String>, DocError> {
     let Some(value) = links::read_key(resolver, dict, key)? else { return Ok(None) };
-    let result = links::text_string(&value, *resolver.document().limits());
+    let limits = *resolver.document().limits();
+    let result = links::text_string(resolver, &value, limits);
     match links::recover(resolver, result, value.object().id(), "info_string_invalid")? {
         Some(Some(text)) => {
             budget.charge(text.len() as u64)?;
@@ -529,3 +529,4 @@ impl Budget {
         Ok(())
     }
 }
+

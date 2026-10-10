@@ -555,7 +555,27 @@ pub fn decode_name<'a>(
     Ok(buffer)
 }
 
-/// Decodes a PDF string into a caller-owned reusable buffer only when needed.
+/// Decode an object-level string while retaining its owner and provenance.
+pub(crate) fn decode_object_string(
+    resolver: &mut pdf_core::Resolver<'_>,
+    value: &pdf_core::Value,
+    maximum: u64,
+) -> Result<Vec<u8>, DocError> {
+    if !resolver.document().decryptable() {
+        return Err(DocError::Encrypted);
+    }
+    let text = value.get().as_str().ok_or(DocError::WrongType {
+        id: value.object().id(), expected: "PDF string",
+    })?;
+    check(LimitKind::ObjectBytes, text.raw().len() as u64, maximum)?;
+    let owner = value.object().id().unwrap_or(pdf_core::ObjectRef::new(0, 0));
+    let bytes = resolver.decode_string(owner, text);
+    check(LimitKind::DecodedBytes, bytes.len() as u64, maximum)?;
+    Ok(bytes)
+}
+
+/// Decodes a string in an already-decoded content stream. Object-level strings
+/// use decode_object_string so their encryption key is selected by their owner.
 pub fn decode_string<'a>(
     raw: &'a [u8],
     buffer: &'a mut Vec<u8>,

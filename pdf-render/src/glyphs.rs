@@ -82,7 +82,7 @@ impl GlyphSourceCache {
         value: &Value,
         fallback: Option<&Arc<[u8]>>,
     ) -> Result<Option<GlyphSource>, DocError> {
-        if resolver.document().encrypted() {
+        if !resolver.document().decryptable() {
             return Err(DocError::Encrypted);
         }
         let source = Arc::downgrade(&resolver.document().source().shared());
@@ -212,7 +212,7 @@ impl GlyphSource {
         dict: DictRef<'_>,
         fallback: Option<&Arc<[u8]>>,
     ) -> Result<Option<GlyphSource>, DocError> {
-        if resolver.document().encrypted() {
+        if !resolver.document().decryptable() {
             return Err(DocError::Encrypted);
         }
         if font.kind() == FontKind::Type3 {

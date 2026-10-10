@@ -184,7 +184,7 @@ impl PdfSource {
             })
     }
 
-    /// Creates a checked span that borrows its bytes from this source.
+    /// Creates a checked span that borrows directly from this source.
     pub fn span(&self, range: Range<usize>) -> Result<RawSpan<'_>, SourceError> {
         let bytes = self.slice(range.clone())?;
         Ok(RawSpan { bytes, range })
@@ -246,7 +246,7 @@ fn parse_header(bytes: &[u8]) -> Result<PdfHeader, SourceError> {
     })
 }
 
-fn sha256(bytes: &[u8]) -> SourceDigest {
+pub(crate) fn sha256(bytes: &[u8]) -> SourceDigest {
     const INITIAL_STATE: [u32; 8] = [
         0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab,
         0x5be0cd19,

@@ -1,10 +1,11 @@
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 
+use crate::crypt::Crypt;
 use crate::error::{malformed, DocError, Warning};
 use crate::filter::{DecodeParams, Decoded, FilterKind, FilterStep};
 use crate::limits::{check, LimitKind, Limits, Refusal};
-use crate::object::{parse_indirect_pending, DictRef, Object, Value, ValueRef};
+use crate::object::{parse_indirect_pending, DictRef, Object, PdfStr, Value, ValueRef};
 use crate::objstm::ObjectStream;
 use crate::source::PdfSource;
 use crate::work::ObjectRef;
@@ -24,6 +25,8 @@ pub struct Document {
     limits: Limits,
     warnings: Vec<Warning>,
     encrypted: bool,
+    crypt: Option<Arc<Crypt>>,
+    permissions: Option<i32>,
     repair_root: Option<ObjectRef>,
     repaired: bool,
 }
@@ -38,7 +41,7 @@ impl Document {
         limits: Limits,
         mode: OpenMode,
     ) -> Result<Document, DocError> {
-        match crate::xref::read(&source, &limits) {
+        let mut document = match crate::xref::read(&source, &limits) {
             Ok((xref, trailer, warnings)) => {
                 Ok(Self::from_parts(source, xref, trailer, limits, warnings, None, false))
             }
@@ -46,7 +49,42 @@ impl Document {
                 crate::repair::rebuild(source, limits)
             }
             Err(error) => Err(error),
+        }?;
+        document.initialize_crypt()?;
+        Ok(document)
+    }
+
+    fn initialize_crypt(&mut self) -> Result<(), DocError> {
+        let Some(value) = self.trailer.dict().and_then(|dict| dict.get(b"Encrypt"))
+            .filter(|value| !value.is_null()).map(|value| value.to_owned()) else {
+            return Ok(());
+        };
+        let mut permissions = None;
+        let (result, warnings) = {
+            let mut resolver = self.resolver();
+            let result = (|| {
+                let value = resolver.resolve(value.get())?;
+                if let Some(dict) = value.get().as_dict() {
+                    permissions = resolver.resolve_dict_key(dict, b"P")?
+                        .and_then(|value| value.get().as_i64())
+                        .and_then(|number| i32::try_from(number).ok());
+                }
+                Crypt::open(&mut resolver, &value)
+            })();
+            (result, resolver.take_warnings())
+        };
+        self.permissions = permissions;
+        self.warnings.extend(warnings);
+        match result {
+            Ok(crypt) => self.crypt = crypt.map(Arc::new),
+            Err(error @ DocError::Refused(_)) => return Err(error),
+            Err(_) => self.warnings.push(Warning {
+                offset: None,
+                object: value.get().as_ref(),
+                what: "crypt_unavailable",
+            }),
         }
+        Ok(())
     }
 
     pub(crate) fn from_parts(
@@ -70,6 +108,8 @@ impl Document {
             limits,
             warnings,
             encrypted,
+            crypt: None,
+            permissions: None,
             repair_root,
             repaired,
         }
@@ -102,6 +142,16 @@ impl Document {
     }
     pub fn encrypted(&self) -> bool {
         self.encrypted
+    }
+    /// Whether stream and string decoding can read this document.
+    pub fn decryptable(&self) -> bool {
+        !self.encrypted || self.crypt.is_some()
+    }
+    pub fn permissions(&self) -> Option<i32> {
+        self.permissions
+    }
+    pub(crate) fn crypt(&self) -> Option<Arc<Crypt>> {
+        self.crypt.clone()
     }
     pub fn repaired(&self) -> bool {
         self.repaired
@@ -226,7 +276,7 @@ impl<'d> Resolver<'d> {
                             objects.push(object);
                         }
                         Some(XrefEntry::Compressed { stream, index }) => {
-                            if self.document.encrypted {
+                            if !self.document.decryptable() {
                                 return Err(DocError::Encrypted);
                             }
                             if id.generation() != 0 {
@@ -352,7 +402,7 @@ impl<'d> Resolver<'d> {
     }
 
     pub fn decode_stream(&mut self, stream: &Object) -> Result<Decoded, DocError> {
-        if self.document.encrypted {
+        if !self.document.decryptable() {
             return Err(DocError::Encrypted);
         }
         let raw = stream
@@ -361,9 +411,37 @@ impl<'d> Resolver<'d> {
                 id: stream.id(),
                 expected: "stream",
             })?;
-        let steps = filter_steps(stream, |value| self.resolve(value))?;
-        crate::filter::decode(raw, &steps, self.document.limits.max_decoded_bytes)
-            .map_err(DocError::from)
+        let steps = filter_steps_for(stream, |value| self.resolve(value), true)?;
+        crate::crypt::decode_stream(self, stream, raw, &steps)
+    }
+
+    /// Decode an object-level string. Content and object-stream strings carry
+    /// plaintext provenance, so they are never decrypted a second time.
+    /// This Vec-returning API records failures as warnings and returns no text.
+    pub fn decode_string(&mut self, owner: ObjectRef, s: PdfStr<'_>) -> Vec<u8> {
+        let id = s.owner().unwrap_or(owner);
+        if !self.document.decryptable() {
+            self.warn(Warning { offset: None, object: Some(id), what: "encrypted" });
+            return Vec::new();
+        }
+        s.decode_with(|bytes| {
+            let Some(crypt) = self.document.crypt() else { return bytes };
+            if s.plaintext() || crypt.excluded(Some(id)) {
+                return bytes;
+            }
+            match crypt.decrypt_owned(id, crypt.strings(), bytes, self.document.limits.max_decoded_bytes) {
+                Ok((bytes, padding)) => {
+                    if padding {
+                        self.warn(Warning { offset: None, object: Some(id), what: "crypt_padding" });
+                    }
+                    bytes
+                }
+                Err(error) => {
+                    self.warn(Warning { offset: None, object: Some(id), what: error.code() });
+                    Vec::new()
+                }
+            }
+        })
     }
 
     pub fn take_warnings(&mut self) -> Vec<Warning> {
@@ -377,7 +455,18 @@ impl<'d> Resolver<'d> {
 
 pub(crate) fn filter_steps<F>(
     stream: &Object,
+    resolve: F,
+) -> Result<Vec<FilterStep>, DocError>
+where
+    F: for<'o> FnMut(ValueRef<'o>) -> Result<Value, DocError>,
+{
+    filter_steps_for(stream, resolve, false)
+}
+
+fn filter_steps_for<F>(
+    stream: &Object,
     mut resolve: F,
+    allow_crypt: bool,
 ) -> Result<Vec<FilterStep>, DocError>
 where
     F: for<'o> FnMut(ValueRef<'o>) -> Result<Value, DocError>,
@@ -425,7 +514,7 @@ where
         } else {
             None
         };
-        let decoded_params = parameters(param.as_ref(), kind, &mut resolve, stream.id())?;
+        let decoded_params = parameters(param.as_ref(), kind, &mut resolve, stream.id(), allow_crypt)?;
         steps.push(FilterStep {
             kind,
             params: decoded_params,
@@ -439,6 +528,7 @@ fn parameters<F>(
     kind: FilterKind,
     resolve: &mut F,
     id: Option<ObjectRef>,
+    allow_crypt: bool,
 ) -> Result<DecodeParams, DocError>
 where
     F: for<'o> FnMut(ValueRef<'o>) -> Result<Value, DocError>,
@@ -456,6 +546,9 @@ where
     };
     let dict = value.get().as_dict().ok_or_else(wrong)?;
     if kind == FilterKind::Crypt {
+        if allow_crypt {
+            return Ok(params);
+        }
         if let Some(name) = dict.get(b"Name") {
             let name = resolve(name)?;
             if !name

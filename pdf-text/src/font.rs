@@ -135,7 +135,7 @@ impl FontCache {
     pub fn load(&mut self, resolver: &mut Resolver<'_>, value: &Value)
         -> Result<Font, DocError>
     {
-        if resolver.document().encrypted() {
+        if !resolver.document().decryptable() {
             return Err(DocError::Encrypted);
         }
         let source = Arc::downgrade(&resolver.document().source().shared());
@@ -275,7 +275,7 @@ impl Font {
         dict: DictRef<'_>,
         id: Option<ObjectRef>,
     ) -> Result<Font, DocError> {
-        if resolver.document().encrypted() {
+        if !resolver.document().decryptable() {
             return Err(DocError::Encrypted);
         }
         let mut loader = Loader {

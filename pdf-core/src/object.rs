@@ -51,6 +51,7 @@ struct ObjectData {
     syntax_bytes: u64,
     token_count: u32,
     recovered: bool,
+    strings_plain: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -76,6 +77,8 @@ pub struct Name<'o> {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct PdfStr<'o> {
     bytes: &'o [u8],
+    owner: Option<ObjectRef>,
+    plaintext: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -209,7 +212,11 @@ impl<'o> ValueRef<'o> {
         (self.kind() == ValueKind::Name).then(|| Name { bytes: self.raw().get(1..).unwrap_or(&[]) })
     }
     pub fn as_str(&self) -> Option<PdfStr<'o>> {
-        (self.kind() == ValueKind::String).then(|| PdfStr { bytes: self.raw() })
+        (self.kind() == ValueKind::String).then(|| PdfStr {
+            bytes: self.raw(),
+            owner: self.object.id(),
+            plaintext: self.object.0.strings_plain,
+        })
     }
     pub fn as_array(&self) -> Option<ArrayRef<'o>> {
         (self.kind() == ValueKind::Array).then(|| ArrayRef(*self))
@@ -293,6 +300,16 @@ impl Iterator for NameBytes<'_> {
 
 impl<'o> PdfStr<'o> {
     pub fn raw(&self) -> &'o [u8] { self.bytes }
+    pub fn owner(&self) -> Option<ObjectRef> { self.owner }
+    pub(crate) fn plaintext(&self) -> bool { self.plaintext }
+
+    /// Apply a caller-supplied decryption step after PDF escape decoding.
+    pub fn decode_with<F>(&self, decrypt: F) -> Vec<u8>
+    where
+        F: FnOnce(Vec<u8>) -> Vec<u8>,
+    {
+        decrypt(self.decode())
+    }
     pub fn is_hex(&self) -> bool { self.bytes.first() == Some(&b'<') }
     pub fn decode(&self) -> Vec<u8> {
         let input = self.bytes.get(1..self.bytes.len().saturating_sub(1)).unwrap_or(&[]);
@@ -374,6 +391,7 @@ pub fn parse_value(
         syntax_bytes: cursor.used() as u64,
         token_count: cursor.count,
         recovered: false,
+        strings_plain: true,
     })))
 }
 
@@ -443,7 +461,13 @@ pub(crate) fn parse_indirect_pending(
         syntax_bytes,
         token_count: cursor.count,
         recovered: false,
+        strings_plain: false,
     }));
+    if object.dict().and_then(|dict| dict.get(b"Type"))
+        .and_then(|value| value.as_name()).is_some_and(|name| name.eq_bytes(b"XRef"))
+    {
+        Arc::make_mut(&mut object.0).strings_plain = true;
+    }
     if object.is_stream() {
         let length = object.dict().and_then(|dict| dict.get(b"Length"));
         let indirect = length.and_then(|value| value.as_ref()).is_some();

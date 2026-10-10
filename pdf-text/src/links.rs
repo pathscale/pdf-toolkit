@@ -5,7 +5,7 @@ use alloc::vec::Vec;
 use pdf_core::pages::{Page, PageWalk};
 use pdf_core::{ArrayRef, DictRef, DocError, LimitKind, Limits, ObjectRef, Resolver, Value, Warning};
 
-use crate::content::{check, decode_string, refusal};
+use crate::content::{check, decode_object_string, refusal};
 use crate::data::encodings::PDF_DOC;
 use crate::interp::display_transform;
 use crate::semantic::{Budget, Link, LinkTarget, OutlineItem};
@@ -129,7 +129,7 @@ impl<'r, 'd, 'p> Context<'r, 'd, 'p> {
     fn page_links(
         &mut self, page: &Page, display: impl Fn(f32, f32) -> (f32, f32),
     ) -> Result<Vec<Link>, DocError> {
-        if self.resolver.document().encrypted() { return Err(DocError::Encrypted); }
+        if !self.resolver.document().decryptable() { return Err(DocError::Encrypted); }
         let result = self.resolver.get(page.id);
         let Some(object) = recover(self.resolver, result, Some(page.id), "link_page_failed")? else {
             return Ok(Vec::new());
@@ -185,7 +185,7 @@ impl<'r, 'd, 'p> Context<'r, 'd, 'p> {
                 let Some(value) = self.key(dict, b"URI")? else { return Ok(None) };
                 let mut limits = *self.resolver.document().limits();
                 limits.max_decoded_bytes = limits.max_decoded_bytes.min(MAX_URI_BYTES);
-                let result = text_string(&value, limits);
+                let result = text_string(self.resolver, &value, limits);
                 let Some(Some(uri)) = recover(self.resolver, result, value.object().id(), "link_uri_invalid")?
                     else { return Ok(None) };
                 let safe = uri.split_once(':').is_some_and(|(scheme, _)| {
@@ -227,7 +227,7 @@ impl<'r, 'd, 'p> Context<'r, 'd, 'p> {
                 value = next;
                 continue;
             }
-            let Some(name) = name_bytes(&value, *self.resolver.document().limits())? else { break };
+            let Some(name) = name_bytes(self.resolver, &value)? else { break };
             if seen.contains(&name) {
                 warn(self.resolver, value.object().id(), "destination_cycle");
                 return Ok(None);
@@ -388,7 +388,7 @@ impl<'r, 'd, 'p> Context<'r, 'd, 'p> {
                                 break;
                             };
                             let Some(key) = self.resolve(key)? else { continue };
-                            if name_bytes(&key, *self.resolver.document().limits())?
+                            if name_bytes(self.resolver, &key)?
                                 .is_some_and(|key| key == name)
                             {
                                 return self.resolve(destination);
@@ -415,7 +415,7 @@ impl<'r, 'd, 'p> Context<'r, 'd, 'p> {
     }
 
     fn outline(&mut self) -> Result<Vec<OutlineItem>, DocError> {
-        if self.resolver.document().encrypted() { return Ok(Vec::new()); }
+        if !self.resolver.document().decryptable() { return Ok(Vec::new()); }
         let Some(catalog) = self.catalog()? else { return Ok(Vec::new()) };
         let Some(dict) = catalog.get().as_dict() else { return Ok(Vec::new()) };
         let Some(root) = self.key(dict, b"Outlines")? else { return Ok(Vec::new()) };
@@ -442,7 +442,8 @@ impl<'r, 'd, 'p> Context<'r, 'd, 'p> {
             };
             let title = match self.key(dict, b"Title")? {
                 Some(title) => {
-                    let result = text_string(&title, *self.resolver.document().limits());
+                    let limits = *self.resolver.document().limits();
+                    let result = text_string(self.resolver, &title, limits);
                     recover(self.resolver, result, title.object().id(), "outline_title_invalid")?
                         .flatten().unwrap_or_default()
                 }
@@ -492,7 +493,8 @@ fn transformed_rect(
     Some(bbox)
 }
 
-fn name_bytes(value: &Value, limits: Limits) -> Result<Option<Vec<u8>>, DocError> {
+fn name_bytes(resolver: &mut Resolver<'_>, value: &Value) -> Result<Option<Vec<u8>>, DocError> {
+    let limits = *resolver.document().limits();
     let maximum = MAX_NAME_BYTES.min(limits.max_object_bytes).min(limits.max_total_decoded_bytes);
     if let Some(name) = value.get().as_name() {
         check(LimitKind::ObjectBytes, name.encoded().len() as u64, maximum)?;
@@ -504,29 +506,23 @@ fn name_bytes(value: &Value, limits: Limits) -> Result<Option<Vec<u8>>, DocError
         out.extend_from_slice(&bytes);
         return Ok(Some(out));
     }
-    if let Some(text) = value.get().as_str() {
-        check(LimitKind::ObjectBytes, text.raw().len() as u64, maximum)?;
-        let mut buffer = Vec::new();
-        let bytes = decode_string(text.raw(), &mut buffer, maximum)?;
-        let mut out = Vec::new();
-        out.try_reserve_exact(bytes.len()).map_err(|_| {
-            refusal(LimitKind::ObjectBytes, maximum.saturating_add(1), maximum)
-        })?;
-        out.extend_from_slice(bytes);
-        return Ok(Some(out));
+    if value.get().as_str().is_some() {
+        return decode_object_string(resolver, value, maximum).map(Some);
     }
     Ok(None)
 }
 
 /// Decode PDF text strings without assuming that their source bytes are UTF-8.
-pub(crate) fn text_string(value: &Value, limits: Limits) -> Result<Option<String>, DocError> {
+pub(crate) fn text_string(
+    resolver: &mut Resolver<'_>, value: &Value, limits: Limits,
+) -> Result<Option<String>, DocError> {
     let Some(text) = value.get().as_str() else {
         return Err(DocError::WrongType { id: value.object().id(), expected: "PDF text string" });
     };
     let raw_maximum = limits.max_object_bytes.min(MAX_TEXT_BYTES.saturating_mul(2).saturating_add(2));
     check(LimitKind::ObjectBytes, text.raw().len() as u64, raw_maximum)?;
-    let mut buffer = Vec::new();
-    let bytes = decode_string(text.raw(), &mut buffer, raw_maximum)?;
+    let buffer = decode_object_string(resolver, value, raw_maximum)?;
+    let bytes = buffer.as_slice();
     let maximum = MAX_TEXT_BYTES.min(limits.max_decoded_bytes).min(limits.max_total_decoded_bytes);
     check(LimitKind::DecodedBytes, bytes.len() as u64, maximum)?;
     let mut out = String::new();

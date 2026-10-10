@@ -382,7 +382,7 @@ pub fn display_list_cached(
     cache: &mut FontCache,
     glyph_cache: &mut GlyphSourceCache,
 ) -> Result<DisplayList, DocError> {
-    if resolver.document().encrypted() {
+    if !resolver.document().decryptable() {
         return Err(DocError::Encrypted);
     }
     let limits = *resolver.document().limits();

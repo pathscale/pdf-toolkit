@@ -5,6 +5,7 @@ extern crate alloc;
 #[cfg(feature = "std")]
 extern crate std;
 
+mod crypt;
 pub mod document;
 pub mod error;
 #[cfg(feature = "std")]

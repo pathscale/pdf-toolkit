@@ -183,7 +183,7 @@ pub fn page_text_cached(
     page: &Page,
     cache: &mut FontCache,
 ) -> Result<PageText, DocError> {
-    if resolver.document().encrypted() {
+    if !resolver.document().decryptable() {
         return Err(DocError::Encrypted);
     }
     let limits = *resolver.document().limits();
@@ -1052,10 +1052,13 @@ fn actual_text(
             let Some(actual) = resolver.resolve_dict_key(dict, b"ActualText")? else {
                 return Ok(None);
             };
-            match actual.get().as_str() {
-                Some(text) => make_actual(text.raw(), strings, limits).map(Some),
-                None => Ok(None),
+            if actual.get().as_str().is_none() {
+                return Ok(None);
             }
+            let bytes = crate::content::decode_object_string(
+                resolver, &actual, limits.max_decoded_bytes,
+            )?;
+            make_actual_bytes(&bytes, limits).map(Some)
         }
         _ => Ok(None),
     }
@@ -1067,6 +1070,10 @@ fn make_actual(
     limits: Limits,
 ) -> Result<Vec<GlyphText>, DocError> {
     let bytes = decode_string(raw, buffer, limits.max_decoded_bytes)?;
+    make_actual_bytes(bytes, limits)
+}
+
+fn make_actual_bytes(bytes: &[u8], limits: Limits) -> Result<Vec<GlyphText>, DocError> {
     let mut result = Vec::new();
     if bytes.starts_with(&[0xfe, 0xff]) || bytes.starts_with(&[0xff, 0xfe]) {
         let little = bytes.starts_with(&[0xff, 0xfe]);

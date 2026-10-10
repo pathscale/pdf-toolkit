@@ -80,7 +80,7 @@ pub fn load_image(
     id: ObjectRef,
     max_pixels: u64,
 ) -> Result<Image, DocError> {
-    if resolver.document().encrypted() {
+    if !resolver.document().decryptable() {
         return Err(DocError::Encrypted);
     }
 
