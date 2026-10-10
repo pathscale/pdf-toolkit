@@ -6,7 +6,7 @@ use crate::interp::{PageText, PositionedGlyph};
 
 const MAX_CUT_DEPTH: u8 = 8;
 const BASELINE_TOLERANCE: f32 = 0.3;
-const SPACE_GAP: f32 = 0.25;
+pub(crate) const SPACE_GAP: f32 = 0.25;
 const COLUMN_GUTTER: f32 = 1.5;
 const SIZE_CHANGE: f32 = 0.15;
 
@@ -124,7 +124,7 @@ fn union(left: [f32; 4], right: [f32; 4]) -> [f32; 4] {
     ]
 }
 
-fn direction(angle: i16) -> (f32, f32) {
+pub(crate) fn direction(angle: i16) -> (f32, f32) {
     match angle {
         0 => return (1.0, 0.0),
         90 => return (0.0, 1.0),

@@ -34,6 +34,7 @@ pub struct FontInfo {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ImageInfo {
     pub bbox: [f32; 4],
+    pub object: Option<ObjectRef>,
     pub width: u32,
     pub height: u32,
     pub inline: bool,
@@ -865,7 +866,13 @@ impl Interpreter {
         }
         push(
             &mut self.output.images,
-            ImageInfo { bbox, width, height, inline },
+            ImageInfo {
+                bbox,
+                object: if inline { None } else { id },
+                width,
+                height,
+                inline,
+            },
             self.limits,
         )
     }
@@ -1155,6 +1162,21 @@ fn numbers<const N: usize>(operands: &[Operand<'_>]) -> Option<[f64; N]> {
         *slot = *number;
     }
     Some(values)
+}
+
+/// The same crop, rotation, UserUnit and top-left transform used by page_text.
+/// Invalid geometry produces non-finite points, which callers must discard.
+pub fn display_transform(page: &Page) -> impl Fn(f32, f32) -> (f32, f32) + 'static {
+    let matrix = display_matrix(page).ok().map(|(matrix, _, _)| matrix);
+    move |x, y| {
+        let Some(matrix) = matrix else { return (f32::NAN, f32::NAN) };
+        let [x, y] = matrix.point(f64::from(x), f64::from(y));
+        (finite_f32(x).unwrap_or(f32::NAN), finite_f32(y).unwrap_or(f32::NAN))
+    }
+}
+
+pub(crate) fn display_dimensions(page: &Page) -> (f32, f32) {
+    display_matrix(page).map(|(_, width, height)| (width, height)).unwrap_or((0.0, 0.0))
 }
 
 fn display_matrix(page: &Page) -> Result<(Matrix, f32, f32), DocError> {
