@@ -1417,6 +1417,7 @@ fn run_summary(path: &Path, limits: Limits, repair: bool) -> u8 {
             write_refusal(&mut json, report.refusal.as_ref());
         }
     }
+    json.end_object();
 
     println!("{}", json.finish());
     0
