@@ -196,9 +196,10 @@ pub(super) fn scan_text(
     refusal: &mut Option<String>,
 ) -> u64 {
     let mut resolver = document.resolver();
+    let mut fonts = pdf_text::font::FontCache::default();
     let mut glyphs = 0u64;
     for page in pages {
-        let receipt = page_receipt(&mut resolver, page);
+        let receipt = pdf_text::extract::page_receipt_cached(&mut resolver, page, &mut fonts);
         if let Some(error) = receipt.refusal.as_ref() {
             if refusal.is_none() {
                 *refusal = Some(error.code().to_string());
