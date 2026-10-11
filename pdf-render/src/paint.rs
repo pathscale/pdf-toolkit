@@ -14,7 +14,7 @@ const SPACE_DEPTH: u64 = 16;
 const FUNCTION_SEGMENTS: u64 = 128;
 const SAMPLES: u32 = 64;
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 enum Basic {
     Gray,
     Rgb,
@@ -51,11 +51,13 @@ impl Basic {
     }
 }
 
+#[derive(Clone, Debug, PartialEq)]
 enum Mapping {
     Indexed { palette: Arc<[u8]>, hival: u8, outputs: usize },
     Tint { function: Option<Type2>, inputs: usize },
 }
 
+#[derive(Clone, Debug, PartialEq)]
 pub(crate) struct ColorSpace {
     basic: Basic,
     mappings: Vec<Mapping>,
@@ -323,7 +325,7 @@ impl ColorState {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug, PartialEq)]
 struct Type2 {
     c0: [f32; COMPONENTS],
     c1: [f32; COMPONENTS],
@@ -487,6 +489,140 @@ impl Function {
     }
 }
 
+/// Function-based shading evaluated in device space by the rasterizer.
+#[derive(Clone, Debug, PartialEq)]
+pub struct FunctionShading {
+    inverse: [f64; 6],
+    bbox: Option<([f64; 6], [f32; 4])>,
+    domain: [f32; 4],
+    function_domain: [f32; 4],
+    range: Vec<(f32, f32)>,
+    calculator: crate::calculator::Calculator,
+    space: Arc<ColorSpace>,
+    alpha: f32,
+    background: Option<Rgba>,
+}
+
+impl FunctionShading {
+    pub fn sample(&self, x: f32, y: f32, work: &mut u64) -> Result<Option<Rgba>, DocError> {
+        let point = |matrix: [f64; 6]| {
+            let [a, b, c, d, e, f] = matrix;
+            let x = f64::from(x);
+            let y = f64::from(y);
+            [a * x + c * y + e, b * x + d * y + f]
+        };
+        let contains = |[x, y]: [f64; 2], bounds: [f32; 4]| {
+            x.is_finite() && y.is_finite()
+                && x >= f64::from(bounds[0]) && x <= f64::from(bounds[2])
+                && y >= f64::from(bounds[1]) && y <= f64::from(bounds[3])
+        };
+        if self.bbox.is_some_and(|(matrix, bbox)| !contains(point(matrix), bbox)) {
+            return Ok(None);
+        }
+        let [x, y] = point(self.inverse);
+        let [x0, x1, y0, y1] = self.domain;
+        if !contains([x, y], [x0, y0, x1, y1]) { return Ok(self.background); }
+        let domain = self.function_domain;
+        let values = self.calculator.evaluate([
+            x.clamp(f64::from(domain[0]), f64::from(domain[1])),
+            y.clamp(f64::from(domain[2]), f64::from(domain[3])),
+        ], self.range.len(), work)?;
+        let mut components = [0.0; COMPONENTS];
+        for ((slot, value), (low, high)) in components.iter_mut().zip(values).zip(&self.range) {
+            *slot = finite(value.clamp(f64::from(*low), f64::from(*high)))
+                .ok_or_else(|| bad("calculator_output"))?;
+        }
+        Ok(Some(self.space.color(&components, self.alpha)))
+    }
+
+    pub(crate) fn allocated_bytes(&self) -> usize {
+        self.calculator.allocated_bytes().saturating_add(
+            self.range.capacity().saturating_mul(core::mem::size_of::<(f32, f32)>()),
+        ).saturating_add(core::mem::size_of::<Self>())
+    }
+}
+
+fn function_shading(
+    resolver: &mut Resolver<'_>,
+    dict: DictRef<'_>,
+    matrix: Matrix,
+    bbox: Option<[f32; 4]>,
+    space: Arc<ColorSpace>,
+    alpha: f32,
+) -> Result<Shading, DocError> {
+    let domain = read_array::<4>(resolver, dict, b"Domain")?.unwrap_or([0.0, 1.0, 0.0, 1.0]);
+    if domain[0] >= domain[1] || domain[2] >= domain[3] { return Err(bad("shading_domain")); }
+    let local = read_array::<6>(resolver, dict, b"Matrix")?.map(Matrix).unwrap_or(Matrix::IDENTITY);
+    let inverse = inverse_matrix(local.then(matrix))?;
+    let bbox = bbox.map(|bbox| -> Result<_, DocError> {
+        if bbox[0] > bbox[2] || bbox[1] > bbox[3] { return Err(bad("shading_bbox")); }
+        Ok((inverse_matrix(matrix)?, bbox))
+    }).transpose()?;
+    let value = resolver.resolve_dict_key(dict, b"Function")?
+        .ok_or_else(|| bad("shading_function"))?;
+    if value.get().as_array().is_some() {
+        return Err(DocError::Unsupported { feature: "type1 shading function array" });
+    }
+    let function = value.get().as_dict().ok_or_else(|| bad("function_dictionary"))?;
+    if number(resolver, function, b"FunctionType")? != Some(4.0) {
+        return Err(DocError::Unsupported { feature: "type1 shading function (requires type4)" });
+    }
+    if !value.object().is_stream() { return Err(bad("calculator_stream")); }
+    let function_domain = read_array::<4>(resolver, function, b"Domain")?
+        .ok_or_else(|| bad("calculator_domain"))?;
+    if function_domain[0] > function_domain[1] || function_domain[2] > function_domain[3] {
+        return Err(bad("calculator_domain"));
+    }
+    let ranges = resolver.resolve_dict_key(function, b"Range")?
+        .ok_or_else(|| bad("calculator_range"))?;
+    let ranges = ranges.get().as_array().ok_or_else(|| bad("calculator_range"))?;
+    check(LimitKind::Tokens, ranges.len() as u64, (COMPONENTS * 2) as u64)?;
+    if space.pattern || space.components == 0 || ranges.len() != space.components.saturating_mul(2) {
+        return Err(bad("calculator_components"));
+    }
+    let mut range = Vec::new();
+    let mut pairs = ranges.iter();
+    while let Some(low) = pairs.next() {
+        let high = pairs.next().ok_or_else(|| bad("calculator_range"))?;
+        let low = resolved_number(resolver, low)?;
+        let high = resolved_number(resolver, high)?;
+        if low > high { return Err(bad("calculator_range")); }
+        bounded_push(resolver, &mut range, (low, high))?;
+    }
+    let background = if resolver.resolve_dict_key(dict, b"Background")?.is_some() {
+        let (values, count) = components(resolver, dict, b"Background", 0.0)?;
+        if count != space.components { return Err(bad("shading_background")); }
+        Some(space.color(&values, alpha))
+    } else {
+        None
+    };
+    let decoded = resolver.decode_stream(value.object())?;
+    if decoded.truncated || decoded.image.is_some() { return Err(bad("calculator_stream")); }
+    let calculator = crate::calculator::Calculator::parse(
+        &decoded.bytes, *resolver.document().limits(),
+    )?;
+    let shading = FunctionShading {
+        inverse, bbox, domain, function_domain, range, calculator, space, alpha, background,
+    };
+    let requested = (shading.allocated_bytes() as u64).saturating_add(decoded.bytes.len() as u64);
+    check(LimitKind::DecodedBytes, requested, resolver.document().limits().max_decoded_bytes)?;
+    check(LimitKind::TotalDecodedBytes, requested, resolver.document().limits().max_total_decoded_bytes)?;
+    Ok(Shading { paint: Paint::Function(Arc::new(shading)), bbox: None })
+}
+
+fn inverse_matrix(matrix: Matrix) -> Result<[f64; 6], DocError> {
+    if !matrix.is_finite() { return Err(bad("shading_matrix")); }
+    let [a, b, c, d, e, f] = matrix.0.map(f64::from);
+    let determinant = a * d - b * c;
+    if !determinant.is_finite() || determinant == 0.0 { return Err(bad("shading_matrix")); }
+    let result = [
+        d / determinant, -b / determinant, -c / determinant, a / determinant,
+        (c * f - d * e) / determinant, (b * e - a * f) / determinant,
+    ];
+    if !result.iter().all(|value| value.is_finite()) { return Err(bad("shading_matrix")); }
+    Ok(result)
+}
+
 pub(crate) struct Shading {
     pub(crate) paint: Paint,
     pub(crate) bbox: Option<[f32; 4]>,
@@ -506,6 +642,10 @@ pub(crate) fn shading(
         Some(space) => ColorSpace::load(resolver, None, space.get())?,
         None => ColorSpace::basic(Basic::Unknown),
     };
+    let kind = number(resolver, dict, b"ShadingType")?;
+    if kind == Some(1.0) {
+        return function_shading(resolver, dict, matrix, bbox, space, alpha);
+    }
     let function = match resolver.resolve_dict_key(dict, b"Function")? {
         Some(value) => match Function::load(resolver, value.get()) {
             Ok(function) => Some(function),
@@ -522,7 +662,6 @@ pub(crate) fn shading(
     let midpoint = (f64::from(domain[0]) * 0.5 + f64::from(domain[1]) * 0.5) as f32;
     let mean = function.as_ref().map(|function| space.color(&function.evaluate(midpoint), alpha))
         .unwrap_or_else(|| gray(alpha));
-    let kind = number(resolver, dict, b"ShadingType")?;
     if !matches!(kind, Some(2.0) | Some(3.0)) || function.is_none() {
         warn(resolver, value.object().id(), "render_shading_approximated");
         return Ok(Shading { paint: Paint::Solid(mean), bbox });
@@ -705,4 +844,3 @@ fn power(mut value: f64, exponent: f64) -> f64 {
     }
     result
 }
-
