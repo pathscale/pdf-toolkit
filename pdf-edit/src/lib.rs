@@ -104,13 +104,34 @@ fn first_id(document: &Document) -> Result<Option<Vec<u8>>, DocError> {
 
 impl Editor {
     pub fn open(bytes: Arc<[u8]>, limits: Limits) -> Result<Editor, DocError> {
+        Self::open_inner(bytes, limits, None)
+    }
+
+    /// Opens an authenticated PSChaCha file for encrypted incremental updates.
+    pub fn open_with_password(
+        bytes: Arc<[u8]>,
+        limits: Limits,
+        password: &[u8],
+    ) -> Result<Editor, DocError> {
+        Self::open_inner(bytes, limits, Some(password))
+    }
+
+    fn open_inner(
+        bytes: Arc<[u8]>,
+        limits: Limits,
+        password: Option<&[u8]>,
+    ) -> Result<Editor, DocError> {
         check(
             LimitKind::FileBytes,
             bytes.len() as u64,
             limits.max_file_bytes.min(u64::from(u32::MAX)),
         )?;
-        let document = Document::open(PdfSource::new(bytes.clone())?, limits)?;
-        if document.encrypted() {
+        let source = PdfSource::new(bytes.clone())?;
+        let document = match password {
+            Some(password) => Document::open_with_password(source, limits, password)?,
+            None => Document::open(source, limits)?,
+        };
+        if document.encrypted() && document.chacha_key().is_none() {
             return Err(DocError::Encrypted);
         }
         for warning in document.warnings() {
@@ -344,6 +365,15 @@ impl Editor {
 
     pub fn replace_object(&mut self, id: ObjectRef, body: Value) {
         let result = self.clean()
+            .and_then(|()| {
+                if self.document.chacha_key().is_some()
+                    && self.document.encryption_ref() == Some(id)
+                {
+                    Err(DocError::Unsupported { feature: "edit:PSChaCha security dictionary" })
+                } else {
+                    Ok(())
+                }
+            })
             .and_then(|()| self.reference(id))
             .and_then(|()| self.cost(id, &body, None))
             .and_then(|cost| self.changed_size(&[(id, cost)]).map(|total| (cost, total)));
@@ -469,8 +499,8 @@ impl Editor {
         self.install(Pending {
             id: page_id, value: page_value, data: None, cost: page_cost,
         });
-        self.next = after;
         self.pending_bytes = total;
+        self.next = after;
         Ok(())
     }
 
@@ -524,4 +554,3 @@ impl Editor {
         section::save(self)
     }
 }
-

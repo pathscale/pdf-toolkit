@@ -7,6 +7,7 @@ extern crate std;
 
 mod crypt;
 pub mod document;
+pub mod encryption;
 pub mod error;
 #[cfg(feature = "std")]
 pub mod file;
@@ -31,4 +32,3 @@ pub use object::{
 pub use source::PdfSource;
 pub use work::{ObjectRef, ObjectWork, WorkBudget};
 pub use xref::{Xref, XrefCounts, XrefEntry, XrefKind};
-

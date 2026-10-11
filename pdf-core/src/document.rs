@@ -26,6 +26,7 @@ pub struct Document {
     warnings: Vec<Warning>,
     encrypted: bool,
     crypt: Option<Arc<Crypt>>,
+    private_crypt: Option<Arc<crate::encryption::PrivateCrypt>>,
     permissions: Option<i32>,
     repair_root: Option<ObjectRef>,
     repaired: bool,
@@ -41,6 +42,24 @@ impl Document {
         source: PdfSource,
         limits: Limits,
         mode: OpenMode,
+    ) -> Result<Document, DocError> {
+        Self::open_with_password_mode(source, limits, mode, None)
+    }
+
+    pub fn open_with_password(
+        source: PdfSource,
+        limits: Limits,
+        password: &[u8],
+    ) -> Result<Document, DocError> {
+        Self::open_with_password_mode(source, limits, OpenMode::Strict, Some(password))
+    }
+
+    /// None means no password; Some(b"") explicitly supplies the empty password.
+    pub fn open_with_password_mode(
+        source: PdfSource,
+        limits: Limits,
+        mode: OpenMode,
+        password: Option<&[u8]>,
     ) -> Result<Document, DocError> {
         let header_recovered = source.header().recovered();
         if header_recovered && mode != OpenMode::Repair {
@@ -96,20 +115,29 @@ impl Document {
                 what: "header_recovered",
             });
         }
-        document.initialize_crypt()?;
+        document.initialize_crypt(password)?;
         Ok(document)
     }
 
-    fn initialize_crypt(&mut self) -> Result<(), DocError> {
+    fn initialize_crypt(&mut self, password: Option<&[u8]>) -> Result<(), DocError> {
         let Some(value) = self.trailer.dict().and_then(|dict| dict.get(b"Encrypt"))
             .filter(|value| !value.is_null()).map(|value| value.to_owned()) else {
             return Ok(());
         };
         let mut permissions = None;
+        let mut private_handler = false;
+        let mut private_crypt = None;
         let (result, warnings) = {
             let mut resolver = self.resolver();
             let result = (|| {
                 let value = resolver.resolve(value.get())?;
+                if crate::encryption::PrivateCrypt::recognizes(&value) {
+                    private_handler = true;
+                    private_crypt = Some(Arc::new(crate::encryption::PrivateCrypt::open(
+                        &value, password, resolver.document().limits(),
+                    )?));
+                    return Ok(None);
+                }
                 if let Some(dict) = value.get().as_dict() {
                     permissions = resolver.resolve_dict_key(dict, b"P")?
                         .and_then(|value| value.get().as_i64())
@@ -121,6 +149,11 @@ impl Document {
         };
         self.permissions = permissions;
         self.warnings.extend(warnings);
+        if private_handler {
+            result?;
+            self.private_crypt = private_crypt;
+            return self.verify_private_objects();
+        }
         match result {
             Ok(crypt) => self.crypt = crypt.map(Arc::new),
             Err(error @ DocError::Refused(_)) => return Err(error),
@@ -155,6 +188,7 @@ impl Document {
             warnings,
             encrypted,
             crypt: None,
+            private_crypt: None,
             permissions: None,
             repair_root,
             repaired,
@@ -193,8 +227,42 @@ impl Document {
     }
     /// Whether stream and string decoding can read this document.
     pub fn decryptable(&self) -> bool {
-        !self.encrypted || self.crypt.is_some()
+        !self.encrypted || self.crypt.is_some() || self.private_crypt.is_some()
     }
+    /// Opaque authenticated file key for incremental PSChaCha writes.
+    pub fn chacha_key(&self) -> Option<Arc<crate::encryption::ChaChaKey>> {
+        self.private_crypt.as_ref().map(|crypt| crypt.key.clone())
+    }
+
+    pub fn encryption_ref(&self) -> Option<ObjectRef> {
+        self.trailer.dict().and_then(|dict| dict.get(b"Encrypt"))
+            .and_then(|value| value.as_ref())
+    }
+
+    fn verify_private_objects(&self) -> Result<(), DocError> {
+        let Some(crypt) = &self.private_crypt else { return Ok(()) };
+        let mut resolver = self.resolver();
+        let mut total = 0u64;
+        for number in 1..self.xref.size() {
+            let Some(XrefEntry::InUse { generation, .. }) = self.xref.get(number) else {
+                continue;
+            };
+            let object = resolver.get(ObjectRef::new(number, generation))?;
+            if crypt.excluded(&object) {
+                continue;
+            }
+            total = total.saturating_add(object.decrypted_string_bytes());
+            if let Some(raw) = object.stream_raw() {
+                let id = object.id().ok_or_else(|| malformed(0, "PSChaCha object ID"))?;
+                total = total.saturating_add(
+                    crypt.key.open(id, raw, self.limits.max_decoded_bytes)?.len() as u64,
+                );
+            }
+            check(LimitKind::TotalDecodedBytes, total, self.limits.max_total_decoded_bytes)?;
+        }
+        Ok(())
+    }
+
     pub fn permissions(&self) -> Option<i32> {
         self.permissions
     }
@@ -331,6 +399,9 @@ impl<'d> Resolver<'d> {
                                 } else {
                                     object.finish_stream(resolved, &self.document.limits)?;
                                 }
+                            }
+                            if let Some(crypt) = &self.document.private_crypt {
+                                crypt.prepare(&mut object, id, &self.document.limits)?;
                             }
                             self.record_recovery(&object);
                             active.pop();
@@ -503,6 +574,16 @@ impl<'d> Resolver<'d> {
                 expected: "stream",
             })?;
         let steps = filter_steps_for(stream, |value| self.resolve(value), true)?;
+        if let Some(crypt) = &self.document.private_crypt {
+            if !crypt.excluded(stream) {
+                if steps.iter().any(|step| step.kind == FilterKind::Crypt) {
+                    return Err(DocError::Unsupported { feature: "PSChaCha Crypt filter" });
+                }
+                let id = stream.id().ok_or_else(|| malformed(0, "PSChaCha object ID"))?;
+                let plain = crypt.key.open(id, raw, self.document.limits.max_decoded_bytes)?;
+                return crate::crypt::decode_stream(self, stream, &plain, &steps);
+            }
+        }
         crate::crypt::decode_stream(self, stream, raw, &steps)
     }
 

@@ -29,6 +29,7 @@ enum Kind {
     Real(f64),
     Name,
     String,
+    DecryptedString(Arc<[u8]>),
     Array(Vec<usize>),
     Dict(Vec<(Range<usize>, usize)>),
     Ref(ObjectRef),
@@ -80,6 +81,7 @@ pub struct PdfStr<'o> {
     bytes: &'o [u8],
     owner: Option<ObjectRef>,
     plaintext: bool,
+    decoded: Option<&'o [u8]>,
 }
 
 #[derive(Clone, Debug)]
@@ -102,6 +104,40 @@ impl Object {
     pub(crate) fn stream_recovered(&self) -> bool { self.0.recovered && self.is_stream() }
     pub(crate) fn tail_recovered(&self) -> bool { self.0.recovered && !self.is_stream() }
     pub(crate) fn syntax_recovered(&self) -> bool { self.0.syntax_recovered }
+
+    pub(crate) fn decrypt_private_strings(
+        &mut self,
+        key: &crate::encryption::ChaChaKey,
+        limits: &Limits,
+    ) -> Result<(), DocError> {
+        if self.0.strings_plain { return Ok(()) }
+        let id = self.id().ok_or_else(|| malformed(0, "PSChaCha object ID"))?;
+        let data = Arc::make_mut(&mut self.0);
+        let mut total = 0u64;
+        for node in &mut data.nodes {
+            if !matches!(&node.kind, Kind::String) { continue }
+            let raw = data.buf.get(node.span.clone())
+                .ok_or_else(|| malformed(0, "PSChaCha string span"))?;
+            let encoded = PdfStr {
+                bytes: raw, owner: Some(id), plaintext: false, decoded: None,
+            }.decode();
+            let plain = key.open(id, &encoded, limits.max_decoded_bytes)?;
+            total = total.saturating_add(plain.len() as u64);
+            check(LimitKind::ObjectBytes, total, limits.max_object_bytes)?;
+            node.kind = Kind::DecryptedString(Arc::from(plain));
+        }
+        data.strings_plain = true;
+        Ok(())
+    }
+
+    pub(crate) fn decrypted_string_bytes(&self) -> u64 {
+        self.0.nodes.iter().fold(0u64, |total, node| {
+            match &node.kind {
+                Kind::DecryptedString(bytes) => total.saturating_add(bytes.len() as u64),
+                _ => total,
+            }
+        })
+    }
 
     pub(crate) fn finish_stream(
         &mut self,
@@ -207,7 +243,7 @@ impl<'o> ValueRef<'o> {
             Some(Kind::Int(_)) => ValueKind::Int,
             Some(Kind::Real(_)) => ValueKind::Real,
             Some(Kind::Name) => ValueKind::Name,
-            Some(Kind::String) => ValueKind::String,
+            Some(Kind::String | Kind::DecryptedString(_)) => ValueKind::String,
             Some(Kind::Array(_)) => ValueKind::Array,
             Some(Kind::Dict(_)) => ValueKind::Dict,
             Some(Kind::Ref(_)) => ValueKind::Ref,
@@ -241,6 +277,10 @@ impl<'o> ValueRef<'o> {
             bytes: self.raw(),
             owner: self.object.id(),
             plaintext: self.object.0.strings_plain,
+            decoded: match self.node().map(|node| &node.kind) {
+                Some(Kind::DecryptedString(bytes)) => Some(bytes.as_ref()),
+                _ => None,
+            },
         })
     }
     pub fn as_array(&self) -> Option<ArrayRef<'o>> {
@@ -337,6 +377,7 @@ impl<'o> PdfStr<'o> {
     }
     pub fn is_hex(&self) -> bool { self.bytes.first() == Some(&b'<') }
     pub fn decode(&self) -> Vec<u8> {
+        if let Some(bytes) = self.decoded { return bytes.to_vec() }
         let input = self.bytes.get(1..self.bytes.len().saturating_sub(1)).unwrap_or(&[]);
         let mut out = Vec::new();
         if self.is_hex() {
