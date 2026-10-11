@@ -30,6 +30,7 @@ macro_rules! out {
 }
 
 mod metadata;
+mod signatures;
 mod text;
 
 struct CountingAllocator;
@@ -209,6 +210,13 @@ fn run() -> u8 {
                 1
             }
         },
+        "signatures" => match parse_single_path(&args) {
+            Some(path) => signatures::run(&path, Limits::default()),
+            None => {
+                print_usage();
+                1
+            }
+        },
         "check" => match parse_single_path(&args) {
             Some(path) => run_check(&path),
             None => {
@@ -231,7 +239,8 @@ fn print_usage() {
          pdf-inspect semantic FILE [--repair]\n  pdf-inspect image FILE OBJ_NUM OUT\n  \
          pdf-inspect render FILE PAGE OUT.png [--dpi N] [--font FILE] [--repair]\n  \
          pdf-inspect bench FILE... [--repeat N]\n  \
-         pdf-inspect mutate FILE --seed N --count K\n  pdf-inspect check DIR"
+         pdf-inspect mutate FILE --seed N --count K\n  pdf-inspect signatures FILE\n  \
+         pdf-inspect check DIR"
     );
 }
 
@@ -3050,6 +3059,7 @@ fn actual_fixture_values(
         add_semantic_fixture_values(&mut actuals, semantic, &mut image_resolver, limits);
     }
     metadata::info_values(&mut actuals, &document, &mut resolver, password.is_some());
+    signatures::fixture_values(&mut actuals, source.bytes(), limits, expectations);
     for page in &report.pages {
         let prefix = format!("page.{}", page.index);
         actuals.insert(
