@@ -8,6 +8,7 @@ use crate::{encode, serialize_value, sha256, Dict, Value, Writer, XrefCompressio
 
 use crate::encrypt;
 mod annotations;
+mod author;
 mod encrypted;
 mod chacha;
 mod jpx;
@@ -1782,7 +1783,7 @@ fn styled_spans() -> io::Result<Fixture> {
 /// The two static standard-handler fixtures remain committed reader regressions.
 pub fn write_fixtures(out: &Path) -> io::Result<usize> {
     type Builder = fn() -> io::Result<Fixture>;
-    let builders: [(&str, Builder); 37] = [
+    let builders: [(&str, Builder); 44] = [
         ("classic-one-page", classic_one_page),
         ("xref-stream-objstm", xref_stream_objstm),
         ("incremental", incremental),
@@ -1820,6 +1821,13 @@ pub fn write_fixtures(out: &Path) -> io::Result<usize> {
         ("jxl-cases", jxl::cases),
         ("encrypted-rc4", encrypted::rc4),
         ("encrypted-chacha", chacha::build),
+        ("author-text", author::text),
+        ("author-fonts-unicode", author::fonts_unicode),
+        ("author-graphics", author::graphics),
+        ("author-images", author::images),
+        ("author-links-outline", author::links_outline),
+        ("author-example", author::example),
+        ("author-encrypted", author::encrypted),
     ];
     fs::create_dir_all(out)?;
     for (name, build) in builders {
