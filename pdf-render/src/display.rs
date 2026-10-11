@@ -401,6 +401,17 @@ pub fn display_list_cached(
     }
     let limits = *resolver.document().limits();
     let (ctm, width, height) = page_matrix(page, options.scale)?;
+    if width == 0 || height == 0 {
+        warn(resolver, Some(page.id), "render_empty_page_intersection");
+        // An empty CropBox/MediaBox intersection uses a blank 1x1 fallback.
+        check(LimitKind::DecodedBytes, 4, limits.max_decoded_bytes)?;
+        return Ok(DisplayList {
+            width: 1,
+            height: 1,
+            items: Vec::new(),
+            missing_fonts: 0,
+        });
+    }
     let pixels = u64::from(width).checked_mul(u64::from(height))
         .and_then(|count| count.checked_mul(4))
         .ok_or_else(|| refusal(LimitKind::DecodedBytes, u64::MAX, limits.max_decoded_bytes))?;

@@ -11,7 +11,6 @@ use crate::display::{
 
 const COMPONENTS: usize = 32;
 const SPACE_DEPTH: u64 = 16;
-const FUNCTION_SEGMENTS: u64 = 128;
 const SAMPLES: u32 = 64;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -425,7 +424,11 @@ impl Function {
                 let functions = resolver.resolve_dict_key(dict, b"Functions")?
                     .ok_or_else(|| bad("stitch_functions"))?;
                 let functions = functions.get().as_array().ok_or_else(|| bad("stitch_functions"))?;
-                check(LimitKind::Tokens, functions.len() as u64, FUNCTION_SEGMENTS)?;
+                check(
+                    LimitKind::Tokens,
+                    functions.len() as u64,
+                    u64::from(resolver.document().limits().max_tokens_per_object),
+                )?;
                 if functions.is_empty() { return Err(bad("stitch_functions")); }
                 let bounds = resolver.resolve_dict_key(dict, b"Bounds")?
                     .ok_or_else(|| bad("stitch_bounds"))?;
