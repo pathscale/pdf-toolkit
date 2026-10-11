@@ -2935,8 +2935,35 @@ fn actual_fixture_values(
         source.header().version().to_string(),
     );
 
-    let (semantic, semantic_warnings) = semantic_with_warnings(source.clone(), limits);
-    let document = match Document::open(source, limits) {
+    let password = expectations.iter().find(|(key, _)| key == "open.password")
+        .map(|(_, value)| value.as_bytes());
+    let (semantic, semantic_warnings) = if password.is_some() {
+        (None, Vec::new())
+    } else {
+        semantic_with_warnings(source.clone(), limits)
+    };
+    let opened = if let Some(password) = password {
+        actuals.insert(
+            "open.password".to_string(),
+            String::from_utf8_lossy(password).into_owned(),
+        );
+        let absent = match Document::open(source.clone(), limits) {
+            Ok(_) => "none",
+            Err(error) => error.code(),
+        };
+        actuals.insert("open.without_password".to_string(), absent.to_string());
+        let mut wrong = password.to_vec();
+        wrong.push(0);
+        let wrong = match Document::open_with_password(source.clone(), limits, &wrong) {
+            Ok(_) => "none",
+            Err(error) => error.code(),
+        };
+        actuals.insert("open.wrong_password".to_string(), wrong.to_string());
+        Document::open_with_password(source.clone(), limits, password)
+    } else {
+        Document::open(source.clone(), limits)
+    };
+    let document = match opened {
         Ok(document) => {
             actuals.insert("refusal".to_string(), "none".to_string());
             document
@@ -2960,6 +2987,55 @@ fn actual_fixture_values(
         "encrypted".to_string(),
         document.encrypted().to_string(),
     );
+
+    if let Some(password) = password {
+        let mut resolver = document.resolver();
+        let mut corruption = "unavailable".to_string();
+        for number in 1..document.xref().size() {
+            let Some(pdf_core::XrefEntry::InUse { generation, .. }) =
+                document.xref().get(number)
+            else {
+                continue;
+            };
+            let object = resolver.get(pdf_core::ObjectRef::new(number, generation))
+                .map_err(|error| error.to_string())?;
+            let xref = object.dict().and_then(|dict| dict.get(b"Type"))
+                .and_then(|value| value.as_name())
+                .is_some_and(|name| name.eq_bytes(b"XRef"));
+            if xref || object.id() == document.encryption_ref() {
+                continue;
+            }
+            if let Some(range) = object.stream_range() {
+                if range.len() >= 40 {
+                    let mut damaged = source.bytes().to_vec();
+                    let position = range.start.checked_add(24)
+                        .ok_or_else(|| "ciphertext position overflow".to_string())?;
+                    let byte = damaged.get_mut(position)
+                        .ok_or_else(|| "ciphertext position outside file".to_string())?;
+                    *byte ^= 1;
+                    let damaged = PdfSource::new(std::sync::Arc::<[u8]>::from(damaged))
+                        .map_err(|error| error.to_string())?;
+                    corruption = match Document::open_with_password(damaged, limits, password) {
+                        Ok(_) => "none".to_string(),
+                        Err(error) => error.code().to_string(),
+                    };
+                    break;
+                }
+            }
+        }
+        actuals.insert("open.corrupt_ciphertext".to_string(), corruption);
+        if let Some(info) = document.info_ref() {
+            let object = resolver.get(info).map_err(|error| error.to_string())?;
+            if let Some(title) = object.dict().and_then(|dict| dict.get(b"Title"))
+                .and_then(|value| value.as_str())
+            {
+                actuals.insert(
+                    "info.title".to_string(),
+                    String::from_utf8(title.decode()).map_err(|error| error.to_string())?,
+                );
+            }
+        }
+    }
 
     let mut report = inspect_pages(&document);
     actuals.insert("pages".to_string(), report.pages.len().to_string());

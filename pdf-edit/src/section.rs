@@ -4,7 +4,7 @@ use pdf_core::lex::{Lexer, LexerLimits};
 use pdf_core::{DocError, LimitKind, Limits, ObjectRef, XrefKind};
 use pdf_write::{Dict, Value};
 
-use crate::{check, malformed, value, Editor};
+use crate::{check, get, malformed, set, value, Editor};
 
 pub(crate) fn startxref(bytes: &[u8]) -> Result<u64, DocError> {
     let base = bytes.len().saturating_sub(1024);
@@ -110,6 +110,11 @@ fn trailer(editor: &Editor, size: u32, second_id: Vec<u8>) -> Result<Dict, DocEr
     if let Some(info) = editor.info_new.or_else(|| editor.document.info_ref()) {
         dict.push(("Info".to_owned(), Value::Ref(info.number(), info.generation())));
     }
+    if editor.document.chacha_key().is_some() {
+        let encrypt = editor.document.encryption_ref()
+            .ok_or_else(|| malformed("PSChaCha Encrypt reference"))?;
+        dict.push(("Encrypt".to_owned(), Value::Ref(encrypt.number(), encrypt.generation())));
+    }
     Ok(dict)
 }
 
@@ -133,13 +138,41 @@ pub(crate) fn save(editor: &Editor) -> Result<Vec<u8>, DocError> {
     // Also terminates a trailing comment or an EOF without a final newline.
     output.append(b"\n")?;
     let mut entries = BTreeMap::new();
+    let key = editor.document.chacha_key();
     for pending in objects.values() {
         let offset = output.position();
-        output.object(
-            pending.id,
-            &pending.value,
-            pending.data.as_deref(),
-        )?;
+        if let Some(key) = &key {
+            if editor.document.encryption_ref() == Some(pending.id) {
+                return Err(DocError::Unsupported { feature: "edit:PSChaCha security dictionary" });
+            }
+            if matches!(&pending.value, Value::Dict(dict)
+                if matches!(get(dict, "Type"), Some(Value::Name(kind)) if kind == "XRef"))
+            {
+                return Err(DocError::Unsupported { feature: "edit:PSChaCha xref replacement" });
+            }
+            let data = pending.data.as_deref().map(|data| {
+                pdf_write::encryption::encrypt_stream(key, pending.id, data)
+                    .map_err(|_| malformed("PSChaCha stream encryption"))
+            }).transpose()?;
+            let mut body = pdf_write::encryption::encrypt_value(key, pending.id, &pending.value)
+                .map_err(|_| malformed("PSChaCha string encryption"))?;
+            if let Some(data) = &data {
+                let Value::Dict(dict) = &mut body else {
+                    return Err(malformed("PSChaCha stream dictionary"));
+                };
+                let length = i64::try_from(data.len())
+                    .map_err(|_| malformed("PSChaCha stream Length"))?;
+                set(dict, "Length", Value::Int(length));
+            }
+            editor.cost(pending.id, &body, data.as_deref())?;
+            output.object(pending.id, &body, data.as_deref())?;
+        } else {
+            output.object(
+                pending.id,
+                &pending.value,
+                pending.data.as_deref(),
+            )?;
+        }
         entries.insert(pending.id.number(), (offset, pending.id.generation()));
     }
     let second_id = pdf_write::sha256::digest(&output.bytes)
@@ -211,4 +244,3 @@ pub(crate) fn save(editor: &Editor) -> Result<Vec<u8>, DocError> {
     output.eof(offset)?;
     Ok(output.bytes)
 }
-

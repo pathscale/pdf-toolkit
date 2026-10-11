@@ -24,6 +24,8 @@ use pdf_write::doc::{Color, DocumentBuilder, StandardFont, WriteOptions};
 
 #[path = "../roundtrip_edits.rs"]
 mod editing;
+#[path = "../roundtrip_chacha.rs"]
+mod chacha;
 
 type CheckResult<T> = Result<T, String>;
 
@@ -852,6 +854,7 @@ fn main() -> ExitCode {
     };
     let jpeg = jpeg_program();
     let plan = fixture_plan(&mut report);
+    report.obtain("chacha", "encrypted-roundtrip", chacha::run(&config));
     if plan.house_pass {
         editing::run(&mut report, &config, font.clone());
     }

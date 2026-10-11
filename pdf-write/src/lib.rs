@@ -1,6 +1,6 @@
 //! Deterministic PDF serialization for house-authored fixtures.
 //!
-//! This crate is independent of pdf-core. Object numbers are reserved explicitly,
+//! Object numbers are reserved explicitly,
 //! and every physical offset is measured from the bytes written by Writer.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -11,6 +11,7 @@ pub mod annot;
 pub mod doc;
 pub mod encode;
 pub mod encode_jpx;
+pub mod encryption;
 pub(crate) mod encrypt;
 pub mod fixtures;
 pub mod sha256;
@@ -184,6 +185,7 @@ pub struct Writer {
     entries: BTreeMap<u32, Entry>,
     next: u32,
     last_xref: Option<u64>,
+    encryption: Option<encryption::Encryption>,
 }
 
 impl Writer {
@@ -202,6 +204,7 @@ impl Writer {
             entries: BTreeMap::new(),
             next: 1,
             last_xref: None,
+            encryption: None,
         })
     }
 
@@ -236,7 +239,11 @@ impl Writer {
 
     pub fn object(&mut self, number: u32, value: &Value) -> io::Result<u64> {
         self.check_id(number)?;
-        let body = serialize_value(value)?;
+        let encrypted = match &mut self.encryption {
+            Some(encryption) => Some(encryption.value(number, 0, value)?),
+            None => None,
+        };
+        let body = serialize_value(encrypted.as_ref().unwrap_or(value))?;
         let offset = self.position();
         self.bytes
             .extend_from_slice(format!("{number} 0 obj\n").as_bytes());
@@ -254,8 +261,20 @@ impl Writer {
         data: &[u8],
     ) -> io::Result<Range<usize>> {
         self.check_id(number)?;
+        let exempt = matches!(dict.iter().rev().find(|(key, _)| key == "Type"),
+            Some((_, Value::Name(kind))) if kind == "XRef");
+        let encrypted = match &mut self.encryption {
+            Some(encryption) if !exempt => Some(encryption.bytes(number, 0, data)?),
+            _ => None,
+        };
+        let data = encrypted.as_deref().unwrap_or(data);
         set(&mut dict, "Length", integer(data.len())?);
-        let body = serialize_value(&Value::Dict(dict))?;
+        let value = Value::Dict(dict);
+        let encrypted_dict = match &mut self.encryption {
+            Some(encryption) if !exempt => Some(encryption.value(number, 0, &value)?),
+            _ => None,
+        };
+        let body = serialize_value(encrypted_dict.as_ref().unwrap_or(&value))?;
         let offset = self.position();
         self.bytes
             .extend_from_slice(format!("{number} 0 obj\n").as_bytes());
@@ -276,6 +295,9 @@ impl Writer {
         flate: bool,
     ) -> io::Result<()> {
         self.check_id(number)?;
+        if self.encryption.is_some() {
+            return Err(invalid("PSChaCha writes individual objects, not object streams"));
+        }
         let mut seen = BTreeSet::new();
         let mut header = Vec::new();
         let mut body = Vec::new();
@@ -314,6 +336,9 @@ impl Writer {
 
     fn trailer(&self, root: u32, mut extra: Dict, prev: Option<u64>) -> io::Result<Dict> {
         self.check_id(root)?;
+        if let Some(encryption) = &self.encryption {
+            encryption.trailer(&mut extra)?;
+        }
         set(&mut extra, "Size", Value::Int(i64::from(self.next)));
         set(&mut extra, "Root", Value::Ref(root, 0));
         extra.retain(|(key, _)| key != "Prev");
