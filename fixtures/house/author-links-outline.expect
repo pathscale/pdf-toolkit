@@ -1,0 +1,14 @@
+version=1.7
+xref_kind=stream
+xref_sections=1
+encrypted=false
+refusal=none
+pages=3
+page_errors=0
+page.0.text_norm=Links page one
+page.1.text_norm=Links page two
+page.2.text_norm=Links page three
+page.0.links=uri:https://example.test/authoring | page:1 | page:2
+page.1.links=
+page.2.links=page:0
+outline=Chapter one | >Section 1.1 | >>Detail 1.1.1 | Chapter two
