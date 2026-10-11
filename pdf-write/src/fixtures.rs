@@ -1777,10 +1777,12 @@ fn styled_spans() -> io::Result<Fixture> {
     Ok(fixture)
 }
 
-/// Writes all thirty-seven fixtures in a fixed order. No reader is invoked.
+/// Writes the generated fixtures in a fixed order. No reader is invoked. The two AES fixtures
+/// (encrypted-aes128, encrypted-aes256) are static committed files: they test AES decryption,
+/// and pdf-write deliberately has no AES encryption to regenerate them.
 pub fn write_fixtures(out: &Path) -> io::Result<usize> {
     type Builder = fn() -> io::Result<Fixture>;
-    let builders: [(&str, Builder); 38] = [
+    let builders: [(&str, Builder); 36] = [
         ("classic-one-page", classic_one_page),
         ("xref-stream-objstm", xref_stream_objstm),
         ("incremental", incremental),
@@ -1817,8 +1819,6 @@ pub fn write_fixtures(out: &Path) -> io::Result<usize> {
         ("jxl-images", jxl::images),
         ("jxl-cases", jxl::cases),
         ("encrypted-rc4", encrypted::rc4),
-        ("encrypted-aes128", encrypted::aes128),
-        ("encrypted-aes256", encrypted::aes256),
     ];
     fs::create_dir_all(out)?;
     for (name, build) in builders {
@@ -1828,4 +1828,3 @@ pub fn write_fixtures(out: &Path) -> io::Result<usize> {
     }
     Ok(builders.len())
 }
-
