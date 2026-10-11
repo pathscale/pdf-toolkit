@@ -288,10 +288,11 @@ pub(super) fn fixture_values(
     if page.refusal.is_some() {
         return;
     }
-    actuals.insert(
-        format!("{prefix}.text_norm"),
-        normalized(&page.layout.plain_text()),
-    );
+    let plain = page.layout.plain_text();
+    actuals.insert(format!("{prefix}.text_norm"), normalized(&plain));
+    let lines = plain.lines().map(normalized).filter(|line| !line.is_empty())
+        .collect::<Vec<_>>();
+    actuals.insert(format!("{prefix}.lines"), lines.join(" / "));
     let headings = page.layout.blocks.iter()
         .filter(|block| matches!(block.kind, BlockKind::Heading(_)))
         .map(|block| normalized(&page.layout.block_text(block)))

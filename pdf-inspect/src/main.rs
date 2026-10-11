@@ -29,6 +29,7 @@ macro_rules! out {
     }};
 }
 
+mod metadata;
 mod text;
 
 struct CountingAllocator;
@@ -3029,10 +3030,8 @@ fn actual_fixture_values(
             if let Some(title) = object.dict().and_then(|dict| dict.get(b"Title"))
                 .and_then(|value| value.as_str())
             {
-                actuals.insert(
-                    "info.title".to_string(),
-                    String::from_utf8(title.decode()).map_err(|error| error.to_string())?,
-                );
+                let bytes = resolver.decode_string(info, title);
+                actuals.insert("info.title".to_string(), metadata::text_string(&bytes));
             }
         }
     }
@@ -3050,6 +3049,7 @@ fn actual_fixture_values(
     if let Some(semantic) = semantic.as_ref() {
         add_semantic_fixture_values(&mut actuals, semantic, &mut image_resolver, limits);
     }
+    metadata::info_values(&mut actuals, &document, &mut resolver, password.is_some());
     for page in &report.pages {
         let prefix = format!("page.{}", page.index);
         actuals.insert(
@@ -3064,6 +3064,7 @@ fn actual_fixture_values(
             format!("{prefix}.rotate"),
             page.rotate.to_string(),
         );
+        metadata::page_boxes(&mut actuals, &prefix, &mut resolver, page.id);
         actuals.insert(
             format!("{prefix}.contents"),
             page.contents.len().to_string(),
