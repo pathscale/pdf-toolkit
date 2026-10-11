@@ -143,6 +143,15 @@ impl<'r, 'd> PageWalk<'r, 'd> {
         }
     }
 
+    fn remove_visited(&mut self, id: ObjectRef) {
+        if let Ok(index) = self
+            .visited
+            .binary_search_by(|candidate| compare_refs(*candidate, id))
+        {
+            self.visited.remove(index);
+        }
+    }
+
     fn next_child(&mut self) -> Option<Child> {
         loop {
             let exhausted = match self.stack.last() {
@@ -311,7 +320,21 @@ impl<'r, 'd> PageWalk<'r, 'd> {
             let index = u32::try_from(self.page_count).unwrap_or(u32::MAX);
             self.page_count = requested;
             self.push_warning(Some(id), "page_recovered");
-            return Some(self.build_page(id, index, inherited, dict));
+            let built = self.build_page(id, index, inherited, dict);
+            let skip = if let Err(error) = &built {
+                !crate::repair::is_hard_error(error)
+            } else {
+                false
+            };
+            if skip {
+                // Keep the id visited so this object is not retried. Do not count it.
+                self.page_count = self.page_count.saturating_sub(1);
+                continue;
+            }
+            if matches!(&built, Err(_)) {
+                self.finished = true;
+            }
+            return Some(built);
         }
         self.finished = true;
         if self.page_count == 0 {
@@ -319,6 +342,10 @@ impl<'r, 'd> PageWalk<'r, 'd> {
         } else {
             None
         }
+    }
+
+    fn repair_fallback(&self, error: &DocError) -> bool {
+        self.resolver.document().repair_mode() && !crate::repair::is_hard_error(error)
     }
 
     fn build_page(
@@ -339,18 +366,45 @@ impl<'r, 'd> PageWalk<'r, 'd> {
             rotate_error,
         } = inherited;
 
-        if let Some(error) = resources_error {
-            return Err(error);
-        }
-        if let Some(error) = media_box_error {
-            return Err(error);
-        }
-        if let Some(error) = crop_box_error {
-            return Err(error);
-        }
-        if let Some(error) = rotate_error {
-            return Err(error);
-        }
+        let resources = if let Some(error) = resources_error {
+            if self.repair_fallback(&error) {
+                self.push_warning(Some(id), "resources_default");
+                None
+            } else {
+                return Err(error);
+            }
+        } else {
+            resources
+        };
+        let media_box = if let Some(error) = media_box_error {
+            if self.repair_fallback(&error) {
+                None
+            } else {
+                return Err(error);
+            }
+        } else {
+            media_box
+        };
+        let crop_box = if let Some(error) = crop_box_error {
+            if self.repair_fallback(&error) {
+                self.push_warning(Some(id), "crop_box_default");
+                None
+            } else {
+                return Err(error);
+            }
+        } else {
+            crop_box
+        };
+        let rotate = if let Some(error) = rotate_error {
+            if self.repair_fallback(&error) {
+                self.push_warning(Some(id), "rotate_default");
+                None
+            } else {
+                return Err(error);
+            }
+        } else {
+            rotate
+        };
 
         let media_box = match media_box {
             Some(media_box) => media_box,
@@ -361,9 +415,39 @@ impl<'r, 'd> PageWalk<'r, 'd> {
         };
         let crop_box = intersect_boxes(crop_box.unwrap_or(media_box), media_box);
         let rotate = rotate.unwrap_or(0);
-        let user_unit = read_user_unit(self.resolver, dict)?;
-        let contents = read_contents(self.resolver, dict, id, &mut self.warnings)?;
-        let annots = read_annots(self.resolver, dict)?;
+        let user_unit = match read_user_unit(self.resolver, dict) {
+            Ok(user_unit) => user_unit,
+            Err(error) => {
+                if self.repair_fallback(&error) {
+                    self.push_warning(Some(id), "user_unit_default");
+                    1.0
+                } else {
+                    return Err(error);
+                }
+            }
+        };
+        let contents = match read_contents(self.resolver, dict, id, &mut self.warnings) {
+            Ok(contents) => contents,
+            Err(error) => {
+                if self.repair_fallback(&error) {
+                    self.push_warning(Some(id), "contents_default");
+                    Vec::new()
+                } else {
+                    return Err(error);
+                }
+            }
+        };
+        let annots = match read_annots(self.resolver, dict) {
+            Ok(annots) => annots,
+            Err(error) => {
+                if self.repair_fallback(&error) {
+                    self.push_warning(Some(id), "annots_default");
+                    0
+                } else {
+                    return Err(error);
+                }
+            }
+        };
 
         Ok(Page {
             index,
@@ -399,7 +483,7 @@ impl PageWalk<'_, '_> {
         let item = self.tree_step();
         if !self.resolver.document().repair_mode() { return item; }
         match item {
-            Some(Err(error)) if self.finished && !crate::repair::is_hard_error(&error) => {
+            Some(Err(error)) if !crate::repair::is_hard_error(&error) => {
                 self.repair_error = Some(error);
                 self.start_repair_scan();
                 self.scan_step()
@@ -470,7 +554,12 @@ impl PageWalk<'_, '_> {
                 Err(error @ (DocError::Refused(_) | DocError::Malformed { .. })) => {
                     return Some(Err(error));
                 }
-                Err(_) => {
+                Err(error) => {
+                    if self.resolver.document().repair_mode()
+                        && crate::repair::is_hard_error(&error)
+                    {
+                        return Some(Err(error));
+                    }
                     self.push_warning(Some(pending.id), "page_tree_bad_kid");
                     continue;
                 }
@@ -556,7 +645,20 @@ impl PageWalk<'_, '_> {
                         Err(_) => u32::MAX,
                     };
                     self.page_count = requested;
-                    return Some(self.build_page(pending.id, index, inherited, dict));
+                    let built = self.build_page(pending.id, index, inherited, dict);
+                    let retry_scan = if let Err(error) = &built {
+                        self.resolver.document().repair_mode()
+                            && !crate::repair::is_hard_error(error)
+                    } else {
+                        false
+                    };
+                    if retry_scan {
+                        // Drop the unyielded leaf so the repair scan can emit it once.
+                        self.page_count = self.page_count.saturating_sub(1);
+                        self.remove_visited(pending.id);
+                        self.finished = true;
+                    }
+                    return Some(built);
                 }
             }
         }
@@ -645,11 +747,15 @@ fn classify_node(
             if let Err(error) = &resolved {
                 if crate::repair::is_hard_error(error) { return Err(error.clone()); }
             }
-            let kind = if dict.get(b"Kids").is_some() || dict.get(b"Count").is_some() {
+            let parent = dict.get(b"Parent").and_then(|value| value.as_ref()).is_some();
+            let kind = if dict.get(b"Kids").is_some() {
                 Some(NodeKind::Interior)
-            } else if dict.get(b"Parent").and_then(|value| value.as_ref()).is_some()
-                && (dict.get(b"Contents").is_some() || dict.get(b"MediaBox").is_some())
-            {
+            } else if dict.get(b"Contents").is_some() {
+                // A bad /Count or a missing /Parent must not hide a page leaf.
+                Some(NodeKind::Leaf)
+            } else if dict.get(b"Count").is_some() {
+                Some(NodeKind::Interior)
+            } else if parent && dict.get(b"MediaBox").is_some() {
                 Some(NodeKind::Leaf)
             } else {
                 None
@@ -961,4 +1067,3 @@ fn map_missing(error: DocError, what: &'static str) -> DocError {
         other => other,
     }
 }
-
