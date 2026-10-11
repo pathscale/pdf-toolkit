@@ -103,7 +103,7 @@ fn public_key(signer: &Signer) -> Result<Vec<u8>, DocError> {
 pub(super) fn check_signer(signer: &Signer) -> Result<(), DocError> {
     let point = public_key(signer)?;
     let certificate = Certificate::from_der(&signer.certificate).map_err(der_error)?;
-    let info = &certificate.tbs_certificate.subject_public_key_info;
+    let info = certificate.tbs_certificate().subject_public_key_info();
     let curve = match signer.curve {
         Curve::P256 => SECP256R1,
         Curve::P384 => SECP384R1,
@@ -246,6 +246,17 @@ pub(super) fn utc_time(date: &pdf_write::doc::PdfDate) -> Result<Time, DocError>
     }
 }
 
+/// A DER `SEQUENCE` around fields that are already encoded.
+fn sequence(fields: &[Vec<u8>]) -> Result<Vec<u8>, DocError> {
+    let body = fields.concat();
+    let length = der::Length::try_from(body.len()).map_err(der_error)?;
+    let mut out = der::Header::new(der::Tag::Sequence, length)
+        .to_der()
+        .map_err(der_error)?;
+    out.extend_from_slice(&body);
+    Ok(out)
+}
+
 /// Builds the DER `ContentInfo` holding a detached `SignedData` over `parts`.
 pub(super) fn signed_data(
     signer: &Signer,
@@ -292,8 +303,8 @@ pub(super) fn signed_data(
     let signer_info = SignerInfo {
         version: CmsVersion::V1,
         sid: SignerIdentifier::IssuerAndSerialNumber(IssuerAndSerialNumber {
-            issuer: certificate.tbs_certificate.issuer.clone(),
-            serial_number: certificate.tbs_certificate.serial_number.clone(),
+            issuer: certificate.tbs_certificate().issuer().clone(),
+            serial_number: certificate.tbs_certificate().serial_number().clone(),
         }),
         digest_alg: algorithm(digest_algorithm),
         signed_attrs: Some(attributes),
@@ -349,7 +360,9 @@ pub fn self_signed_certificate(
     not_after: &pdf_write::doc::PdfDate,
 ) -> Result<Vec<u8>, DocError> {
     use core::str::FromStr;
-    use x509_cert::certificate::{TbsCertificate, Version};
+    use der::asn1::ContextSpecific;
+    use der::{TagMode, TagNumber};
+    use x509_cert::certificate::{Rfc5280, TbsCertificate, Version};
     use x509_cert::name::Name;
     use x509_cert::serial_number::SerialNumber;
     use x509_cert::spki::SubjectPublicKeyInfoOwned;
@@ -372,35 +385,45 @@ pub fn self_signed_certificate(
         .iter()
         .position(|byte| *byte != 0)
         .unwrap_or(serial.len() - 1);
-    let tbs = TbsCertificate {
-        version: Version::V3,
-        serial_number: SerialNumber::new(serial.get(first..).unwrap_or(&[1])).map_err(der_error)?,
-        signature: algorithm(signature_oid),
-        issuer: name.clone(),
-        validity: Validity {
-            not_before: utc_time(not_before)?,
-            not_after: utc_time(not_after)?,
-        },
-        subject: name,
-        subject_public_key_info: SubjectPublicKeyInfoOwned {
-            algorithm: AlgorithmIdentifierOwned {
-                oid: ID_EC_PUBLIC_KEY,
-                parameters: Some(Any::encode_from(&curve_oid).map_err(der_error)?),
-            },
-            subject_public_key: der::asn1::BitString::from_bytes(&point).map_err(der_error)?,
-        },
-        issuer_unique_id: None,
-        subject_unique_id: None,
-        extensions: None,
+    // x509-cert 0.3 builds certificates only through its profile builder,
+    // which adds extensions; the TBSCertificate is encoded field by field
+    // instead and checked by decoding it back.
+    let version = ContextSpecific {
+        tag_number: TagNumber(0),
+        tag_mode: TagMode::Explicit,
+        value: Version::V3,
     };
-    let encoded = tbs.to_der().map_err(der_error)?;
+    let key = SubjectPublicKeyInfoOwned {
+        algorithm: AlgorithmIdentifierOwned {
+            oid: ID_EC_PUBLIC_KEY,
+            parameters: Some(Any::encode_from(&curve_oid).map_err(der_error)?),
+        },
+        subject_public_key: der::asn1::BitString::from_bytes(&point).map_err(der_error)?,
+    };
+    let validity = Validity::<Rfc5280>::new(utc_time(not_before)?, utc_time(not_after)?);
+    let encoded = sequence(&[
+        version.to_der().map_err(der_error)?,
+        SerialNumber::<Rfc5280>::new(serial.get(first..).unwrap_or(&[1]))
+            .map_err(der_error)?
+            .to_der()
+            .map_err(der_error)?,
+        algorithm(signature_oid).to_der().map_err(der_error)?,
+        name.to_der().map_err(der_error)?,
+        validity.to_der().map_err(der_error)?,
+        name.to_der().map_err(der_error)?,
+        key.to_der().map_err(der_error)?,
+    ])?;
+    TbsCertificate::from_der(&encoded).map_err(der_error)?;
     let prehash = digest(digest_oid(curve), &[&encoded]).ok_or_else(|| malformed("digest"))?;
     let signature = sign_prehash(curve, scalar, &prehash)?;
-    Certificate {
-        tbs_certificate: tbs,
-        signature_algorithm: algorithm(signature_oid),
-        signature: der::asn1::BitString::from_bytes(&signature).map_err(der_error)?,
-    }
-    .to_der()
-    .map_err(der_error)
+    let certificate = sequence(&[
+        encoded,
+        algorithm(signature_oid).to_der().map_err(der_error)?,
+        der::asn1::BitString::from_bytes(&signature)
+            .map_err(der_error)?
+            .to_der()
+            .map_err(der_error)?,
+    ])?;
+    Certificate::from_der(&certificate).map_err(der_error)?;
+    Ok(certificate)
 }

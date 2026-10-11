@@ -262,8 +262,8 @@ fn signer_certificate<'a>(signed: &'a SignedData, info: &SignerInfo) -> Option<&
         };
         first.get_or_insert(certificate);
         if let SignerIdentifier::IssuerAndSerialNumber(id) = &info.sid {
-            if certificate.tbs_certificate.issuer == id.issuer
-                && certificate.tbs_certificate.serial_number == id.serial_number
+            if certificate.tbs_certificate().issuer() == &id.issuer
+                && certificate.tbs_certificate().serial_number() == &id.serial_number
             {
                 return Some(certificate);
             }
@@ -304,10 +304,12 @@ fn check_cms(contents: &[u8], parts: Option<[&[u8]; 2]>) -> CmsCheck {
         return check;
     };
     let certificate = signer_certificate(&signed, signer);
-    check.signer = certificate.map(|certificate| certificate.tbs_certificate.subject.to_string());
+    check.signer =
+        certificate.map(|certificate| certificate.tbs_certificate().subject().to_string());
 
     let digest_oid = signer.digest_alg.oid;
-    let spki = certificate.map(|certificate| &certificate.tbs_certificate.subject_public_key_info);
+    let spki =
+        certificate.map(|certificate| certificate.tbs_certificate().subject_public_key_info());
     let curve = spki.and_then(|spki| {
         if spki.algorithm.oid != ID_EC_PUBLIC_KEY {
             return None;
