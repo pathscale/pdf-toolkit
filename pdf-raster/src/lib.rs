@@ -15,6 +15,9 @@ use tiny_skia::{
 };
 
 const MAX_PATH_ELEMENTS: usize = 1_000_000;
+// tiny-skia's fixed-point scan converter panics (and aborts during cleanup) on coordinates near
+// 1e12. Clamping to 2^20 device pixels moves visible edges by less than 1/2^20 of their extent.
+const MAX_COORDINATE: f32 = 1_048_576.0;
 const MAX_GRADIENT_STOPS: usize = 4_096;
 const MAX_DASH_ELEMENTS: usize = 4_096;
 const MAX_CLIP_DEPTH: usize = 64;
@@ -270,6 +273,7 @@ fn path_to_skia(path: &PdfPath) -> Option<SkPath> {
     if path.els.len() > MAX_PATH_ELEMENTS {
         return None;
     }
+    let c = |value: f32| value.clamp(-MAX_COORDINATE, MAX_COORDINATE);
     let mut builder = PathBuilder::new();
     for element in &path.els {
         match *element {
@@ -277,19 +281,19 @@ fn path_to_skia(path: &PdfPath) -> Option<SkPath> {
                 if !x.is_finite() || !y.is_finite() {
                     return None;
                 }
-                builder.move_to(x, y);
+                builder.move_to(c(x), c(y));
             }
             PathEl::LineTo(x, y) => {
                 if !x.is_finite() || !y.is_finite() {
                     return None;
                 }
-                builder.line_to(x, y);
+                builder.line_to(c(x), c(y));
             }
             PathEl::CubicTo(x1, y1, x2, y2, x3, y3) => {
                 if ![x1, y1, x2, y2, x3, y3].iter().all(|value| value.is_finite()) {
                     return None;
                 }
-                builder.cubic_to(x1, y1, x2, y2, x3, y3);
+                builder.cubic_to(c(x1), c(y1), c(x2), c(y2), c(x3), c(y3));
             }
             PathEl::Close => builder.close(),
         }
