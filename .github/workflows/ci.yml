@@ -25,6 +25,8 @@ jobs:
       - run: cargo build --release --workspace
       # Regenerating must reproduce the committed fixtures byte for byte.
       - run: ./target/release/pdf-fixtures fixtures/house && git diff --exit-code fixtures
+      # Signed fixtures come from pdf-edit (the signer needs the editor) and are deterministic too.
+      - run: ./target/release/pdf-sign-fixtures fixtures/house && git diff --exit-code fixtures
       - run: ./target/release/pdf-inspect check fixtures/house
       - run: mkdir -p target/roundtrip && ./target/release/pdf-roundtrip target/roundtrip fixtures/house
       # Deterministic mutation fuzzing: any panic fails the job.
