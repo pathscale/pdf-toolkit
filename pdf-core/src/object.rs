@@ -98,12 +98,30 @@ impl Object {
     pub fn stream_range(&self) -> Option<Range<usize>> { self.0.stream.clone() }
     pub fn buffer(&self) -> &Arc<[u8]> { &self.0.buf }
     pub fn token_count(&self) -> u32 { self.0.token_count }
-    pub(crate) fn stream_recovered(&self) -> bool { self.0.recovered }
+    pub(crate) fn stream_recovered(&self) -> bool { self.0.recovered && self.is_stream() }
+    pub(crate) fn tail_recovered(&self) -> bool { self.0.recovered && !self.is_stream() }
 
     pub(crate) fn finish_stream(
         &mut self,
         length: Option<u64>,
         limits: &Limits,
+    ) -> Result<(), DocError> {
+        self.finish_stream_with_mode(length, limits, false)
+    }
+
+    pub(crate) fn finish_stream_repair(
+        &mut self,
+        length: Option<u64>,
+        limits: &Limits,
+    ) -> Result<(), DocError> {
+        self.finish_stream_with_mode(length, limits, true)
+    }
+
+    fn finish_stream_with_mode(
+        &mut self,
+        length: Option<u64>,
+        limits: &Limits,
+        repair: bool,
     ) -> Result<(), DocError> {
         if self.0.stream.is_some() {
             return Ok(());
@@ -122,8 +140,13 @@ impl Object {
             let scan_len = usize::try_from(bound).unwrap_or(usize::MAX);
             let cap = start.saturating_add(scan_len).min(self.0.buf.len());
             let input = self.0.buf.get(start..cap).ok_or_else(|| malformed(start, "stream"))?;
-            let mut found = None;
+            let mut found = if repair {
+                repaired_stream_bounds(&self.0.buf, start, length, cap)
+            } else {
+                None
+            };
             for (relative, window) in input.windows(9).enumerate() {
+                if found.is_some() { break; }
                 if window != b"endstream" {
                     continue;
                 }
@@ -408,11 +431,43 @@ pub fn parse_indirect(
     Ok(object)
 }
 
+pub(crate) fn parse_indirect_repair(
+    buf: &Arc<[u8]>,
+    offset: usize,
+    expected: ObjectRef,
+    limits: &Limits,
+) -> Result<Object, DocError> {
+    let mut object = parse_indirect_pending_repair(buf, offset, expected, limits)?;
+    if object.is_stream() && object.stream_raw().is_none() {
+        object.finish_stream_repair(None, limits)?;
+    }
+    Ok(object)
+}
+
+pub(crate) fn parse_indirect_pending_repair(
+    buf: &Arc<[u8]>,
+    offset: usize,
+    expected: ObjectRef,
+    limits: &Limits,
+) -> Result<Object, DocError> {
+    parse_indirect_pending_with_mode(buf, offset, expected, limits, true)
+}
+
 pub(crate) fn parse_indirect_pending(
     buf: &Arc<[u8]>,
     offset: usize,
     expected: ObjectRef,
     limits: &Limits,
+) -> Result<Object, DocError> {
+    parse_indirect_pending_with_mode(buf, offset, expected, limits, false)
+}
+
+fn parse_indirect_pending_with_mode(
+    buf: &Arc<[u8]>,
+    offset: usize,
+    expected: ObjectRef,
+    limits: &Limits,
+    repair: bool,
 ) -> Result<Object, DocError> {
     let mut cursor = Cursor::at(buf, offset..buf.len(), limits)?;
     let first = cursor.required()?;
@@ -430,9 +485,14 @@ pub(crate) fn parse_indirect_pending(
         return Err(malformed(offset, "object number"));
     }
     let (nodes, root) = graph(&mut cursor, limits)?;
-    let end = cursor.required()?;
+    let end = match cursor.required() {
+        Ok(end) => Some(end),
+        Err(error) if repair && !crate::repair::is_hard_error(&error) => None,
+        Err(error) => return Err(error),
+    };
     let mut stream_start = None;
-    if end.bytes() == b"stream" {
+    let mut repaired_tail = None;
+    if end.as_ref().is_some_and(|end| end.bytes() == b"stream") {
         if !matches!(nodes.get(root).map(|node| &node.kind), Some(Kind::Dict(_))) {
             return Err(malformed(cursor.position(), "stream dictionary"));
         }
@@ -447,10 +507,14 @@ pub(crate) fn parse_indirect_pending(
         }
         check(LimitKind::ObjectBytes, start.saturating_sub(offset) as u64, limits.max_object_bytes)?;
         stream_start = Some(start);
-    } else if end.bytes() != b"endobj" {
-        return Err(malformed(cursor.position(), "endobj"));
+    } else if !end.as_ref().is_some_and(|end| end.bytes() == b"endobj") {
+        if !repair { return Err(malformed(cursor.position(), "endobj")); }
+        let start = nodes.get(root).map(|node| node.span.end)
+            .ok_or_else(|| malformed(offset, "object root"))?;
+        repaired_tail = Some(repaired_object_tail(buf, start, offset, limits)?);
     }
-    let syntax_bytes = stream_start.unwrap_or(cursor.position()).saturating_sub(offset) as u64;
+    let syntax_bytes = stream_start.or(repaired_tail).unwrap_or(cursor.position())
+        .saturating_sub(offset) as u64;
     let mut object = Object(Arc::new(ObjectData {
         buf: buf.clone(),
         nodes,
@@ -460,7 +524,7 @@ pub(crate) fn parse_indirect_pending(
         stream_start,
         syntax_bytes,
         token_count: cursor.count,
-        recovered: false,
+        recovered: repaired_tail.is_some(),
         strings_plain: false,
     }));
     if object.dict().and_then(|dict| dict.get(b"Type"))
@@ -472,7 +536,13 @@ pub(crate) fn parse_indirect_pending(
         let length = object.dict().and_then(|dict| dict.get(b"Length"));
         let indirect = length.and_then(|value| value.as_ref()).is_some();
         let direct = length.and_then(|value| value.as_i64()).and_then(|n| u64::try_from(n).ok());
-        if !indirect { object.finish_stream(direct, limits)?; }
+        if !indirect {
+            if repair {
+                object.finish_stream_repair(direct, limits)?;
+            } else {
+                object.finish_stream(direct, limits)?;
+            }
+        }
     }
     Ok(object)
 }
@@ -705,6 +775,119 @@ fn stream_tail(buf: &[u8], end: usize, maximum: u64) -> Option<usize> {
     if !keyword_at(buf, endobj, b"endobj") { return None; }
     let tail = endobj.checked_add(6)?;
     (tail <= cap).then_some(tail)
+}
+
+// Repair scans stop at the next header rather than borrowing a later stream's
+// terminator. Payloads remain slices of the original input.
+fn repaired_stream_bounds(
+    buf: &[u8],
+    start: usize,
+    length: Option<u64>,
+    cap: usize,
+) -> Option<(usize, usize)> {
+    let mut pos = start;
+    while pos < cap {
+        let boundary = pos == start
+            || buf.get(pos.saturating_sub(1)).copied().is_some_and(whitespace);
+        if boundary {
+            if keyword_at(buf, pos, b"endstream") && pos.checked_add(9).is_some_and(|end| end <= cap) {
+                if let Some(tail) = stream_tail(buf, pos, cap.saturating_sub(pos) as u64) {
+                    return Some((repaired_payload_end(buf, start, pos, length), tail));
+                }
+                let after = pos + 9;
+                let next = skip_trivia(buf, after, cap);
+                if next == buf.len() || object_boundary_at(buf, next, cap) {
+                    return Some((repaired_payload_end(buf, start, pos, length), after));
+                }
+                if next.checked_add(6).is_some_and(|end| end <= cap) && damaged_keyword_at(buf, next, b"endobj") {
+                    return Some((repaired_payload_end(buf, start, pos, length), next + 6));
+                }
+            }
+            if keyword_at(buf, pos, b"endobj") && pos.checked_add(6).is_some_and(|end| end <= cap)
+                && strip_tail_keyword(buf, start, pos, b"endstream").is_some()
+            {
+                return Some((repaired_payload_end(buf, start, pos, length), pos + 6));
+            }
+            if object_boundary_at(buf, pos, cap) {
+                return Some((repaired_payload_end(buf, start, pos, length), pos));
+            }
+        }
+        pos = pos.saturating_add(1);
+    }
+    if cap == buf.len() {
+        Some((repaired_payload_end(buf, start, cap, length), cap))
+    } else {
+        None
+    }
+}
+
+fn repaired_payload_end(buf: &[u8], start: usize, boundary: usize, length: Option<u64>) -> usize {
+    let mut end = strip_tail_keyword(buf, start, boundary, b"endobj").unwrap_or(boundary);
+    end = strip_tail_keyword(buf, start, end, b"endstream").unwrap_or(end);
+    if let Some(declared) = length.and_then(|n| usize::try_from(n).ok())
+        .and_then(|n| start.checked_add(n)).filter(|n| *n <= end)
+    {
+        if buf.get(declared..end).is_some_and(|bytes| bytes.iter().copied().all(whitespace)) {
+            return declared;
+        }
+    }
+    if end > start && buf.get(end - 1) == Some(&b'\n') {
+        end -= 1;
+        if end > start && buf.get(end - 1) == Some(&b'\r') { end -= 1; }
+    } else if end > start && buf.get(end - 1) == Some(&b'\r') {
+        end -= 1;
+    }
+    end
+}
+
+fn strip_tail_keyword(buf: &[u8], start: usize, mut end: usize, keyword: &[u8]) -> Option<usize> {
+    while end > start && buf.get(end - 1).copied().is_some_and(whitespace) { end -= 1; }
+    let marker = end.checked_sub(keyword.len()).filter(|marker| *marker >= start)?;
+    if marker > start && !buf.get(marker - 1).copied().is_some_and(whitespace) { return None; }
+    let word = buf.get(marker..end)?;
+    // A single damaged byte in either closing keyword is enough to lose the
+    // strict tail. Do not strip arbitrary trailing payload words.
+    (word.iter().zip(keyword).filter(|(a, b)| a != b).count() <= 1).then_some(marker)
+}
+
+fn damaged_keyword_at(buf: &[u8], pos: usize, keyword: &[u8]) -> bool {
+    let Some(end) = pos.checked_add(keyword.len()) else { return false; };
+    let Some(word) = buf.get(pos..end) else { return false; };
+    word.iter().zip(keyword).filter(|(a, b)| a != b).count() <= 1
+        && buf.get(end).copied().map(|byte| whitespace(byte) || b"()<>[]{}/%".contains(&byte)).unwrap_or(true)
+}
+
+fn object_boundary_at(buf: &[u8], pos: usize, cap: usize) -> bool {
+    if matches!(buf.get(pos), Some(b'+' | b'0'..=b'9'))
+        && crate::xref::header_at(buf.get(..cap).unwrap_or(&[]), pos).is_some()
+    {
+        return true;
+    }
+    [b"xref".as_slice(), b"trailer".as_slice(), b"startxref".as_slice()]
+        .iter().any(|keyword| pos.saturating_add(keyword.len()) <= cap
+            && keyword_at(buf, pos, keyword))
+}
+
+fn repaired_object_tail(buf: &[u8], start: usize, offset: usize, limits: &Limits) -> Result<usize, DocError> {
+    let bound = usize::try_from(limits.max_object_bytes).unwrap_or(usize::MAX);
+    let cap = offset.saturating_add(bound).min(buf.len());
+    let mut pos = start;
+    while pos < cap {
+        if (pos == start || buf.get(pos.saturating_sub(1)).copied().is_some_and(whitespace))
+            && object_boundary_at(buf, pos, cap)
+        {
+            return Ok(pos);
+        }
+        pos = pos.saturating_add(1);
+    }
+    if cap < buf.len() {
+        return Err(DocError::Refused(Refusal {
+            limit: LimitKind::ObjectBytes,
+            requested: limits.max_object_bytes.saturating_add(1),
+            maximum: limits.max_object_bytes,
+        }));
+    }
+    Ok(cap)
 }
 
 fn hex(byte: u8) -> Option<u8> {
