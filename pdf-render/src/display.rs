@@ -87,6 +87,7 @@ pub struct Rgba {
 #[derive(Clone, Debug, PartialEq)]
 pub enum Paint {
     Solid(Rgba),
+    Function(Arc<paint::FunctionShading>),
     Axial {
         from: (f32, f32),
         to: (f32, f32),
@@ -358,6 +359,8 @@ struct Builder<'c> {
     budget: Budget,
     output: DisplayList,
     graphics: GraphicsState,
+    // Pattern matrices map to default user space, independently of content cm operators.
+    pattern_ctm: Matrix,
     saved: Vec<GraphicsState>,
     path: CurrentPath,
     text_matrix: Matrix,
@@ -409,6 +412,7 @@ pub fn display_list_cached(
         budget: Budget { used: 0, maximum: limits.max_total_decoded_bytes },
         output: DisplayList { width, height, items: Vec::new(), missing_fonts: 0 },
         graphics: GraphicsState::new(ctm),
+        pattern_ctm: ctm,
         saved: Vec::new(),
         path: CurrentPath::default(),
         text_matrix: Matrix::IDENTITY,
@@ -650,6 +654,9 @@ impl Builder<'_> {
             let bytes = stops.len().checked_mul(core::mem::size_of::<(f32, Rgba)>())
                 .ok_or_else(|| bad("render_paint_size"))?;
             self.budget.charge(bytes)?;
+        }
+        if let Some(Paint::Function(function)) = paint {
+            self.budget.charge(function.allocated_bytes())?;
         }
         if matches!(
             &item, Item::Fill { .. } | Item::Stroke { .. }
@@ -903,14 +910,14 @@ impl Builder<'_> {
                                     let stroke = self.device_stroke()?;
                                     let dash = self.device_dash()?;
                                     let paint = self.graphics.stroke_color.paint(
-                                        resolver, self.graphics.ctm, self.graphics.stroke_alpha,
+                                        resolver, self.pattern_ctm, self.graphics.stroke_alpha,
                                     )?;
                                     self.emit(Item::Stroke { path, stroke, dash, paint })?;
                                 }
                                 2 => {
                                     let second = copy_path(&path, &mut self.budget)?;
                                     let paint = self.graphics.fill.paint(
-                                        resolver, self.graphics.ctm, self.graphics.fill_alpha,
+                                        resolver, self.pattern_ctm, self.graphics.fill_alpha,
                                     )?;
                                     self.emit(Item::Fill {
                                         path, rule: FillRule::NonZero, paint,
@@ -918,7 +925,7 @@ impl Builder<'_> {
                                     let stroke = self.device_stroke()?;
                                     let dash = self.device_dash()?;
                                     let paint = self.graphics.stroke_color.paint(
-                                        resolver, self.graphics.ctm, self.graphics.stroke_alpha,
+                                        resolver, self.pattern_ctm, self.graphics.stroke_alpha,
                                     )?;
                                     self.emit(Item::Stroke { path: second, stroke, dash, paint })?;
                                 }
@@ -955,7 +962,7 @@ impl Builder<'_> {
     {
         if !run.paths.is_empty() {
             let paint = self.graphics.fill.paint(
-                resolver, self.graphics.ctm, self.graphics.fill_alpha,
+                resolver, self.pattern_ctm, self.graphics.fill_alpha,
             )?;
             self.emit(Item::Glyphs {
                 glyphs: core::mem::take(&mut run.paths), paint, stroke: None,
@@ -1491,7 +1498,7 @@ impl Builder<'_> {
         };
         if fill {
             let paint = self.graphics.fill.paint(
-                resolver, self.graphics.ctm, self.graphics.fill_alpha,
+                resolver, self.pattern_ctm, self.graphics.fill_alpha,
             )?;
             self.emit(Item::Fill { path: current.path, rule, paint })?;
             if let Some(path) = second {
@@ -1512,7 +1519,7 @@ impl Builder<'_> {
         let stroke = self.device_stroke()?;
         let dash = self.device_dash()?;
         let paint = self.graphics.stroke_color.paint(
-            resolver, self.graphics.ctm, self.graphics.stroke_alpha,
+            resolver, self.pattern_ctm, self.graphics.stroke_alpha,
         )?;
         self.emit(Item::Stroke { path, stroke, dash, paint })
     }
@@ -2039,4 +2046,3 @@ fn recover(
         _ => { warn(resolver, object, what); Ok(()) }
     }
 }
-

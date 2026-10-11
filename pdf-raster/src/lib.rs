@@ -49,6 +49,9 @@ pub fn render_page(
     ));
 
     let pixel_count = u64::try_from(buffer_len / 4).unwrap_or(u64::MAX);
+    let limits = *resolver.document().limits();
+    let mut function_work = 0u64;
+    let mut texture_bytes = buffer_len as u64;
     let mut clips: Vec<Mask> = Vec::new();
     let mut blend = tiny_skia::BlendMode::SourceOver;
 
@@ -109,7 +112,12 @@ pub fn render_page(
                 clips.pop();
             }
             Item::Fill { path, rule, paint } => {
-                let (Some(path), Some(paint)) = (path_to_skia(&path), paint_to_skia(&paint, blend)) else {
+                let texture = paint_texture(
+                    &pixmap, &paint, clips.len(), limits, &mut function_work, &mut texture_bytes,
+                )?;
+                let (Some(path), Some(paint)) = (
+                    path_to_skia(&path), paint_to_skia(&paint, blend, texture.as_ref()),
+                ) else {
                     continue;
                 };
                 pixmap.fill_path(
@@ -126,9 +134,12 @@ pub fn render_page(
                 dash,
                 paint,
             } => {
+                let texture = paint_texture(
+                    &pixmap, &paint, clips.len(), limits, &mut function_work, &mut texture_bytes,
+                )?;
                 let (Some(path), Some(paint), Some(stroke)) = (
                     path_to_skia(&path),
-                    paint_to_skia(&paint, blend),
+                    paint_to_skia(&paint, blend, texture.as_ref()),
                     stroke_to_skia(&stroke, dash.as_ref()),
                 ) else {
                     continue;
@@ -162,7 +173,10 @@ pub fn render_page(
                 paint,
                 stroke,
             } => {
-                let Some(paint) = paint_to_skia(&paint, blend) else {
+                let texture = paint_texture(
+                    &pixmap, &paint, clips.len(), limits, &mut function_work, &mut texture_bytes,
+                )?;
+                let Some(paint) = paint_to_skia(&paint, blend, texture.as_ref()) else {
                     continue;
                 };
                 let stroke = stroke.as_ref().and_then(|stroke| stroke_to_skia(stroke, None));
@@ -373,9 +387,69 @@ fn gradient_stops(
     output
 }
 
-fn paint_to_skia(paint: &PdfPaint, blend: tiny_skia::BlendMode) -> Option<SkPaint<'static>> {
+fn paint_texture(
+    destination: &Pixmap,
+    paint: &PdfPaint,
+    clip_count: usize,
+    limits: pdf_core::Limits,
+    work: &mut u64,
+    total_bytes: &mut u64,
+) -> Result<Option<Pixmap>, DocError> {
+    let PdfPaint::Function(function) = paint else { return Ok(None) };
+    let length = checked_rgba_len(destination.width(), destination.height(), limits.max_decoded_bytes)?;
+    let active = (length as u64).saturating_mul(2)
+        .saturating_add((length as u64 / 4).saturating_mul(clip_count as u64));
+    let maximum = limits.max_decoded_bytes.min(isize::MAX as u64);
+    if active > maximum {
+        return Err(DocError::Refused(Refusal {
+            limit: LimitKind::DecodedBytes, requested: active, maximum,
+        }));
+    }
+    *total_bytes = total_bytes.checked_add(length as u64).ok_or(DocError::Refused(Refusal {
+        limit: LimitKind::TotalDecodedBytes, requested: u64::MAX,
+        maximum: limits.max_total_decoded_bytes,
+    }))?;
+    if *total_bytes > limits.max_total_decoded_bytes {
+        return Err(DocError::Refused(Refusal {
+            limit: LimitKind::TotalDecodedBytes, requested: *total_bytes,
+            maximum: limits.max_total_decoded_bytes,
+        }));
+    }
+    let Some(mut texture) = Pixmap::new(destination.width(), destination.height()) else {
+        return Err(allocation_refusal(maximum));
+    };
+    let width = destination.width() as usize;
+    for (index, pixel) in texture.data_mut().chunks_exact_mut(4).enumerate() {
+        *work = work.checked_add(1).ok_or(DocError::Refused(Refusal {
+            limit: LimitKind::ContentOps, requested: u64::MAX, maximum: limits.max_content_ops,
+        }))?;
+        if *work > limits.max_content_ops {
+            return Err(DocError::Refused(Refusal {
+                limit: LimitKind::ContentOps, requested: *work, maximum: limits.max_content_ops,
+            }));
+        }
+        let x = (index % width) as f32 + 0.5;
+        let y = (index / width) as f32 + 0.5;
+        if let Some(color) = function.sample(x, y, work)? {
+            let byte = |value: f32| (value.clamp(0.0, 1.0) * 255.0 + 0.5) as u8;
+            pixel.copy_from_slice(&[byte(color.r), byte(color.g), byte(color.b), byte(color.a)]);
+        }
+    }
+    premultiply(texture.data_mut());
+    Ok(Some(texture))
+}
+
+fn paint_to_skia<'a>(
+    paint: &PdfPaint,
+    blend: tiny_skia::BlendMode,
+    texture: Option<&'a Pixmap>,
+) -> Option<SkPaint<'a>> {
     let shader = match paint {
         PdfPaint::Solid(rgba) => Shader::SolidColor(color_to_skia(*rgba)?),
+        PdfPaint::Function(_) => tiny_skia::Pattern::new(
+            texture?.as_ref(), SpreadMode::Pad, FilterQuality::Nearest,
+            1.0, Transform::identity(),
+        ),
         PdfPaint::Axial {
             from,
             to,
@@ -420,7 +494,7 @@ fn paint_to_skia(paint: &PdfPaint, blend: tiny_skia::BlendMode) -> Option<SkPain
     Some(paint)
 }
 
-fn sk_paint(shader: Shader<'static>) -> SkPaint<'static> {
+fn sk_paint<'a>(shader: Shader<'a>) -> SkPaint<'a> {
     let mut paint = SkPaint::default();
     paint.shader = shader;
     paint.anti_alias = true;
