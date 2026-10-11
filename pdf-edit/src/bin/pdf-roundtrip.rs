@@ -26,6 +26,12 @@ use pdf_write::doc::{Color, DocumentBuilder, StandardFont, WriteOptions};
 mod editing;
 #[path = "../roundtrip_chacha.rs"]
 mod chacha;
+#[cfg(feature = "sign")]
+#[path = "../roundtrip_sign.rs"]
+mod signing;
+#[cfg(feature = "sign")]
+#[path = "../sign_fixtures.rs"]
+mod sign_fixtures;
 
 type CheckResult<T> = Result<T, String>;
 
@@ -857,6 +863,8 @@ fn main() -> ExitCode {
     report.obtain("chacha", "encrypted-roundtrip", chacha::run(&config));
     if plan.house_pass {
         editing::run(&mut report, &config, font.clone());
+        #[cfg(feature = "sign")]
+        signing::run(&mut report, &config);
     }
     for (name, compress, object_streams) in [
         ("writer-table-plain", false, false),
