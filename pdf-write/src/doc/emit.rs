@@ -2,7 +2,7 @@ use std::io;
 
 use super::bounds::*;
 use super::image::Pixels;
-use super::{DocumentBuilder, Font, Outline, Target, WriteOptions};
+use super::{Destination, DocumentBuilder, Encrypt, Font, Outline, Target, WriteOptions};
 use crate::{encode, serialize_value, Dict, Value, Writer, XrefCompression};
 
 pub(super) fn name(value: &str) -> Value {
@@ -25,10 +25,19 @@ fn page_ref(ids: &[u32], index: usize) -> io::Result<Value> {
     ids.get(index).copied().map(reference).ok_or_else(|| invalid("destination page is missing"))
 }
 
-fn destination(ids: &[u32], page: usize, top: f32) -> io::Result<Value> {
-    Ok(Value::Array(vec![
-        page_ref(ids, page)?, name("XYZ"), Value::Null, real(top), Value::Null,
-    ]))
+fn optional(value: Option<f32>) -> Value {
+    value.map_or(Value::Null, real)
+}
+
+fn destination(ids: &[u32], target: &Destination) -> io::Result<Value> {
+    let page = page_ref(ids, target.page())?;
+    Ok(Value::Array(match *target {
+        Destination::Xyz { left, top, zoom, .. } => {
+            vec![page, name("XYZ"), optional(left), optional(top), optional(zoom)]
+        }
+        Destination::Fit { .. } => vec![page, name("Fit")],
+        Destination::FitWidth { top, .. } => vec![page, name("FitH"), optional(top)],
+    }))
 }
 
 pub(super) struct Output {
@@ -41,11 +50,23 @@ pub(super) struct Output {
 }
 
 impl Output {
-    fn new(options: &WriteOptions) -> io::Result<Self> {
+    fn new(options: &WriteOptions, encrypt: Option<&Encrypt>) -> io::Result<Self> {
+        let version = format!("{}.{}", options.version.0, options.version.1);
+        let (writer, allocated) = match encrypt {
+            None => (Writer::new(&version)?, 0),
+            // The security dictionary takes the first object number.
+            Some(encrypt) if encrypt.fixture => {
+                (Writer::new_encrypted_fixture(&version, &encrypt.password)?, 1)
+            }
+            Some(encrypt) => {
+                (Writer::new_encrypted(&version, &encrypt.password, encrypt.costs)?, 1)
+            }
+        };
         Ok(Self {
-            writer: Writer::new(&format!("{}.{}", options.version.0, options.version.1))?,
-            pending: Vec::new(), pending_bytes: 0, allocated: 0,
-            object_streams: options.object_streams, compress: options.compress,
+            writer,
+            pending: Vec::new(), pending_bytes: 0, allocated,
+            object_streams: options.object_streams && encrypt.is_none(),
+            compress: options.compress,
         })
     }
 
@@ -152,15 +173,15 @@ fn validate(doc: &DocumentBuilder, options: &WriteOptions) -> io::Result<()> {
     }
     for page in &doc.pages {
         for link in &page.links {
-            if let Target::Page { page, .. } = &link.target {
-                if doc.pages.get(*page).is_none() {
+            if let Target::Destination(target) = &link.target {
+                if doc.pages.get(target.page()).is_none() {
                     return Err(invalid("link destination page is missing"));
                 }
             }
         }
     }
     for item in &doc.outlines {
-        if doc.pages.get(item.page).is_none() {
+        if doc.pages.get(item.destination.page()).is_none() {
             return Err(invalid("outline destination page is missing"));
         }
     }
@@ -172,7 +193,7 @@ pub(super) fn finish(mut doc: DocumentBuilder, options: &WriteOptions) -> io::Re
         return Err(error);
     }
     validate(&doc, options)?;
-    let mut out = Output::new(options)?;
+    let mut out = Output::new(options, doc.encrypt.as_ref())?;
     let root = out.alloc()?;
     let pages_root = out.alloc()?;
     let mut page_ids = Vec::new();
@@ -243,7 +264,11 @@ pub(super) fn finish(mut doc: DocumentBuilder, options: &WriteOptions) -> io::Re
     }
     for (index, page) in doc.pages.iter().enumerate() {
         let content = out.alloc()?;
-        out.stream(content, Vec::new(), &page.content, options.compress)?;
+        let mut bytes = copied(&page.content, MAX_BYTES)?;
+        for _ in 0..page.depth {
+            append(&mut bytes, b"Q\n", MAX_BYTES)?;
+        }
+        out.stream(content, Vec::new(), &bytes, options.compress)?;
         let mut fonts = Vec::new();
         for id in &page.fonts {
             let index = usize::try_from(*id).map_err(|_| invalid("font index overflow"))?;
@@ -272,8 +297,8 @@ pub(super) fn finish(mut doc: DocumentBuilder, options: &WriteOptions) -> io::Re
                 Target::Uri(uri) => entries.push(("A", dict(vec![
                     ("S", name("URI")), ("URI", Value::Str(uri.clone())),
                 ]))),
-                Target::Page { page, top } => {
-                    entries.push(("Dest", destination(&page_ids, *page, *top)?));
+                Target::Destination(target) => {
+                    entries.push(("Dest", destination(&page_ids, target)?));
                 }
             }
             out.object(id, dict(entries))?;
@@ -298,6 +323,11 @@ pub(super) fn finish(mut doc: DocumentBuilder, options: &WriteOptions) -> io::Re
             ])),
             ("Resources", resources), ("Contents", reference(content)),
         ];
+        for (key, rect) in ["CropBox", "BleedBox", "TrimBox", "ArtBox"].into_iter().zip(page.boxes) {
+            if let Some(rect) = rect {
+                entries.push((key, Value::Array(rect.into_iter().map(real).collect())));
+            }
+        }
         if !annotations.is_empty() {
             entries.push(("Annots", Value::Array(annotations)));
         }
@@ -394,7 +424,7 @@ fn write_outlines(out: &mut Output, items: &[Outline], pages: &[u32]) -> io::Res
         let mut entries = vec![
             ("Title", Value::HexStr(item.title.clone())),
             ("Parent", match node.parent { Some(parent) => resolve(parent)?, None => reference(root) }),
-            ("Dest", destination(pages, item.page, item.y)?),
+            ("Dest", destination(pages, &item.destination)?),
         ];
         for (key, target) in [
             ("Prev", node.previous), ("Next", node.next),

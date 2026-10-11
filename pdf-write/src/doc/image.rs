@@ -26,6 +26,43 @@ fn pixels(width: u32, height: u32) -> io::Result<usize> {
     Ok(count)
 }
 
+/// Width, height and component count from the first JPEG frame header.
+pub(super) fn jpeg_frame(data: &[u8]) -> io::Result<(u32, u32, u8)> {
+    if !data.starts_with(&[0xff, 0xd8]) {
+        return Err(invalid("JPEG start marker is missing"));
+    }
+    let mut at = 2usize;
+    for _ in 0..4096 {
+        if data.get(at) != Some(&0xff) {
+            return Err(invalid("JPEG marker is invalid"));
+        }
+        for _ in 0..4096 {
+            if data.get(at) != Some(&0xff) {
+                break;
+            }
+            at = add(at, 1)?;
+        }
+        let marker = *data.get(at).ok_or_else(|| invalid("JPEG marker is truncated"))?;
+        at = add(at, 1)?;
+        let length = usize::from(read16(data, at)?);
+        if length < 2 {
+            return Err(invalid("JPEG segment length is invalid"));
+        }
+        let segment = slice(data, at, length)?;
+        if matches!(marker, 0xc0..=0xcf) && !matches!(marker, 0xc4 | 0xc8 | 0xcc) {
+            let height = u32::from(read16(segment, 3)?);
+            let width = u32::from(read16(segment, 5)?);
+            let components = *segment.get(7).ok_or_else(|| invalid("JPEG frame is truncated"))?;
+            return Ok((width, height, components));
+        }
+        if marker == 0xda {
+            break;
+        }
+        at = add(at, length)?;
+    }
+    Err(invalid("JPEG frame is missing"))
+}
+
 impl Image {
     pub fn bytes(&self) -> usize {
         match &self.pixels {
