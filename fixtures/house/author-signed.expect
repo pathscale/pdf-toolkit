@@ -1,0 +1,21 @@
+version=1.7
+xref_kind=stream
+xref_sections=2
+encrypted=false
+refusal=none
+pages=1
+page_errors=0
+page.0.media_box=0 0 612 792
+page.0.text_norm=Signed house document This page was written by DocumentBuilder and then signed with an incremental update. Later revisions leave the signed bytes untouched.
+info.title=Signed house document
+signatures=1
+signature.0.field=HouseSignature
+signature.0.sub_filter=adbe.pkcs7.detached
+signature.0.algorithm=ecdsa-p256-sha256
+signature.0.digest=match
+signature.0.signature=valid
+signature.0.signer=CN=pdf-toolkit house signer P-256,O=pathscale
+signature.0.signing_time=2026-04-01T12:00:00Z
+signature.0.covers_revision=true
+signature.0.modified_after=false
+signature.0.later_revisions=0
