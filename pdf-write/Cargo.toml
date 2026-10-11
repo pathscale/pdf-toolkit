@@ -12,5 +12,5 @@ categories.workspace = true
 
 [dependencies]
 miniz_oxide = "0.8"
-pdf-core = { package = "pdf-toolkit-core", version = "0.3.4", path = "../pdf-core", default-features = false }
+pdf-core = { package = "pdf-toolkit-core", version = "0.3.5", path = "../pdf-core", default-features = false }
 getrandom = "^0.4"
