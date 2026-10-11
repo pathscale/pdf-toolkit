@@ -196,6 +196,9 @@ fn positioned(id: u32, glyph: &PositionedGlyph, text: &PageText) -> Option<Item>
 /// Drops overprinted glyphs (fake bold, shadows): the same text at the same angle
 /// in the same small cell as an earlier glyph.
 ///
+/// Zero-width items are exempt: the words of one ActualText span all sit at
+/// the span's origin with no advance, and a repeated word there is real text.
+///
 /// One sort over a quantized 64-bit key replaced a map with 27 lookups per
 /// glyph, which was three quarters of all text time. A glyph sitting on a cell
 /// boundary can escape deduplication; that costs a doubled letter, rarely.
@@ -203,6 +206,9 @@ fn unique_items(items: Vec<Item>, text: &PageText) -> Vec<Item> {
     let mut keys: Vec<(u64, u32)> = Vec::with_capacity(items.len());
     for (index, item) in items.iter().enumerate() {
         let Some(glyph) = text.glyphs.get(item.id as usize) else { continue };
+        if item.width == 0.0 {
+            continue;
+        }
         let cell = (0.2 * item.size).max(0.01);
         let mut hash = 0xcbf2_9ce4_8422_2325u64;
         let mut mix = |value: u64| {
