@@ -11,8 +11,8 @@ keywords.workspace = true
 categories.workspace = true
 
 [dependencies]
-pdf-core = { package = "pdf-toolkit-core", version = "0.3.1", path = "../pdf-core", default-features = false, features = ["std"] }
-pdf-write = { package = "pdf-toolkit-write", version = "0.3.1", path = "../pdf-write" }
-pdf-text = { package = "pdf-toolkit-text", version = "0.3.1", path = "../pdf-text" }
-pdf-raster = { package = "pdf-toolkit-raster", version = "0.3.1", path = "../pdf-raster" }
-pdf-render = { package = "pdf-toolkit-render", version = "0.3.1", path = "../pdf-render" }
+pdf-core = { package = "pdf-toolkit-core", version = "0.3.2", path = "../pdf-core", default-features = false, features = ["std"] }
+pdf-write = { package = "pdf-toolkit-write", version = "0.3.2", path = "../pdf-write" }
+pdf-text = { package = "pdf-toolkit-text", version = "0.3.2", path = "../pdf-text" }
+pdf-raster = { package = "pdf-toolkit-raster", version = "0.3.2", path = "../pdf-raster" }
+pdf-render = { package = "pdf-toolkit-render", version = "0.3.2", path = "../pdf-render" }
