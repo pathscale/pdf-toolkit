@@ -2,7 +2,9 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use pdf_core::pages::{Page, PageWalk};
-use pdf_core::{DocError, Document, LimitKind, Limits, ObjectRef, PdfSource, Resolver, Warning};
+use pdf_core::{
+    DocError, Document, LimitKind, Limits, ObjectRef, OpenMode, PdfSource, Resolver, Warning,
+};
 
 use crate::content::{check, refusal};
 use crate::font::FontCache;
@@ -110,7 +112,13 @@ pub struct SemanticReader {
 
 impl SemanticReader {
     pub fn open(source: PdfSource, limits: Limits) -> Result<Self, DocError> {
-        let document = Document::open(source, limits)?;
+        Self::open_with(source, limits, OpenMode::Strict)
+    }
+
+    /// `OpenMode::Repair` tries the strict open first and falls back to the recovering reader
+    /// (damaged xref, object streams, header or page tree), as `Document::open_with` does.
+    pub fn open_with(source: PdfSource, limits: Limits, mode: OpenMode) -> Result<Self, DocError> {
+        let document = Document::open_with(source, limits, mode)?;
         let mut budget = Budget::new(limits.max_total_decoded_bytes);
         let mut resolver = document.resolver();
         let mut pages = Vec::new();
@@ -244,7 +252,16 @@ impl SemanticReader {
 
 /// Whole-document output has a cumulative byte cap; the reader caps each page.
 pub fn semantic_document(source: PdfSource, limits: Limits) -> Result<SemanticDoc, DocError> {
-    let mut reader = SemanticReader::open(source, limits)?;
+    semantic_document_with(source, limits, OpenMode::Strict)
+}
+
+/// `semantic_document` with an explicit open mode; see `SemanticReader::open_with`.
+pub fn semantic_document_with(
+    source: PdfSource,
+    limits: Limits,
+    mode: OpenMode,
+) -> Result<SemanticDoc, DocError> {
+    let mut reader = SemanticReader::open_with(source, limits, mode)?;
     let info = reader.info().clone();
     let mut resolver = reader.document.resolver();
     let outline = links::outline_with_pages(&mut resolver, &reader.page_ids, &reader.pages, &reader.page_lookup)?;
