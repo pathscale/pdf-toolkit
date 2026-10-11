@@ -31,6 +31,17 @@ pub use pdf_raster as raster;
 #[cfg(feature = "write")]
 pub use pdf_write as write;
 
+/// The high-level authoring API: pages, wrapped text in embedded fonts,
+/// graphics, images, links and outlines (`pdf_toolkit_write::doc`).
+/// See docs/authoring.md.
+#[cfg(feature = "author")]
+pub use pdf_write::doc as author;
+
 /// Incremental updates that keep the original bytes (`pdf-toolkit-edit`).
 #[cfg(feature = "edit")]
 pub use pdf_edit as edit;
+
+/// ECDSA P-256 and P-384 PDF signatures, signed and verified offline
+/// (`pdf_toolkit_edit::sign`).
+#[cfg(feature = "sign")]
+pub use pdf_edit::sign;
