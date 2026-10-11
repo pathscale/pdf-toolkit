@@ -15,8 +15,8 @@ name = "pdf-inspect"
 path = "src/main.rs"
 
 [dependencies]
-pdf-core = { package = "pdf-toolkit-core", version = "0.3.0", path = "../pdf-core", default-features = false, features = ["std"] }
-pdf-text = { package = "pdf-toolkit-text", version = "0.3.0", path = "../pdf-text", features = ["jpx", "jxl"] }
-pdf-raster = { package = "pdf-toolkit-raster", version = "0.3.0", path = "../pdf-raster" }
-pdf-render = { package = "pdf-toolkit-render", version = "0.3.0", path = "../pdf-render", default-features = false }
+pdf-core = { package = "pdf-toolkit-core", version = "0.3.1", path = "../pdf-core", default-features = false, features = ["std"] }
+pdf-text = { package = "pdf-toolkit-text", version = "0.3.1", path = "../pdf-text", features = ["jpx", "jxl"] }
+pdf-raster = { package = "pdf-toolkit-raster", version = "0.3.1", path = "../pdf-raster" }
+pdf-render = { package = "pdf-toolkit-render", version = "0.3.1", path = "../pdf-render", default-features = false }
 
