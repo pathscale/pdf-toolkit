@@ -102,9 +102,18 @@ impl ColorSpace {
         let mut mappings = Vec::new();
         let mut pattern = false;
         let mut seen = Vec::new();
+        let mut spaces = Vec::new();
         let mut basic = Basic::Unknown;
         for depth in 0..=SPACE_DEPTH {
             check(LimitKind::Depth, depth.saturating_add(1), SPACE_DEPTH)?;
+            if resolver.document().repair_mode() {
+                let identity = (current.object().buffer().as_ptr() as usize, current.get().span());
+                if spaces.contains(&identity) {
+                    warn(resolver, current.object().id(), "render_colorspace_cycle_recovered");
+                    return Ok(Self::basic(Basic::Unknown));
+                }
+                bounded_push(resolver, &mut spaces, identity)?;
+            }
             if let Some(name) = current.get().as_name() {
                 let name = name.decoded();
                 if let Some(found) = named_basic(name.as_ref()) {

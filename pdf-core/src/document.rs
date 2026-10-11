@@ -204,7 +204,8 @@ impl Document {
     pub fn repaired(&self) -> bool {
         self.repaired
     }
-    pub(crate) fn repair_mode(&self) -> bool {
+    /// Whether callers may use bounded recovery for damaged document data.
+    pub fn repair_mode(&self) -> bool {
         self.repair_mode
     }
     pub fn repaired_counts(&self) -> Option<XrefCounts> {
@@ -416,6 +417,13 @@ impl<'d> Resolver<'d> {
     }
 
     fn record_recovery(&mut self, object: &Object) {
+        if object.syntax_recovered() {
+            self.warn(Warning {
+                offset: Some(object.root().span().start as u64),
+                object: object.id(),
+                what: "object_syntax_recovered",
+            });
+        }
         if object.tail_recovered() {
             self.warn(Warning {
                 offset: Some(object.root().span().end as u64),
@@ -693,4 +701,3 @@ where
             expected: "integer decode parameter",
         })
 }
-

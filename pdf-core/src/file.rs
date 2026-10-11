@@ -40,6 +40,17 @@ impl std::error::Error for FileOpenError {
 
 /// Reads a file into a PDF source without reading beyond the caller's limit.
 pub fn open(path: impl AsRef<Path>, max_bytes: u64) -> Result<PdfSource, FileOpenError> {
+    open_with_mode(path, max_bytes, false)
+}
+
+/// Reads a bounded source, recognizing damaged headers for repair opens.
+pub fn open_repair(path: impl AsRef<Path>, max_bytes: u64) -> Result<PdfSource, FileOpenError> {
+    open_with_mode(path, max_bytes, true)
+}
+
+fn open_with_mode(
+    path: impl AsRef<Path>, max_bytes: u64, repair: bool,
+) -> Result<PdfSource, FileOpenError> {
     let file = File::open(path).map_err(FileOpenError::Io)?;
     let file_size = file.metadata().map_err(FileOpenError::Io)?.len();
     if file_size > max_bytes {
@@ -62,5 +73,9 @@ pub fn open(path: impl AsRef<Path>, max_bytes: u64) -> Result<PdfSource, FileOpe
         None => unreachable!("a freshly collected Arc is unique"),
     }
 
-    PdfSource::new(bytes).map_err(FileOpenError::Source)
+    if repair {
+        PdfSource::new_repair(bytes).map_err(FileOpenError::Source)
+    } else {
+        PdfSource::new(bytes).map_err(FileOpenError::Source)
+    }
 }

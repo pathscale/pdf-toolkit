@@ -1350,7 +1350,14 @@ impl Builder<'_> {
                     if let Some(value) = resource(
                         resolver, context.resources.as_ref(), b"XObject", name,
                     )? {
-                        let dict = value.get().as_dict().ok_or_else(|| bad("xobject_dictionary"))?;
+                        let dict = match value.get().as_dict() {
+                            Some(dict) => dict,
+                            None if resolver.document().repair_mode() => {
+                                warn(resolver, value.object().id(), "xobject_dictionary_recovered");
+                                return Ok(None);
+                            }
+                            None => return Err(bad("xobject_dictionary")),
+                        };
                         let subtype = resolver.resolve_dict_key(dict, b"Subtype")?;
                         let subtype = subtype.as_ref().and_then(|value| value.get().as_name());
                         if subtype.is_some_and(|name| name.eq_bytes(b"Image")) {

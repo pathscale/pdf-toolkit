@@ -436,6 +436,14 @@ fn parse_u32_argument(argument: &OsStr) -> Option<u32> {
     u32::try_from(parse_u64_argument(argument)?).ok()
 }
 
+fn open_source(path: &Path, limits: Limits, repair: bool) -> Result<PdfSource, file::FileOpenError> {
+    if repair {
+        file::open_repair(path, limits.max_file_bytes)
+    } else {
+        file::open(path, limits.max_file_bytes)
+    }
+}
+
 fn open_document(
     source: PdfSource,
     limits: Limits,
@@ -988,7 +996,7 @@ fn write_repaired_semantic_document(json: &mut JsonWriter, document: &Document) 
 }
 
 fn run_semantic(path: &Path, limits: Limits, repair: bool) -> u8 {
-    let source = match file::open(path, limits.max_file_bytes) {
+    let source = match open_source(path, limits, repair) {
         Ok(source) => source,
         Err(error) => {
             eprintln!("{error}");
@@ -1030,7 +1038,7 @@ fn run_semantic(path: &Path, limits: Limits, repair: bool) -> u8 {
 /// Opens with xref repair (only used when the strict open fails) and reports what
 /// the rebuilt document yields: pages walked, extracted glyphs and every warning.
 fn run_repair(path: &Path, limits: Limits) -> u8 {
-    let source = match file::open(path, limits.max_file_bytes) {
+    let source = match file::open_repair(path, limits.max_file_bytes) {
         Ok(source) => source,
         Err(error) => {
             eprintln!("{error}");
@@ -1235,7 +1243,7 @@ fn run_render(
     repair: bool,
     limits: Limits,
 ) -> u8 {
-    let source = match file::open(path, limits.max_file_bytes) {
+    let source = match open_source(path, limits, repair) {
         Ok(source) => source,
         Err(error) => {
             eprintln!("{error}");
@@ -1320,7 +1328,7 @@ fn run_render(
 }
 
 fn run_summary(path: &Path, limits: Limits, repair: bool) -> u8 {
-    let source = match file::open(path, limits.max_file_bytes) {
+    let source = match open_source(path, limits, repair) {
         Ok(source) => source,
         Err(error) => {
             eprintln!("{error}");
@@ -3188,4 +3196,3 @@ fn run_check(directory: &Path) -> u8 {
         0
     }
 }
-

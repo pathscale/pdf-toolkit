@@ -373,12 +373,26 @@ fn fixed<const N: usize>(
     resolver: &mut Resolver<'_>, dict: DictRef<'_>, key: &[u8],
 ) -> Result<[u8; N], DocError> {
     let value = resolver.resolve_dict_key(dict, key)?.ok_or_else(bad_dictionary)?;
-    let bytes = binary_value(resolver, &value, N as u64)?;
-    if bytes.len() != N {
+    // Some R6 writers pad U and O with zero bytes after their 48-byte payload.
+    // Keep the security-string bound and authenticate the original payload.
+    let padded = resolver.document().repair_mode()
+        && N == 48 && matches!(key, b"U" | b"O");
+    let maximum = if padded { SECURITY_STRING_BYTES } else { N as u64 };
+    let bytes = binary_value(resolver, &value, maximum)?;
+    if bytes.len() > N {
+        if !padded || !bytes[N..].iter().all(|byte| *byte == 0) {
+            check(LimitKind::ObjectBytes, bytes.len() as u64, N as u64)?;
+        }
+        resolver.warn(Warning {
+            offset: Some(value.get().span().start as u64),
+            object: value.object().id(),
+            what: "crypt_string_padding_recovered",
+        });
+    } else if bytes.len() != N {
         return Err(bad_dictionary());
     }
     let mut result = [0u8; N];
-    result.copy_from_slice(&bytes);
+    result.copy_from_slice(&bytes[..N]);
     Ok(result)
 }
 
@@ -555,4 +569,3 @@ fn bad_dictionary() -> DocError {
 fn unsupported() -> DocError {
     DocError::Unsupported { feature: "Standard security handler" }
 }
-

@@ -155,6 +155,35 @@ impl PdfSource {
         })
     }
 
+    /// Creates a repair source, also recognizing headers separated by PDF trivia.
+    /// Opening the resulting document in repair mode records header recovery.
+    pub fn new_repair(bytes: impl Into<Arc<[u8]>>) -> Result<Self, SourceError> {
+        Self::with_revision_repair(bytes, 0)
+    }
+
+    /// Creates a repair source with a caller-supplied revision number.
+    pub fn with_revision_repair(
+        bytes: impl Into<Arc<[u8]>>,
+        revision: u64,
+    ) -> Result<Self, SourceError> {
+        let bytes = bytes.into();
+        let header = match parse_header(&bytes) {
+            Ok(header) => header,
+            Err(SourceError::MissingHeader) => {
+                let body = &bytes[..bytes.len().min(OBJECT_SEARCH_LIMIT)];
+                let found = body.iter().enumerate().any(|(offset, byte)| {
+                    matches!(*byte, b'+' | b'0'..=b'9')
+                        && (offset == 0 || crate::object::whitespace(body[offset - 1]))
+                        && crate::xref::header_at(body, offset).is_some()
+                });
+                if !found { return Err(SourceError::MissingHeader); }
+                PdfHeader { offset: 0, version: RECOVERED_VERSION, recovered: true }
+            }
+            Err(error) => return Err(error),
+        };
+        Ok(Self { bytes, header, revision })
+    }
+
     /// Returns the complete source byte slice.
     pub fn bytes(&self) -> &[u8] {
         &self.bytes
@@ -365,4 +394,3 @@ fn compress_block(state: &mut [u32; 8], block: &[u8], round_constants: &[u32; 64
     state[6] = state[6].wrapping_add(g);
     state[7] = state[7].wrapping_add(h);
 }
-
