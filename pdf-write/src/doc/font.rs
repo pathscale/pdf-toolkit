@@ -76,6 +76,8 @@ pub(super) struct TrueType {
     pub metrics: u16,
     pub used: BTreeMap<u16, char>,
     cmap: Cmap,
+    /// Absolute offset and pair count of a horizontal format 0 `kern` subtable.
+    kern: Option<(usize, usize)>,
     pub(super) base_name: String,
 }
 
@@ -198,9 +200,13 @@ impl TrueType {
         let cmap_range = tables.get(b"cmap").ok_or_else(|| invalid("TrueType cmap is missing"))?;
         let cmap = parse_cmap(get(b"cmap")?, cmap_range.start)?;
         let base_name = font_name(tables.get(b"name").and_then(|range| data.get(range.clone())));
+        let kern = match tables.get(b"kern") {
+            Some(range) => parse_kern(&data, range.clone())?,
+            None => None,
+        };
         Ok(Self {
             data, tables, offsets, glyph_count, units, metrics,
-            used: BTreeMap::new(), cmap, base_name,
+            used: BTreeMap::new(), cmap, kern, base_name,
         })
     }
 
@@ -266,6 +272,32 @@ impl TrueType {
             add(mul(usize::from(self.metrics), 4)?, mul(usize::from(glyph - self.metrics), 2)?)?
         };
         Ok((advance, signed16(bytes, bearing_at)?))
+    }
+
+    /// Pair adjustment in font units from the `kern` table, zero when absent.
+    pub fn kerning(&self, left: u16, right: u16) -> io::Result<i16> {
+        let Some((start, count)) = self.kern else { return Ok(0) };
+        let key = (u32::from(left) << 16) | u32::from(right);
+        let (mut low, mut high) = (0usize, count);
+        while low < high {
+            let middle = low + (high - low) / 2;
+            let at = add(start, mul(middle, 6)?)?;
+            let pair = read32(&self.data, at)?;
+            if pair == key {
+                return signed16(&self.data, add(at, 4)?);
+            }
+            if pair < key {
+                low = middle + 1;
+            } else {
+                high = middle;
+            }
+        }
+        Ok(0)
+    }
+
+    /// The hhea ascender in 1/1000 em.
+    pub fn ascent(&self) -> io::Result<f64> {
+        Ok(self.scale(i32::from(signed16(self.table(b"hhea")?, 4)?)))
     }
 
     pub fn scale(&self, number: i32) -> f64 {
@@ -387,11 +419,17 @@ fn parse_cmap(bytes: &[u8], base: usize) -> io::Result<Cmap> {
     let count = usize::from(read16(bytes, 2)?);
     check("cmap_records", count, 256)?;
     slice(bytes, 4, mul(count, 8)?)?;
-    for index in 0..count {
-        let record = add(4, mul(index, 8)?)?;
-        if read16(bytes, record)? != 3 || read16(bytes, add(record, 2)?)? != 1 {
-            continue;
+    // Prefer the full-repertoire (3,10) subtable, then the BMP (3,1) one.
+    let mut order = Vec::new();
+    for wanted in [10u16, 1] {
+        for index in 0..count {
+            let record = add(4, mul(index, 8)?)?;
+            if read16(bytes, record)? == 3 && read16(bytes, add(record, 2)?)? == wanted {
+                push(&mut order, record, "cmap_records", 512)?;
+            }
         }
+    }
+    for record in order {
         let offset = usize::try_from(read32(bytes, add(record, 4)?)?)
             .map_err(|_| invalid("cmap offset overflow"))?;
         if offset < add(4, mul(count, 8)?)? {
@@ -497,6 +535,48 @@ fn parse_cmap(bytes: &[u8], base: usize) -> io::Result<Cmap> {
         }
     }
     Err(invalid("a supported Windows (3,1) cmap is required"))
+}
+
+/// Finds the first horizontal, non-minimum, non-cross-stream format 0
+/// subtable of a version 0 `kern` table. Pairs must be sorted, as the
+/// format requires; unsorted or Apple-format tables are ignored.
+fn parse_kern(data: &[u8], range: Range<usize>) -> io::Result<Option<(usize, usize)>> {
+    let Some(table) = data.get(range.clone()) else {
+        return Err(invalid("kern table outside font"));
+    };
+    if table.len() < 4 || read16(table, 0)? != 0 {
+        return Ok(None);
+    }
+    let subtables = usize::from(read16(table, 2)?);
+    let mut at = 4usize;
+    for _ in 0..subtables.min(64) {
+        if add(at, 14)? > table.len() {
+            return Ok(None);
+        }
+        let length = usize::from(read16(table, add(at, 2)?)?);
+        let coverage = read16(table, add(at, 4)?)?;
+        if coverage >> 8 == 0 && coverage & 0x0007 == 0x0001 {
+            let count = usize::from(read16(table, add(at, 6)?)?);
+            let pairs = add(at, 14)?;
+            if add(pairs, mul(count, 6)?)? > table.len() {
+                return Ok(None);
+            }
+            let mut previous = None;
+            for index in 0..count {
+                let key = read32(table, add(pairs, mul(index, 6)?)?)?;
+                if previous.is_some_and(|value| key <= value) {
+                    return Ok(None);
+                }
+                previous = Some(key);
+            }
+            return Ok(Some((add(range.start, pairs)?, count)));
+        }
+        if length < 14 {
+            return Ok(None);
+        }
+        at = add(at, length)?;
+    }
+    Ok(None)
 }
 
 fn font_name(bytes: Option<&[u8]>) -> String {

@@ -1,18 +1,73 @@
 use std::io;
 
 use super::bounds::*;
-use super::{Color, DocumentBuilder, Font, FontId, ImageId, Link, Target};
+use super::{Color, Destination, DocumentBuilder, Font, FontId, ImageId, Link, Target};
 use crate::{serialize_value, Value};
+
+/// Nesting limit for `save`, matching common reader limits for `q`.
+const MAX_SAVE_DEPTH: usize = 28;
 
 pub struct PageBuilder<'a> {
     pub(super) doc: &'a mut DocumentBuilder,
     pub(super) index: Option<usize>,
 }
 
-fn color_command(color: Color, stroke: bool) -> io::Result<Vec<u8>> {
-    let mut out = numbers(&color.values()?)?;
-    append(&mut out, if stroke { b"RG\n" } else { b"rg\n" }, MAX_COMMAND_BYTES)?;
-    Ok(out)
+/// A fill or stroke colour: DeviceRGB or DeviceGray, components in 0..=1.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Paint {
+    Rgb(Color),
+    Gray(f32),
+}
+
+impl Paint {
+    pub const BLACK: Paint = Paint::Gray(0.0);
+    pub const WHITE: Paint = Paint::Gray(1.0);
+
+    pub const fn gray(level: f32) -> Self {
+        Self::Gray(level)
+    }
+
+    pub const fn rgb(r: f32, g: f32, b: f32) -> Self {
+        Self::Rgb(Color { r, g, b })
+    }
+
+    pub(super) fn command(self, stroke: bool) -> io::Result<Vec<u8>> {
+        match self {
+            Self::Rgb(color) => {
+                let mut out = numbers(&color.values()?)?;
+                append(&mut out, if stroke { b"RG\n" } else { b"rg\n" }, MAX_COMMAND_BYTES)?;
+                Ok(out)
+            }
+            Self::Gray(level) => {
+                if !level.is_finite() || !(0.0..=1.0).contains(&level) {
+                    return Err(invalid("gray level must be finite and between zero and one"));
+                }
+                let mut out = numbers(&[level])?;
+                append(&mut out, if stroke { b"G\n" } else { b"g\n" }, MAX_COMMAND_BYTES)?;
+                Ok(out)
+            }
+        }
+    }
+}
+
+impl From<Color> for Paint {
+    fn from(color: Color) -> Self {
+        Self::Rgb(color)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LineCap {
+    Butt,
+    Round,
+    Square,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LineJoin {
+    Miter,
+    Round,
+    Bevel,
 }
 
 fn width_command(width: f32) -> io::Result<Vec<u8>> {
@@ -60,7 +115,7 @@ pub(crate) fn win_ansi(character: char) -> u8 {
 }
 
 impl PageBuilder<'_> {
-    fn perform(&mut self, work: impl FnOnce(&mut DocumentBuilder, usize) -> io::Result<()>) {
+    pub(super) fn perform(&mut self, work: impl FnOnce(&mut DocumentBuilder, usize) -> io::Result<()>) {
         if self.doc.error.is_some() {
             return;
         }
@@ -68,6 +123,30 @@ impl PageBuilder<'_> {
         if let Err(error) = work(self.doc, index) {
             self.doc.fail(error);
         }
+    }
+
+    /// Zero-based index of this page, or None when the page was refused.
+    pub fn index(&self) -> Option<usize> {
+        self.index
+    }
+
+    /// MediaBox width and height in points.
+    pub fn size(&self) -> (f32, f32) {
+        self.index.and_then(|index| self.doc.pages.get(index))
+            .map_or((0.0, 0.0), |page| (page.width, page.height))
+    }
+
+    /// The area inside the margins, as `[x, y, width, height]`.
+    pub fn content_box(&self) -> [f32; 4] {
+        self.index.and_then(|index| self.doc.pages.get(index)).map_or([0.0; 4], |page| {
+            let margins = page.margins;
+            [
+                margins.left,
+                margins.bottom,
+                page.width - margins.left - margins.right,
+                page.height - margins.top - margins.bottom,
+            ]
+        })
     }
 
     /// Adds a printable annotation with a self-contained normal appearance.
@@ -92,11 +171,126 @@ impl PageBuilder<'_> {
         });
     }
 
-    pub fn fill_rect(&mut self, x: f32, y: f32, w: f32, h: f32, color: Color) {
+    /// Saves the graphics state (`q`). Saves left open are closed when the
+    /// document is finished.
+    pub fn save(&mut self) {
+        self.perform(|doc, index| {
+            let page = doc.pages.get(index).ok_or_else(|| invalid("page handle is invalid"))?;
+            check("graphics_state_depth", add(page.depth, 1)?, MAX_SAVE_DEPTH)?;
+            doc.emit(index, b"q\n")?;
+            let page = doc.pages.get_mut(index).ok_or_else(|| invalid("page handle is invalid"))?;
+            page.depth = add(page.depth, 1)?;
+            Ok(())
+        });
+    }
+
+    /// Restores the graphics state saved by the matching `save` (`Q`).
+    pub fn restore(&mut self) {
+        self.perform(|doc, index| {
+            let page = doc.pages.get(index).ok_or_else(|| invalid("page handle is invalid"))?;
+            if page.depth == 0 {
+                return Err(invalid("restore without a matching save"));
+            }
+            doc.emit(index, b"Q\n")?;
+            let page = doc.pages.get_mut(index).ok_or_else(|| invalid("page handle is invalid"))?;
+            page.depth -= 1;
+            Ok(())
+        });
+    }
+
+    fn state(&mut self, values: &[f32], operator: &[u8]) {
+        self.perform(|doc, index| {
+            let mut out = numbers(values)?;
+            append(&mut out, operator, MAX_COMMAND_BYTES)?;
+            doc.emit(index, &out)
+        });
+    }
+
+    /// Concatenates `[a b c d e f]` to the current transformation matrix.
+    pub fn transform(&mut self, matrix: [f32; 6]) {
+        let [a, b, c, d, _, _] = matrix;
+        if (f64::from(a) * f64::from(d) - f64::from(b) * f64::from(c)).abs() < 1e-12 {
+            self.perform(|_, _| Err(invalid("transformation matrix is not invertible")));
+            return;
+        }
+        self.state(&matrix, b"cm\n");
+    }
+
+    pub fn translate(&mut self, x: f32, y: f32) {
+        self.transform([1.0, 0.0, 0.0, 1.0, x, y]);
+    }
+
+    pub fn scale(&mut self, x: f32, y: f32) {
+        self.transform([x, 0.0, 0.0, y, 0.0, 0.0]);
+    }
+
+    /// Rotates counterclockwise by `degrees` about the current origin.
+    pub fn rotate(&mut self, degrees: f32) {
+        let radians = f64::from(degrees).to_radians();
+        let (sin, cos) = (radians.sin() as f32, radians.cos() as f32);
+        self.transform([cos, sin, -sin, cos, 0.0, 0.0]);
+    }
+
+    /// Sets the line width for later strokes that do not pass their own.
+    pub fn line_width(&mut self, width: f32) {
+        self.perform(|doc, index| doc.emit(index, &width_command(width)?));
+    }
+
+    /// Sets a dash pattern of alternating on and off lengths. An empty
+    /// pattern draws solid lines.
+    pub fn dash(&mut self, pattern: &[f32], phase: f32) {
+        self.perform(|doc, index| {
+            check("dash_entries", pattern.len(), 32)?;
+            if pattern.iter().any(|value| *value < 0.0) || phase < 0.0 {
+                return Err(invalid("dash lengths and phase must be nonnegative"));
+            }
+            if !pattern.is_empty() && pattern.iter().all(|value| *value == 0.0) {
+                return Err(invalid("dash pattern lengths cannot all be zero"));
+            }
+            let mut out = copied(b"[", MAX_COMMAND_BYTES)?;
+            append(&mut out, &numbers(pattern)?, MAX_COMMAND_BYTES)?;
+            append(&mut out, b"] ", MAX_COMMAND_BYTES)?;
+            append(&mut out, &numbers(&[phase])?, MAX_COMMAND_BYTES)?;
+            append(&mut out, b"d\n", MAX_COMMAND_BYTES)?;
+            doc.emit(index, &out)
+        });
+    }
+
+    pub fn line_cap(&mut self, cap: LineCap) {
+        let value = match cap {
+            LineCap::Butt => b"0 J\n",
+            LineCap::Round => b"1 J\n",
+            LineCap::Square => b"2 J\n",
+        };
+        self.perform(|doc, index| doc.emit(index, value));
+    }
+
+    pub fn line_join(&mut self, join: LineJoin) {
+        let value = match join {
+            LineJoin::Miter => b"0 j\n",
+            LineJoin::Round => b"1 j\n",
+            LineJoin::Bevel => b"2 j\n",
+        };
+        self.perform(|doc, index| doc.emit(index, value));
+    }
+
+    /// Intersects the clipping path with a rectangle. The clip lasts until
+    /// the enclosing `restore`, so wrap it in `save` and `restore`.
+    pub fn clip_rect(&mut self, x: f32, y: f32, w: f32, h: f32) {
+        self.perform(|doc, index| {
+            rect(x, y, w, h)?;
+            let mut out = numbers(&[x, y, w, h])?;
+            append(&mut out, b"re W n\n", MAX_COMMAND_BYTES)?;
+            doc.emit(index, &out)
+        });
+    }
+
+    pub fn fill_rect(&mut self, x: f32, y: f32, w: f32, h: f32, color: impl Into<Paint>) {
+        let paint = color.into();
         self.perform(|doc, index| {
             rect(x, y, w, h)?;
             let mut out = copied(b"q\n", MAX_COMMAND_BYTES)?;
-            append(&mut out, &color_command(color, false)?, MAX_COMMAND_BYTES)?;
+            append(&mut out, &paint.command(false)?, MAX_COMMAND_BYTES)?;
             append(&mut out, &numbers(&[x, y, w, h])?, MAX_COMMAND_BYTES)?;
             append(&mut out, b"re f\nQ\n", MAX_COMMAND_BYTES)?;
             doc.emit(index, &out)
@@ -104,15 +298,31 @@ impl PageBuilder<'_> {
     }
 
     pub fn stroke_rect(
-        &mut self, x: f32, y: f32, w: f32, h: f32, width: f32, color: Color,
+        &mut self, x: f32, y: f32, w: f32, h: f32, width: f32, color: impl Into<Paint>,
     ) {
+        let paint = color.into();
         self.perform(|doc, index| {
             rect(x, y, w, h)?;
             let mut out = copied(b"q\n", MAX_COMMAND_BYTES)?;
-            append(&mut out, &color_command(color, true)?, MAX_COMMAND_BYTES)?;
+            append(&mut out, &paint.command(true)?, MAX_COMMAND_BYTES)?;
             append(&mut out, &width_command(width)?, MAX_COMMAND_BYTES)?;
             append(&mut out, &numbers(&[x, y, w, h])?, MAX_COMMAND_BYTES)?;
             append(&mut out, b"re S\nQ\n", MAX_COMMAND_BYTES)?;
+            doc.emit(index, &out)
+        });
+    }
+
+    /// Strokes a straight line using the current dash pattern, cap and join.
+    pub fn line(&mut self, x0: f32, y0: f32, x1: f32, y1: f32, width: f32, color: impl Into<Paint>) {
+        let paint = color.into();
+        self.perform(|doc, index| {
+            let mut out = copied(b"q\n", MAX_COMMAND_BYTES)?;
+            append(&mut out, &paint.command(true)?, MAX_COMMAND_BYTES)?;
+            append(&mut out, &width_command(width)?, MAX_COMMAND_BYTES)?;
+            append(&mut out, &numbers(&[x0, y0])?, MAX_COMMAND_BYTES)?;
+            append(&mut out, b"m\n", MAX_COMMAND_BYTES)?;
+            append(&mut out, &numbers(&[x1, y1])?, MAX_COMMAND_BYTES)?;
+            append(&mut out, b"l\nS\nQ\n", MAX_COMMAND_BYTES)?;
             doc.emit(index, &out)
         });
     }
@@ -127,8 +337,9 @@ impl PageBuilder<'_> {
     }
 
     pub fn text(
-        &mut self, font: FontId, size: f32, x: f32, y: f32, text: &str, color: Color,
+        &mut self, font: FontId, size: f32, x: f32, y: f32, text: &str, color: impl Into<Paint>,
     ) {
+        let paint = color.into();
         self.perform(|doc, index| {
             check("text_bytes", text.len(), MAX_TEXT_BYTES)?;
             coordinate(size)?;
@@ -136,7 +347,7 @@ impl PageBuilder<'_> {
                 return Err(invalid("text size must be positive"));
             }
             let position = numbers(&[x, y])?;
-            let color = color_command(color, false)?;
+            let color = paint.command(false)?;
             let font_index = usize::try_from(font.0).map_err(|_| invalid("font identifier overflow"))?;
             let embedded = matches!(doc.fonts.get(font_index), Some(Font::TrueType(_)));
             let capacity = mul(text.len(), if embedded { 2 } else { 1 })?;
@@ -177,12 +388,7 @@ impl PageBuilder<'_> {
                 append(&mut out, b"EMC\n", MAX_COMMAND_BYTES)?;
             }
             append(&mut out, b"Q\n", MAX_COMMAND_BYTES)?;
-            let page = doc.pages.get(index).ok_or_else(|| invalid("page handle is invalid"))?;
-            if !page.fonts.contains(&font.0) {
-                doc.charge(64)?;
-                doc.pages.get_mut(index).ok_or_else(|| invalid("page handle is invalid"))?
-                    .fonts.insert(font.0);
-            }
+            use_font(doc, index, font)?;
             doc.emit(index, &out)
         });
     }
@@ -228,14 +434,30 @@ impl PageBuilder<'_> {
     }
 
     pub fn link_page(&mut self, x: f32, y: f32, w: f32, h: f32, page: usize, top: f32) {
+        self.link_to(x, y, w, h, Destination::Xyz { page, left: None, top: Some(top), zoom: None });
+    }
+
+    /// Adds an internal link. The destination page may be added later; it is
+    /// checked when the document is finished.
+    pub fn link_to(&mut self, x: f32, y: f32, w: f32, h: f32, destination: Destination) {
         self.perform(|doc, index| {
-            coordinate(top)?;
+            destination.validate()?;
             add_link(
                 doc, index,
-                Link { rect: rect(x, y, w, h)?, target: Target::Page { page, top } },
+                Link { rect: rect(x, y, w, h)?, target: Target::Destination(destination) },
             )
         });
     }
+}
+
+pub(super) fn use_font(doc: &mut DocumentBuilder, index: usize, font: FontId) -> io::Result<()> {
+    let page = doc.pages.get(index).ok_or_else(|| invalid("page handle is invalid"))?;
+    if !page.fonts.contains(&font.0) {
+        doc.charge(64)?;
+        doc.pages.get_mut(index).ok_or_else(|| invalid("page handle is invalid"))?
+            .fonts.insert(font.0);
+    }
+    Ok(())
 }
 
 fn add_link(doc: &mut DocumentBuilder, index: usize, link: Link) -> io::Result<()> {
@@ -243,7 +465,7 @@ fn add_link(doc: &mut DocumentBuilder, index: usize, link: Link) -> io::Result<(
     check("links", add(count, doc.annotations)?, MAX_LINKS)?;
     let bytes = match &link.target {
         Target::Uri(bytes) => bytes.len(),
-        Target::Page { .. } => 0,
+        Target::Destination(_) => 0,
     };
     doc.charge(add(bytes, 256)?)?;
     let page = doc.pages.get_mut(index).ok_or_else(|| invalid("page handle is invalid"))?;
@@ -300,29 +522,44 @@ impl PathBuilder<'_> {
         self
     }
 
+    /// Adds a closed rectangle subpath.
+    pub fn rect(&mut self, x: f32, y: f32, w: f32, h: f32) -> &mut Self {
+        if let Err(error) = rect(x, y, w, h) {
+            if self.doc.error.is_none() {
+                self.doc.fail(error);
+            }
+            return self;
+        }
+        self.segment(&[x, y, w, h], b"re\n", false);
+        self
+    }
+
     pub fn close(&mut self) -> &mut Self {
         self.segment(&[], b"h\n", true);
         self
     }
 
-    fn paint(&mut self, color: Color, width: Option<f32>, even_odd: bool) {
+    fn paint(&mut self, fill: Option<Paint>, stroke: Option<(f32, Paint)>, even_odd: bool) {
         if self.doc.error.is_some() {
             return;
         }
         let Some(index) = self.index else { return };
         let result = (|| {
             let mut command = copied(b"q\n", MAX_COMMAND_BYTES)?;
-            append(&mut command, &color_command(color, width.is_some())?, MAX_COMMAND_BYTES)?;
-            if let Some(width) = width {
+            if let Some(fill) = fill {
+                append(&mut command, &fill.command(false)?, MAX_COMMAND_BYTES)?;
+            }
+            if let Some((width, stroke)) = stroke {
+                append(&mut command, &stroke.command(true)?, MAX_COMMAND_BYTES)?;
                 append(&mut command, &width_command(width)?, MAX_COMMAND_BYTES)?;
             }
             append(&mut command, &self.bytes, MAX_COMMAND_BYTES)?;
-            let operator: &[u8] = if width.is_some() {
-                b"S\nQ\n"
-            } else if even_odd {
-                b"f*\nQ\n"
-            } else {
-                b"f\nQ\n"
+            let operator: &[u8] = match (fill.is_some(), stroke.is_some(), even_odd) {
+                (true, true, false) => b"B\nQ\n",
+                (true, true, true) => b"B*\nQ\n",
+                (false, true, _) => b"S\nQ\n",
+                (true, false, true) => b"f*\nQ\n",
+                _ => b"f\nQ\n",
             };
             append(&mut command, operator, MAX_COMMAND_BYTES)?;
             self.doc.emit(index, &command)?;
@@ -335,14 +572,44 @@ impl PathBuilder<'_> {
         }
     }
 
-    pub fn fill(&mut self, color: Color, even_odd: bool) -> &mut Self {
-        self.paint(color, None, even_odd);
+    pub fn fill(&mut self, color: impl Into<Paint>, even_odd: bool) -> &mut Self {
+        self.paint(Some(color.into()), None, even_odd);
         self
     }
 
-    pub fn stroke(&mut self, width: f32, color: Color) -> &mut Self {
-        self.paint(color, Some(width), false);
+    pub fn stroke(&mut self, width: f32, color: impl Into<Paint>) -> &mut Self {
+        self.paint(None, Some((width, color.into())), false);
+        self
+    }
+
+    pub fn fill_stroke(
+        &mut self, fill: impl Into<Paint>, width: f32, stroke: impl Into<Paint>, even_odd: bool,
+    ) -> &mut Self {
+        self.paint(Some(fill.into()), Some((width, stroke.into())), even_odd);
+        self
+    }
+
+    /// Intersects the clipping path with this path and consumes it without
+    /// painting. The clip lasts until the enclosing `PageBuilder::restore`.
+    pub fn clip(&mut self, even_odd: bool) -> &mut Self {
+        if self.doc.error.is_some() {
+            return self;
+        }
+        let Some(index) = self.index else { return self };
+        let result = (|| {
+            if !self.current {
+                return Err(invalid("clip requires a path"));
+            }
+            let mut command = copied(&self.bytes, MAX_COMMAND_BYTES)?;
+            append(&mut command, if even_odd { b"W* n\n" } else { b"W n\n" }, MAX_COMMAND_BYTES)?;
+            self.doc.emit(index, &command)?;
+            self.bytes.clear();
+            self.current = false;
+            Ok(())
+        })();
+        if let Err(error) = result {
+            self.doc.fail(error);
+        }
         self
     }
 }
-
