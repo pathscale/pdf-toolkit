@@ -8,6 +8,7 @@ use crate::object::{DictRef, Object, Value, ValueRef};
 use crate::work::ObjectRef;
 
 const DEFAULT_MEDIA_BOX: [f64; 4] = [0.0, 0.0, 612.0, 792.0];
+const REPAIR_PAGE_TREE_DEPTH: u64 = 8192;
 
 #[derive(Clone, Debug)]
 pub struct Page {
@@ -221,6 +222,24 @@ impl<'r, 'd> PageWalk<'r, 'd> {
         Ok(object)
     }
 
+    fn maximum_depth(&self) -> u64 {
+        let configured = self.resolver.document().limits().max_page_tree_depth;
+        if self.resolver.document().repair_mode()
+            && configured == crate::limits::Limits::default().max_page_tree_depth
+        {
+            REPAIR_PAGE_TREE_DEPTH
+        } else {
+            u64::from(configured)
+        }
+    }
+
+    fn depth_warning(&mut self, depth: u64) {
+        let configured = u64::from(self.resolver.document().limits().max_page_tree_depth);
+        if self.maximum_depth() > configured && depth == configured.saturating_add(1) {
+            self.push_warning(None, "page_tree_depth_recovered");
+        }
+    }
+
     fn repair_inherited(&mut self, object: &Object, id: ObjectRef) -> Result<Inherited, DocError> {
         let mut ancestors = Vec::new();
         let mut seen = Vec::new();
@@ -237,8 +256,9 @@ impl<'r, 'd> PageWalk<'r, 'd> {
             check(
                 LimitKind::PageTreeDepth,
                 ancestors.len() as u64,
-                u64::from(self.resolver.document().limits().max_page_tree_depth),
+                self.maximum_depth(),
             )?;
+            self.depth_warning(ancestors.len() as u64);
             let ancestor = match self.repair_get(parent) {
                 Ok(ancestor) if ancestor.dict().is_some() => ancestor,
                 Err(error) if crate::repair::is_hard_error(&error) => return Err(error),
@@ -291,16 +311,26 @@ impl<'r, 'd> PageWalk<'r, 'd> {
                 Err(_) => continue,
             };
             let Some(dict) = object.dict() else { continue; };
-            let Some(kind) = dict.get(b"Type") else { continue; };
-            let kind = match self.resolver.resolve(kind) {
-                Ok(kind) => kind,
-                Err(error) if crate::repair::is_hard_error(&error) => {
-                    self.finished = true;
-                    return Some(Err(error));
+            if let Some(kind) = dict.get(b"Type") {
+                let kind = match self.resolver.resolve(kind) {
+                    Ok(kind) => kind,
+                    Err(error) if crate::repair::is_hard_error(&error) => {
+                        self.finished = true;
+                        return Some(Err(error));
+                    }
+                    Err(_) => continue,
+                };
+                if !kind.get().as_name().is_some_and(|name| name.eq_bytes(b"Page")) { continue; }
+            } else {
+                // An orphan with a damaged Type still needs a page-shaped spine.
+                if dict.get(b"Kids").is_some() || dict.get(b"Subtype").is_some()
+                    || dict.get(b"Parent").and_then(|value| value.as_ref()).is_none()
+                    || dict.get(b"Contents").is_none()
+                {
+                    continue;
                 }
-                Err(_) => continue,
-            };
-            if !kind.get().as_name().is_some_and(|name| name.eq_bytes(b"Page")) { continue; }
+                self.push_warning(Some(id), "page_tree_type_recovered");
+            }
             self.insert_visited(id);
             let requested = self.page_count.saturating_add(1);
             if let Err(error) = check(
@@ -526,7 +556,8 @@ impl PageWalk<'_, '_> {
                 continue;
             }
 
-            let maximum_depth = u64::from(self.resolver.document().limits().max_page_tree_depth);
+            let maximum_depth = self.maximum_depth();
+            self.depth_warning(pending.depth);
             if pending.depth > maximum_depth {
                 self.finished = true;
                 return Some(Err(DocError::Refused(Refusal {

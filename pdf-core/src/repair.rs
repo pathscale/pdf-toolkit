@@ -310,6 +310,13 @@ fn scan(source: &PdfSource, limits: &Limits) -> Result<Scan, DocError> {
                 if catalog_candidate(&object) {
                     catalogs.push(CatalogCandidate { offset, order: 0, id });
                 }
+                if object.syntax_recovered() {
+                    warnings.push(Warning {
+                        offset: Some(object.root().span().start as u64),
+                        object: Some(id),
+                        what: "object_syntax_recovered",
+                    });
+                }
                 if object.tail_recovered() {
                     warnings.push(Warning {
                         offset: Some(object.root().span().end as u64),
@@ -594,4 +601,3 @@ pub(crate) fn is_hard_error(error: &DocError) -> bool {
         | DocError::Filter(crate::filter::FilterError::Refused(_))
         | DocError::Filter(crate::filter::FilterError::OutputLimit { .. }))
 }
-

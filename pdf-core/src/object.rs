@@ -51,6 +51,7 @@ struct ObjectData {
     syntax_bytes: u64,
     token_count: u32,
     recovered: bool,
+    syntax_recovered: bool,
     strings_plain: bool,
 }
 
@@ -100,6 +101,7 @@ impl Object {
     pub fn token_count(&self) -> u32 { self.0.token_count }
     pub(crate) fn stream_recovered(&self) -> bool { self.0.recovered && self.is_stream() }
     pub(crate) fn tail_recovered(&self) -> bool { self.0.recovered && !self.is_stream() }
+    pub(crate) fn syntax_recovered(&self) -> bool { self.0.syntax_recovered }
 
     pub(crate) fn finish_stream(
         &mut self,
@@ -414,6 +416,7 @@ pub fn parse_value(
         syntax_bytes: cursor.used() as u64,
         token_count: cursor.count,
         recovered: false,
+        syntax_recovered: cursor.recovered,
         strings_plain: true,
     })))
 }
@@ -470,6 +473,7 @@ fn parse_indirect_pending_with_mode(
     repair: bool,
 ) -> Result<Object, DocError> {
     let mut cursor = Cursor::at(buf, offset..buf.len(), limits)?;
+    cursor.repair = repair;
     let first = cursor.required()?;
     let second = cursor.required()?;
     let marker = cursor.required()?;
@@ -525,6 +529,7 @@ fn parse_indirect_pending_with_mode(
         syntax_bytes,
         token_count: cursor.count,
         recovered: repaired_tail.is_some(),
+        syntax_recovered: cursor.recovered,
         strings_plain: false,
     }));
     if object.dict().and_then(|dict| dict.get(b"Type"))
@@ -563,7 +568,16 @@ fn graph(cursor: &mut Cursor<'_>, limits: &Limits) -> Result<(Vec<Node>, usize),
         let token = cursor.required()?;
         let span = cursor.span(token);
         if matches!(frames.last(), Some(Frame::Dict { key: None, .. })) && token.kind() != TokenKind::DictionaryEnd {
-            if token.kind() != TokenKind::Name { return Err(malformed(span.start, "dictionary key")); }
+            if token.kind() != TokenKind::Name {
+                if !cursor.repair || object_marker(token.bytes()) {
+                    return Err(malformed(span.start, "dictionary key"));
+                }
+                if matches!(token.kind(), TokenKind::ArrayStart | TokenKind::DictionaryStart) {
+                    skip_container(cursor, token.kind(), frames.len(), limits)?;
+                }
+                cursor.recovered = true;
+                continue;
+            }
             if let Some(Frame::Dict { key, .. }) = frames.last_mut() {
                 *key = Some(span.start.saturating_add(1)..span.end);
             }
@@ -584,6 +598,14 @@ fn graph(cursor: &mut Cursor<'_>, limits: &Limits) -> Result<(Vec<Node>, usize),
                 let (start, kind) = match frame {
                     Frame::Array { start, items } if token.kind() == TokenKind::ArrayEnd => (start, Kind::Array(items)),
                     Frame::Dict { start, entries, key: None } if token.kind() == TokenKind::DictionaryEnd => (start, Kind::Dict(entries)),
+                    Frame::Dict { start, mut entries, key: Some(key) }
+                        if cursor.repair && token.kind() == TokenKind::DictionaryEnd => {
+                        let index = nodes.len();
+                        nodes.push(Node { span: span.start..span.start, kind: Kind::Null });
+                        entries.push((key, index));
+                        cursor.recovered = true;
+                        (start, Kind::Dict(entries))
+                    }
                     _ => return Err(malformed(span.start, "container end")),
                 };
                 attach(Node { span: start..span.end, kind }, &mut nodes, &mut frames, &mut root)?;
@@ -611,6 +633,35 @@ fn graph(cursor: &mut Cursor<'_>, limits: &Limits) -> Result<(Vec<Node>, usize),
                     attach(Node { span: span.start..end, kind: Kind::Ref(ObjectRef::new(number, generation)) }, &mut nodes, &mut frames, &mut root)?;
                     continue;
                 }
+                if cursor.repair && matches!(frames.last(), Some(Frame::Dict { key: Some(_), .. })) {
+                    let number = unsigned(token.bytes()).and_then(|n| u32::try_from(n).ok());
+                    if let Some(number) = number.filter(|number| *number != 0) {
+                        let mut probe = cursor.clone();
+                        if let Some(second) = probe.next()? {
+                            let candidate = if second.bytes() == b"R" {
+                                Some((ObjectRef::new(number, 0), probe))
+                            } else if second.kind() == TokenKind::Number {
+                                let generation = unsigned(second.bytes()).and_then(|n| u16::try_from(n).ok());
+                                let after_second = probe.clone();
+                                match probe.next()? {
+                                    Some(marker) if matches!(marker.kind(), TokenKind::Name | TokenKind::DictionaryEnd) => {
+                                        generation.map(|generation| (ObjectRef::new(number, generation), after_second))
+                                    }
+                                    _ => None,
+                                }
+                            } else {
+                                None
+                            };
+                            if let Some((id, mut probe)) = candidate {
+                                let end = probe.position();
+                                probe.recovered = true;
+                                *cursor = probe;
+                                attach(Node { span: span.start..end, kind: Kind::Ref(id) }, &mut nodes, &mut frames, &mut root)?;
+                                continue;
+                            }
+                        }
+                    }
+                }
                 number_kind(token.bytes())
             }
             TokenKind::Keyword => match token.bytes() {
@@ -618,11 +669,53 @@ fn graph(cursor: &mut Cursor<'_>, limits: &Limits) -> Result<(Vec<Node>, usize),
                 b"false" => Kind::Bool(false),
                 b"null" => Kind::Null,
                 bytes if matches!(bytes.first(), Some(b'+' | b'-' | b'.' | b'0'..=b'9')) => Kind::Null,
+                bytes if cursor.repair && !object_marker(bytes) => {
+                    cursor.recovered = true;
+                    Kind::Null
+                }
                 _ => return Err(malformed(span.start, "value")),
             },
         };
         attach(Node { span, kind }, &mut nodes, &mut frames, &mut root)?;
     }
+}
+
+fn object_marker(bytes: &[u8]) -> bool {
+    matches!(bytes, b"obj" | b"endobj" | b"stream" | b"endstream" | b"xref" | b"trailer" | b"startxref")
+}
+
+fn skip_container(
+    cursor: &mut Cursor<'_>,
+    first: TokenKind,
+    outer_depth: usize,
+    limits: &Limits,
+) -> Result<(), DocError> {
+    let mut stack = Vec::new();
+    stack.push(first);
+    check(LimitKind::Depth, outer_depth.saturating_add(1) as u64, u64::from(limits.max_depth))?;
+    while let Some(open) = stack.last().copied() {
+        let token = cursor.required()?;
+        match token.kind() {
+            TokenKind::ArrayStart | TokenKind::DictionaryStart => {
+                check(
+                    LimitKind::Depth,
+                    outer_depth.saturating_add(stack.len()).saturating_add(1) as u64,
+                    u64::from(limits.max_depth),
+                )?;
+                stack.push(token.kind());
+            }
+            TokenKind::ArrayEnd if open == TokenKind::ArrayStart => { stack.pop(); }
+            TokenKind::DictionaryEnd if open == TokenKind::DictionaryStart => { stack.pop(); }
+            TokenKind::ArrayEnd | TokenKind::DictionaryEnd => {
+                return Err(malformed(cursor.span(token).start, "container end"));
+            }
+            _ if object_marker(token.bytes()) => {
+                return Err(malformed(cursor.span(token).start, "container end"));
+            }
+            _ => {}
+        }
+    }
+    Ok(())
 }
 
 fn attach(
@@ -679,6 +772,8 @@ pub(crate) struct Cursor<'a> {
     count: u32,
     limits: Limits,
     cut: bool,
+    repair: bool,
+    recovered: bool,
 }
 
 impl<'a> Cursor<'a> {
@@ -699,6 +794,8 @@ impl<'a> Cursor<'a> {
             count: 0,
             limits: *limits,
             cut: cap < range.end,
+            repair: false,
+            recovered: false,
         })
     }
     pub(crate) fn position(&self) -> usize { self.base.saturating_add(self.lexer.offset()) }
