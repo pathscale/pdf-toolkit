@@ -18,6 +18,8 @@ pub enum BlockKind {
     Caption,
 }
 
+/// `bbox` is display space (see PositionedGlyph); `glyphs` indexes PageLayout::order,
+/// whose entries index PageText::glyphs.
 #[derive(Clone, Debug)]
 pub struct Line {
     pub bbox: [f32; 4],

@@ -24,7 +24,10 @@ pub mod images;
 pub mod annots;
 
 pub use font::{Font, FontFlags, FontKind, Glyph, GlyphText};
-pub use interp::{page_text, FontInfo, ImageInfo, PageText, PositionedGlyph};
+pub use interp::{
+    display_transform, page_text, user_space_rect, user_space_transform, FontInfo, ImageInfo,
+    PageText, PositionedGlyph,
+};
 pub use layout::{layout, Block, BlockKind, Line, PageLayout};
 pub use extract::{extract_text, TextExtraction};
 
