@@ -1005,7 +1005,7 @@ fn run_semantic(path: &Path, limits: Limits, repair: bool) -> u8 {
             }
         };
         let mut json = JsonWriter::new();
-        match pdf_text::semantic::semantic_document(source, limits) {
+        match pdf_text::semantic::semantic_document_with(source, limits, pdf_core::OpenMode::Repair) {
             Ok(document) => write_semantic_document(&mut json, &document),
             Err(_) => write_repaired_semantic_document(&mut json, &repaired),
         }
@@ -2288,7 +2288,14 @@ fn run_mutated(bytes: Vec<u8>, limits: Limits) -> MutateCaseReport {
             &mut report.panicked,
         );
         match strict_result {
-            FuzzStageOutcome::Success(opened) => document = Some(opened),
+            // Later stages see what a robust consumer gets: the repair-mode document, whose
+            // page walk rebuilds a broken page tree even when the xref opened strictly.
+            FuzzStageOutcome::Success(opened) => {
+                document = Some(
+                    Document::open_with(source.clone(), limits, pdf_core::OpenMode::Repair)
+                        .unwrap_or(opened),
+                );
+            }
             FuzzStageOutcome::Refused(_) | FuzzStageOutcome::Panicked => {
                 let repair_result = run_fuzz_stage(&mut report.stages.repair_open, || {
                     Document::open_with(
@@ -2371,7 +2378,7 @@ fn run_mutated(bytes: Vec<u8>, limits: Limits) -> MutateCaseReport {
     let mut semantic = None;
     if let Some(source) = source.as_ref() {
         let semantic_result = run_fuzz_stage(&mut report.stages.semantic_document, || {
-            pdf_text::semantic::semantic_document(source.clone(), limits)
+            pdf_text::semantic::semantic_document_with(source.clone(), limits, pdf_core::OpenMode::Repair)
                 .map_err(|error| error.code().to_string())
         });
         remember_fuzz_outcome(
