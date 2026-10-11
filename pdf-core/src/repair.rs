@@ -5,7 +5,7 @@ use alloc::vec::Vec;
 use crate::document::{Document, Resolver};
 use crate::error::{malformed, DocError, Warning};
 use crate::limits::{check, LimitKind, Limits};
-use crate::object::{keyword_at, parse_indirect, parse_value, whitespace, Object};
+use crate::object::{keyword_at, parse_indirect_repair, parse_value, whitespace, Object};
 use crate::objstm::ObjectStream;
 use crate::source::PdfSource;
 use crate::work::ObjectRef;
@@ -290,7 +290,7 @@ fn scan(source: &PdfSource, limits: &Limits) -> Result<Scan, DocError> {
             continue;
         }
         insert_in_use(&mut entries, id, offset, limits)?;
-        match parse_indirect(&shared, offset, id, limits) {
+        match parse_indirect_repair(&shared, offset, id, limits) {
             Ok(object) => {
                 if has_type(&object, b"XRef")
                     || (object.is_stream()
@@ -309,6 +309,13 @@ fn scan(source: &PdfSource, limits: &Limits) -> Result<Scan, DocError> {
                 }
                 if catalog_candidate(&object) {
                     catalogs.push(CatalogCandidate { offset, order: 0, id });
+                }
+                if object.tail_recovered() {
+                    warnings.push(Warning {
+                        offset: Some(object.root().span().end as u64),
+                        object: Some(id),
+                        what: "object_tail_recovered",
+                    });
                 }
                 if object.stream_recovered() {
                     warnings.push(Warning {

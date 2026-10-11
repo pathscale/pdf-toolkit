@@ -5,7 +5,7 @@ use crate::crypt::Crypt;
 use crate::error::{malformed, DocError, Warning};
 use crate::filter::{DecodeParams, Decoded, FilterKind, FilterStep};
 use crate::limits::{check, LimitKind, Limits, Refusal};
-use crate::object::{parse_indirect_pending, DictRef, Object, PdfStr, Value, ValueRef};
+use crate::object::{parse_indirect_pending, parse_indirect_pending_repair, DictRef, Object, PdfStr, Value, ValueRef};
 use crate::objstm::ObjectStream;
 use crate::source::PdfSource;
 use crate::work::ObjectRef;
@@ -193,6 +193,9 @@ impl Document {
     pub fn repaired(&self) -> bool {
         self.repaired
     }
+    pub(crate) fn repair_mode(&self) -> bool {
+        self.repair_mode
+    }
     pub fn repaired_counts(&self) -> Option<XrefCounts> {
         if self.repaired {
             Some(self.xref.counts())
@@ -271,7 +274,12 @@ impl<'d> Resolver<'d> {
                         Some(XrefEntry::InUse { offset, generation }) => {
                             let offset =
                                 usize::try_from(offset).map_err(|_| malformed(0, "object offset"))?;
-                            let mut object = parse_indirect_pending(
+                            let parse = if self.document.repair_mode {
+                                parse_indirect_pending_repair
+                            } else {
+                                parse_indirect_pending
+                            };
+                            let mut object = parse(
                                 &self.document.source.shared(),
                                 offset,
                                 id,
@@ -306,7 +314,11 @@ impl<'d> Resolver<'d> {
                                         .and_then(|n| u64::try_from(n).ok()),
                                     None => None,
                                 };
-                                object.finish_stream(resolved, &self.document.limits)?;
+                                if self.document.repair_mode {
+                                    object.finish_stream_repair(resolved, &self.document.limits)?;
+                                } else {
+                                    object.finish_stream(resolved, &self.document.limits)?;
+                                }
                             }
                             self.record_recovery(&object);
                             active.pop();
@@ -393,6 +405,13 @@ impl<'d> Resolver<'d> {
     }
 
     fn record_recovery(&mut self, object: &Object) {
+        if object.tail_recovered() {
+            self.warn(Warning {
+                offset: Some(object.root().span().end as u64),
+                object: object.id(),
+                what: "object_tail_recovered",
+            });
+        }
         if object.stream_recovered() {
             self.warn(Warning {
                 offset: object.stream_range().map(|range| range.start as u64),

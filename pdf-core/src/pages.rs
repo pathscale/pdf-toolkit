@@ -3,8 +3,8 @@ use core::convert::TryFrom;
 
 use crate::document::Resolver;
 use crate::error::{DocError, Warning};
-use crate::limits::{LimitKind, Refusal};
-use crate::object::{DictRef, Value, ValueRef};
+use crate::limits::{check, LimitKind, Refusal};
+use crate::object::{DictRef, Object, Value, ValueRef};
 use crate::work::ObjectRef;
 
 const DEFAULT_MEDIA_BOX: [f64; 4] = [0.0, 0.0, 612.0, 792.0];
@@ -30,6 +30,11 @@ pub struct PageWalk<'r, 'd> {
     page_count: u64,
     warnings: Vec<Warning>,
     finished: bool,
+    tree_damaged: bool,
+    repair_scan: Option<u32>,
+    repair_error: Option<DocError>,
+    repair_streams: Vec<u32>,
+    repair_decoded: u64,
 }
 
 struct PendingNode {
@@ -74,35 +79,51 @@ enum NodeKind {
 
 impl<'r, 'd> PageWalk<'r, 'd> {
     pub fn new(resolver: &'r mut Resolver<'d>) -> Result<Self, DocError> {
-        let catalog_id = resolver
-            .document()
-            .root_ref()
-            .ok_or_else(|| malformed(0, "catalog"))?;
-        let catalog = resolver
-            .get(catalog_id)
-            .map_err(|error| map_missing(error, "catalog"))?;
-        let catalog_dict = catalog
-            .dict()
-            .ok_or_else(|| malformed(0, "catalog"))?;
-        let pages_id = catalog_dict
-            .get(b"Pages")
-            .and_then(|value| value.as_ref())
-            .ok_or_else(|| malformed(0, "pages"))?;
-
-        Ok(Self {
-            resolver,
-            root: Some(PendingNode {
+        let root = (|| {
+            let catalog_id = resolver
+                .document()
+                .root_ref()
+                .ok_or_else(|| malformed(0, "catalog"))?;
+            let catalog = resolver
+                .get(catalog_id)
+                .map_err(|error| map_missing(error, "catalog"))?;
+            let catalog_dict = catalog
+                .dict()
+                .ok_or_else(|| malformed(0, "catalog"))?;
+            let pages_id = catalog_dict
+                .get(b"Pages")
+                .and_then(|value| value.as_ref())
+                .ok_or_else(|| malformed(0, "pages"))?;
+            Ok(PendingNode {
                 id: pages_id,
                 depth: 0,
                 inherited: Inherited::default(),
                 is_root: true,
-            }),
+            })
+        })();
+        let (root, repair_error) = match root {
+            Ok(root) => (Some(root), None),
+            Err(error) if resolver.document().repair_mode()
+                && !crate::repair::is_hard_error(&error) => (None, Some(error)),
+            Err(error) => return Err(error),
+        };
+        let scan = repair_error.is_some();
+        let mut walk = Self {
+            resolver,
+            root,
             stack: Vec::new(),
             visited: Vec::new(),
             page_count: 0,
             warnings: Vec::new(),
             finished: false,
-        })
+            tree_damaged: scan,
+            repair_scan: None,
+            repair_error,
+            repair_streams: Vec::new(),
+            repair_decoded: 0,
+        };
+        if scan { walk.start_repair_scan(); }
+        Ok(walk)
     }
 
     pub fn take_warnings(&mut self) -> Vec<Warning> {
@@ -160,7 +181,144 @@ impl<'r, 'd> PageWalk<'r, 'd> {
     }
 
     fn push_warning(&mut self, object: Option<ObjectRef>, what: &'static str) {
+        if matches!(what, "page_tree_bad_kid" | "page_tree_cycle") {
+            self.tree_damaged = true;
+        }
         append_warning(&mut self.warnings, object, what);
+    }
+
+    fn start_repair_scan(&mut self) {
+        self.root = None;
+        self.stack.clear();
+        self.finished = false;
+        self.repair_scan = Some(1);
+        self.push_warning(None, "page_list_rebuilt");
+    }
+
+    fn repair_get(&mut self, id: ObjectRef) -> Result<Object, DocError> {
+        let object = self.resolver.get(id)?;
+        if let Some(crate::document::XrefEntry::Compressed { stream, .. }) =
+            self.resolver.document().xref().get(id.number())
+        {
+            if !self.repair_streams.contains(&stream) {
+                self.repair_decoded = self.repair_decoded.saturating_add(object.buffer().len() as u64);
+                check(
+                    LimitKind::TotalDecodedBytes, self.repair_decoded,
+                    self.resolver.document().limits().max_total_decoded_bytes,
+                )?;
+                self.repair_streams.push(stream);
+            }
+        }
+        Ok(object)
+    }
+
+    fn repair_inherited(&mut self, object: &Object, id: ObjectRef) -> Result<Inherited, DocError> {
+        let mut ancestors = Vec::new();
+        let mut seen = Vec::new();
+        ancestors.push(object.clone());
+        seen.push(id);
+        loop {
+            let parent = ancestors.last().and_then(|object| object.dict())
+                .and_then(|dict| dict.get(b"Parent")).and_then(|value| value.as_ref());
+            let Some(parent) = parent else { break; };
+            if seen.contains(&parent) {
+                self.push_warning(Some(parent), "page_tree_cycle");
+                break;
+            }
+            check(
+                LimitKind::PageTreeDepth,
+                ancestors.len() as u64,
+                u64::from(self.resolver.document().limits().max_page_tree_depth),
+            )?;
+            let ancestor = match self.repair_get(parent) {
+                Ok(ancestor) if ancestor.dict().is_some() => ancestor,
+                Err(error) if crate::repair::is_hard_error(&error) => return Err(error),
+                _ => {
+                    self.push_warning(Some(parent), "repair_page_parent_unresolved");
+                    break;
+                }
+            };
+            seen.push(parent);
+            ancestors.push(ancestor);
+        }
+        let mut inherited = Inherited::default();
+        for ancestor in ancestors.iter().rev() {
+            if let Some(dict) = ancestor.dict() {
+                inherited = inherit_attrs(
+                    self.resolver, dict, inherited, ancestor.id().unwrap_or(id), &mut self.warnings,
+                );
+            }
+        }
+        Ok(inherited)
+    }
+
+    fn scan_step(&mut self) -> Option<Result<Page, DocError>> {
+        if self.finished { return None; }
+        let size = self.resolver.document().xref().size();
+        if let Err(error) = check(
+            LimitKind::Objects, u64::from(size),
+            u64::from(self.resolver.document().limits().max_objects),
+        ) {
+            self.finished = true;
+            return Some(Err(error));
+        }
+        while let Some(number) = self.repair_scan.filter(|number| *number < size) {
+            self.repair_scan = Some(number.saturating_add(1));
+            let generation = match self.resolver.document().xref().get(number) {
+                Some(crate::document::XrefEntry::InUse { generation, .. }) => generation,
+                Some(crate::document::XrefEntry::Compressed { .. }) => 0,
+                _ => continue,
+            };
+            let id = ObjectRef::new(number, generation);
+            if self.visited.binary_search_by(|candidate| compare_refs(*candidate, id)).is_ok() {
+                continue;
+            }
+            let object = match self.repair_get(id) {
+                Ok(object) => object,
+                Err(error) if crate::repair::is_hard_error(&error) => {
+                    self.finished = true;
+                    return Some(Err(error));
+                }
+                Err(_) => continue,
+            };
+            let Some(dict) = object.dict() else { continue; };
+            let Some(kind) = dict.get(b"Type") else { continue; };
+            let kind = match self.resolver.resolve(kind) {
+                Ok(kind) => kind,
+                Err(error) if crate::repair::is_hard_error(&error) => {
+                    self.finished = true;
+                    return Some(Err(error));
+                }
+                Err(_) => continue,
+            };
+            if !kind.get().as_name().is_some_and(|name| name.eq_bytes(b"Page")) { continue; }
+            self.insert_visited(id);
+            let requested = self.page_count.saturating_add(1);
+            if let Err(error) = check(
+                LimitKind::Pages, requested,
+                u64::from(self.resolver.document().limits().max_pages),
+            ) {
+                self.finished = true;
+                return Some(Err(error));
+            }
+            let inherited = match self.repair_inherited(&object, id) {
+                Ok(inherited) => inherited,
+                Err(error) => {
+                    self.finished = true;
+                    return Some(Err(error));
+                }
+            };
+            let index = u32::try_from(self.page_count).unwrap_or(u32::MAX);
+            self.page_count = requested;
+            self.push_warning(Some(id), "page_recovered");
+            return Some(self.build_page(id, index, inherited, dict));
+        }
+        self.finished = true;
+        if self.page_count == 0 {
+            self.repair_error.take().map(Err)
+        } else {
+            None
+        }
     }
 
     fn build_page(
@@ -237,6 +395,24 @@ impl Iterator for PageWalk<'_, '_> {
 
 impl PageWalk<'_, '_> {
     fn step(&mut self) -> Option<Result<Page, DocError>> {
+        if self.repair_scan.is_some() { return self.scan_step(); }
+        let item = self.tree_step();
+        if !self.resolver.document().repair_mode() { return item; }
+        match item {
+            Some(Err(error)) if self.finished && !crate::repair::is_hard_error(&error) => {
+                self.repair_error = Some(error);
+                self.start_repair_scan();
+                self.scan_step()
+            }
+            None if !self.finished && (self.tree_damaged || self.page_count == 0) => {
+                self.start_repair_scan();
+                self.scan_step()
+            }
+            item => item,
+        }
+    }
+
+    fn tree_step(&mut self) -> Option<Result<Page, DocError>> {
         if self.finished {
             return None;
         }
@@ -282,6 +458,13 @@ impl PageWalk<'_, '_> {
                     self.finished = true;
                     return Some(Err(map_missing(error, "pages")));
                 }
+                // Repair can omit an unreadable kid and recover other leaves.
+                // Keep its error if no page can be recovered at all.
+                Err(error @ DocError::Malformed { .. }) if self.resolver.document().repair_mode() => {
+                    if self.repair_error.is_none() { self.repair_error = Some(error); }
+                    self.push_warning(Some(pending.id), "page_tree_bad_kid");
+                    continue;
+                }
                 // A kid that exists but cannot be parsed (limit or malformed) is a
                 // page error the caller can count; a dangling ref is only a warning.
                 Err(error @ (DocError::Refused(_) | DocError::Malformed { .. })) => {
@@ -308,6 +491,11 @@ impl PageWalk<'_, '_> {
             let kind = match classify_node(self.resolver, dict) {
                 Ok(kind) => kind,
                 Err(error) if pending.is_root => {
+                    self.finished = true;
+                    return Some(Err(error));
+                }
+                Err(error) if self.resolver.document().repair_mode()
+                    && crate::repair::is_hard_error(&error) => {
                     self.finished = true;
                     return Some(Err(error));
                 }
@@ -338,10 +526,17 @@ impl PageWalk<'_, '_> {
                                     depth: pending.depth,
                                 });
                             }
+                            Err(error) if self.resolver.document().repair_mode()
+                                && crate::repair::is_hard_error(&error) => {
+                                self.finished = true;
+                                return Some(Err(error));
+                            }
                             Ok(_) | Err(_) => {
                                 self.push_warning(Some(pending.id), "page_tree_bad_kid");
                             }
                         }
+                    } else if self.resolver.document().repair_mode() {
+                        self.push_warning(Some(pending.id), "page_tree_bad_kid");
                     }
                 }
                 NodeKind::Leaf => {
@@ -369,6 +564,32 @@ impl PageWalk<'_, '_> {
 }
 
 pub fn page_count_hint(resolver: &mut Resolver<'_>) -> Result<u32, DocError> {
+    if !resolver.document().repair_mode() { return page_count_hint_strict(resolver); }
+    let declared = match page_count_hint_strict(resolver) {
+        Ok(count) => Some(count),
+        Err(error) if crate::repair::is_hard_error(&error) => return Err(error),
+        Err(_) => None,
+    };
+    let count = {
+        let mut walk = PageWalk::new(resolver)?;
+        while let Some(page) = walk.next() {
+            if let Err(error) = page {
+                if crate::repair::is_hard_error(&error) || walk.page_count == 0 { return Err(error); }
+            }
+        }
+        u32::try_from(walk.page_count).unwrap_or(u32::MAX)
+    };
+    if declared != Some(count) {
+        resolver.warn(Warning {
+            offset: None,
+            object: resolver.document().root_ref(),
+            what: "page_count_recovered",
+        });
+    }
+    Ok(count)
+}
+
+fn page_count_hint_strict(resolver: &mut Resolver<'_>) -> Result<u32, DocError> {
     let catalog_id = resolver
         .document()
         .root_ref()
@@ -410,22 +631,47 @@ fn classify_node(
     dict: DictRef<'_>,
 ) -> Result<NodeKind, DocError> {
     if let Some(type_ref) = dict.get(b"Type") {
-        let type_value = resolver.resolve(type_ref)?;
-        let value = type_value.get();
-        let Some(name) = value.as_name() else {
-            return Err(malformed_at(value, "page_tree_type"));
+        let resolved = resolver.resolve(type_ref);
+        match &resolved {
+            Ok(value) if value.get().as_name().is_some_and(|name| name.eq_bytes(b"Pages")) => {
+                return Ok(NodeKind::Interior);
+            }
+            Ok(value) if value.get().as_name().is_some_and(|name| name.eq_bytes(b"Page")) => {
+                return Ok(NodeKind::Leaf);
+            }
+            _ => {}
+        }
+        if resolver.document().repair_mode() {
+            if let Err(error) = &resolved {
+                if crate::repair::is_hard_error(error) { return Err(error.clone()); }
+            }
+            let kind = if dict.get(b"Kids").is_some() || dict.get(b"Count").is_some() {
+                Some(NodeKind::Interior)
+            } else if dict.get(b"Parent").and_then(|value| value.as_ref()).is_some()
+                && (dict.get(b"Contents").is_some() || dict.get(b"MediaBox").is_some())
+            {
+                Some(NodeKind::Leaf)
+            } else {
+                None
+            };
+            if let Some(kind) = kind {
+                resolver.warn(Warning {
+                    offset: Some(type_ref.span().start as u64),
+                    object: None,
+                    what: "page_tree_type_recovered",
+                });
+                return Ok(kind);
+            }
+        }
+        return match resolved {
+            Ok(value) => Err(malformed_at(value.get(), "page_tree_type")),
+            Err(error) => Err(error),
         };
-
-        if name.eq_bytes(b"Pages") {
-            return Ok(NodeKind::Interior);
-        }
-        if name.eq_bytes(b"Page") {
-            return Ok(NodeKind::Leaf);
-        }
-        return Err(malformed_at(value, "page_tree_type"));
     }
 
-    if dict.get(b"Kids").is_some() {
+    if dict.get(b"Kids").is_some()
+        || (resolver.document().repair_mode() && dict.get(b"Count").is_some())
+    {
         Ok(NodeKind::Interior)
     } else {
         Ok(NodeKind::Leaf)
