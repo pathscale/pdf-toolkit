@@ -20,6 +20,8 @@ mod annotations;
 mod import;
 mod pages;
 mod section;
+#[cfg(feature = "sign")]
+pub mod sign;
 mod value;
 
 use import::StreamData;
