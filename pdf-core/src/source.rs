@@ -11,9 +11,17 @@ const HEADER_SEARCH_LIMIT: usize = 1024;
 pub struct PdfHeader {
     offset: usize,
     version: PdfVersion,
+    recovered: bool,
 }
 
 impl PdfHeader {
+    /// True when no well-formed `%PDF-d.d` header was found and the header was inferred
+    /// (a damaged version, a bare `%PDF` marker, or objects with no marker at all).
+    /// Strict opens refuse such a source; repair opens accept it with a warning.
+    pub const fn recovered(self) -> bool {
+        self.recovered
+    }
+
     /// Returns the byte offset where the header begins.
     pub const fn offset(self) -> usize {
         self.offset
@@ -210,40 +218,60 @@ impl<'source> RawSpan<'source> {
     }
 }
 
+/// Version assumed when the header had to be inferred.
+const RECOVERED_VERSION: PdfVersion = PdfVersion::new(1, 4);
+/// How far an object header is looked for when no `%PDF` marker exists at all.
+const OBJECT_SEARCH_LIMIT: usize = 64 * 1024;
+
 fn parse_header(bytes: &[u8]) -> Result<PdfHeader, SourceError> {
     let search_len = bytes
         .len()
         .min(HEADER_SEARCH_LIMIT + HEADER_PREFIX.len() - 1);
-    let header_offset = bytes[..search_len]
-        .windows(HEADER_PREFIX.len())
-        .position(|window| window == HEADER_PREFIX);
-
-    let Some(offset) = header_offset else {
-        if bytes.len() < HEADER_LENGTH {
-            return Err(SourceError::TruncatedHeader {
-                offset: 0,
-                available: bytes.len(),
-            });
-        }
-        return Err(SourceError::MissingHeader);
+    let window = &bytes[..search_len];
+    let well_formed = |offset: usize| {
+        bytes.len() - offset >= HEADER_LENGTH
+            && bytes[offset + 5].is_ascii_digit()
+            && bytes[offset + 6] == b'.'
+            && bytes[offset + 7].is_ascii_digit()
     };
+    let mut candidates = window
+        .windows(HEADER_PREFIX.len())
+        .enumerate()
+        .filter(|(_, candidate)| *candidate == HEADER_PREFIX)
+        .map(|(offset, _)| offset);
+    let first = candidates.next();
 
-    let available = bytes.len() - offset;
-    if available < HEADER_LENGTH {
-        return Err(SourceError::TruncatedHeader { offset, available });
+    // The first well-formed `%PDF-d.d` wins, so `%P%PDF-1%PDF-1.4` still reads as 1.4.
+    if let Some(offset) = first.into_iter().chain(candidates).find(|&offset| well_formed(offset)) {
+        return Ok(PdfHeader {
+            offset,
+            version: PdfVersion::new(bytes[offset + 5] - b'0', bytes[offset + 7] - b'0'),
+            recovered: false,
+        });
     }
 
-    let major = bytes[offset + 5];
-    let separator = bytes[offset + 6];
-    let minor = bytes[offset + 7];
-    if !major.is_ascii_digit() || separator != b'.' || !minor.is_ascii_digit() {
-        return Err(SourceError::InvalidHeaderVersion { offset });
+    let recovered = |offset| Ok(PdfHeader { offset, version: RECOVERED_VERSION, recovered: true });
+    if let Some(offset) = first {
+        let available = bytes.len() - offset;
+        if available < HEADER_LENGTH {
+            return Err(SourceError::TruncatedHeader { offset, available });
+        }
+        // `%PDF-.2` and similar: a marker with a damaged version.
+        return recovered(offset);
     }
-
-    Ok(PdfHeader {
-        offset,
-        version: PdfVersion::new(major - b'0', minor - b'0'),
-    })
+    // A bare `%PDF` marker without the dash.
+    if let Some(offset) = window.windows(4).position(|candidate| candidate == b"%PDF") {
+        return recovered(offset);
+    }
+    if bytes.len() < HEADER_LENGTH {
+        return Err(SourceError::TruncatedHeader { offset: 0, available: bytes.len() });
+    }
+    // No marker at all: still a PDF body if an object header appears early on.
+    let body = &bytes[..bytes.len().min(OBJECT_SEARCH_LIMIT)];
+    if body.windows(4).any(|candidate| candidate == b" obj") {
+        return recovered(0);
+    }
+    Err(SourceError::MissingHeader)
 }
 
 pub(crate) fn sha256(bytes: &[u8]) -> SourceDigest {

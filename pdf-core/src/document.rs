@@ -42,6 +42,10 @@ impl Document {
         limits: Limits,
         mode: OpenMode,
     ) -> Result<Document, DocError> {
+        let header_recovered = source.header().recovered();
+        if header_recovered && mode != OpenMode::Repair {
+            return Err(malformed(source.header().offset(), "header"));
+        }
         let mut document = match crate::xref::read(&source, &limits) {
             Ok((xref, trailer, warnings)) => {
                 Ok(Self::from_parts(source, xref, trailer, limits, warnings, None, false))
@@ -84,6 +88,13 @@ impl Document {
                     what: "repair_incomplete",
                 }),
             }
+        }
+        if header_recovered {
+            document.warnings.push(Warning {
+                offset: Some(document.source.header().offset() as u64),
+                object: None,
+                what: "header_recovered",
+            });
         }
         document.initialize_crypt()?;
         Ok(document)
