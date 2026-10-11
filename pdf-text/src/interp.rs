@@ -12,6 +12,8 @@ use crate::content::{
 use crate::data::encodings::{PDF_DOC, WIN_ANSI};
 use crate::font::{Font, FontCache, FontFlags, FontKind, Glyph, GlyphText};
 
+/// Coordinates are display space: origin at the top left of the rotated crop box, y down,
+/// UserUnit applied. `user_space_transform` and `user_space_rect` map them back to PDF user space.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PositionedGlyph {
     pub text: GlyphText,
@@ -1189,6 +1191,41 @@ pub fn display_transform(page: &Page) -> impl Fn(f32, f32) -> (f32, f32) + 'stat
         let [x, y] = matrix.point(f64::from(x), f64::from(y));
         (finite_f32(x).unwrap_or(f32::NAN), finite_f32(y).unwrap_or(f32::NAN))
     }
+}
+
+/// The inverse of display_transform: maps a display-space point (PositionedGlyph, Line
+/// and Block coordinates) back to the page's PDF user space, before UserUnit scaling.
+/// Invalid geometry produces non-finite points, which callers must discard.
+pub fn user_space_transform(page: &Page) -> impl Fn(f32, f32) -> (f32, f32) + 'static {
+    let inverse = display_matrix(page).ok().and_then(|(matrix, _, _)| {
+        let [a, b, c, d, e, f] = matrix.0;
+        let det = a * d - b * c;
+        if det == 0.0 || !det.is_finite() {
+            return None;
+        }
+        Some(Matrix([
+            d / det,
+            -b / det,
+            -c / det,
+            a / det,
+            (c * f - d * e) / det,
+            (b * e - a * f) / det,
+        ]))
+    });
+    move |x, y| {
+        let Some(matrix) = inverse else { return (f32::NAN, f32::NAN) };
+        let [x, y] = matrix.point(f64::from(x), f64::from(y));
+        (finite_f32(x).unwrap_or(f32::NAN), finite_f32(y).unwrap_or(f32::NAN))
+    }
+}
+
+/// A display-space box `[x0, y0, x1, y1]` as the PDF user-space rectangle that covers it,
+/// normalised so x0 <= x1 and y0 <= y1 (y up). Non-finite when the page geometry is invalid.
+pub fn user_space_rect(page: &Page, bbox: [f32; 4]) -> [f32; 4] {
+    let map = user_space_transform(page);
+    let (ax, ay) = map(bbox[0], bbox[1]);
+    let (bx, by) = map(bbox[2], bbox[3]);
+    [ax.min(bx), ay.min(by), ax.max(bx), ay.max(by)]
 }
 
 pub(crate) fn display_dimensions(page: &Page) -> (f32, f32) {
