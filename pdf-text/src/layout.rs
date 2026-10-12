@@ -108,9 +108,46 @@ fn magnitude(value: f32) -> f32 {
     if value < 0.0 { -value } else { value }
 }
 
+// This unsigned key has exactly the order of f32::total_cmp, including
+// signed zero and every NaN bit pattern.
+fn float_key(value: f32) -> u32 {
+    let bits = value.to_bits();
+    if bits & 0x8000_0000 != 0 { !bits } else { bits ^ 0x8000_0000 }
+}
+
+fn key_float(key: u32) -> f32 {
+    let bits = if key & 0x8000_0000 != 0 { key ^ 0x8000_0000 } else { !key };
+    f32::from_bits(bits)
+}
+
+fn coordinate_key(first: f32, second: f32) -> u64 {
+    (u64::from(float_key(first)) << 32) | u64::from(float_key(second))
+}
+
+fn content_key(item: &Item) -> u64 {
+    (u64::from(item.seq) << 32) | u64::from(item.id)
+}
+
+fn sort_content(items: &mut [Item]) {
+    if items.windows(2).any(|pair| {
+        match (pair.first(), pair.get(1)) {
+            (Some(left), Some(right)) => content_key(left) > content_key(right),
+            _ => false,
+        }
+    }) {
+        // IDs are unique within a page, so the packed keys have no ties.
+        items.sort_unstable_by_key(content_key);
+    }
+}
+
 fn median(mut values: Vec<f32>) -> f32 {
-    values.sort_unstable_by(f32::total_cmp);
-    values.get(values.len() / 2).copied().unwrap_or(0.0)
+    if values.is_empty() {
+        return 0.0;
+    }
+    // For a nonempty slice, len / 2 is always a valid selection index.
+    let middle = values.len() / 2;
+    let (_, value, _) = values.select_nth_unstable_by(middle, f32::total_cmp);
+    *value
 }
 
 fn count(value: usize) -> u32 {
@@ -203,7 +240,7 @@ fn positioned(id: u32, glyph: &PositionedGlyph, text: &PageText) -> Option<Item>
 /// glyph, which was three quarters of all text time. A glyph sitting on a cell
 /// boundary can escape deduplication; that costs a doubled letter, rarely.
 fn unique_items(items: Vec<Item>, text: &PageText) -> Vec<Item> {
-    let mut keys: Vec<(u64, u32)> = Vec::with_capacity(items.len());
+    let mut keys: Vec<u128> = Vec::with_capacity(items.len());
     for (index, item) in items.iter().enumerate() {
         let Some(glyph) = text.glyphs.get(item.id as usize) else { continue };
         if item.width == 0.0 {
@@ -221,15 +258,16 @@ fn unique_items(items: Vec<Item>, text: &PageText) -> Vec<Item> {
         }
         mix(round_to_i64(glyph.x / cell) as u64);
         mix(round_to_i64(glyph.y / cell) as u64);
-        keys.push((hash, count(index)));
+        keys.push((u128::from(hash) << 32) | u128::from(count(index)));
     }
     // Items arrive in content order, so the lowest index of a key is the original.
     keys.sort_unstable();
     let mut keep = alloc::vec![true; items.len()];
     for pair in keys.windows(2) {
-        if let [(first, _), (second, index)] = pair {
-            if first == second {
-                if let Some(slot) = keep.get_mut(*index as usize) {
+        if let [first, second] = pair {
+            if first >> 32 == second >> 32 {
+                let index = (*second as u32) as usize;
+                if let Some(slot) = keep.get_mut(index) {
                     *slot = false;
                 }
             }
@@ -295,7 +333,7 @@ fn finish_line(items: Vec<Item>, text: &PageText, out: &mut Vec<PendingLine>) {
 }
 
 fn finish_band(mut items: Vec<Item>, text: &PageText, out: &mut Vec<PendingLine>) {
-    items.sort_unstable_by_key(|item| (item.seq, item.id));
+    sort_content(&mut items);
     let jumps = items.windows(2).any(|pair| {
         match (pair.first(), pair.get(1)) {
             (Some(left), Some(right)) =>
@@ -384,23 +422,35 @@ struct CutResult {
     columns: u8,
 }
 
+// Each entry packs the two interval endpoints, followed by the line ID.
+// Filtering a parent order preserves the endpoint order in both children.
+type LineOrder = Vec<(u64, usize)>;
+
 enum CutTask {
-    Split(Vec<usize>, u8),
+    Split(LineOrder, LineOrder, u8),
     Join(bool),
 }
 
-fn gutter(ids: &[usize], lines: &[PendingLine], axis: usize, minimum: f32) -> Option<f32> {
-    let mut intervals = Vec::new();
-    for id in ids {
-        if let Some(line) = lines.get(*id) {
-            intervals.push((line.line.bbox[axis], line.line.bbox[axis + 2]));
-        }
-    }
-    intervals.sort_unstable_by(|a, b| a.0.total_cmp(&b.0).then_with(|| a.1.total_cmp(&b.1)));
-    let (_, mut end) = intervals.first().copied()?;
+fn axis_order(ids: &[usize], lines: &[PendingLine], axis: usize) -> LineOrder {
+    let mut order: LineOrder = ids.iter().filter_map(|id| {
+        lines.get(*id).map(|line| {
+            (coordinate_key(line.line.bbox[axis], line.line.bbox[axis + 2]), *id)
+        })
+    }).collect();
+    // Equal endpoint keys describe bit-identical intervals. Their ID order
+    // cannot affect a gutter, and the ID makes the complete sort key unique.
+    order.sort_unstable();
+    order
+}
+
+fn gutter(intervals: &[(u64, usize)], minimum: f32) -> Option<f32> {
+    let (key, _) = intervals.first().copied()?;
+    let mut end = key_float(key as u32);
     let mut best = minimum;
     let mut cut = None;
-    for (start, next_end) in intervals.into_iter().skip(1) {
+    for (key, _) in intervals.iter().skip(1) {
+        let start = key_float((key >> 32) as u32);
+        let next_end = key_float(*key as u32);
         let gap = start - end;
         if gap.is_finite() && gap >= best && gap > 0.0 {
             best = gap;
@@ -414,9 +464,9 @@ fn gutter(ids: &[usize], lines: &[PendingLine], axis: usize, minimum: f32) -> Op
 /// A vertical gutter only makes columns when each side holds at least two lines:
 /// one offset line (a repeated form, a margin note) is not a column, and treating
 /// it as one would pull it out of its place in the flow.
-fn is_column_cut(ids: &[usize], lines: &[PendingLine], cut: f32) -> bool {
+fn is_column_cut(ids: &[(u64, usize)], lines: &[PendingLine], cut: f32) -> bool {
     let (mut left, mut right) = (0u32, 0u32);
-    for line in ids.iter().filter_map(|id| lines.get(*id)) {
+    for line in ids.iter().filter_map(|(_, id)| lines.get(*id)) {
         if line.line.bbox[0] < cut {
             left += 1;
         } else {
@@ -427,48 +477,62 @@ fn is_column_cut(ids: &[usize], lines: &[PendingLine], cut: f32) -> bool {
 }
 
 fn xy_order(ids: Vec<usize>, lines: &[PendingLine], body_size: f32) -> CutResult {
-    let mut tasks = alloc::vec![CutTask::Split(ids, 0)];
+    let x_order = axis_order(&ids, lines, 0);
+    let y_order = axis_order(&ids, lines, 1);
+    drop(ids);
+    let mut tasks = alloc::vec![CutTask::Split(x_order, y_order, 0)];
     let mut results: Vec<CutResult> = Vec::new();
     while let Some(task) = tasks.pop() {
         match task {
-            CutTask::Split(mut ids, depth) => {
-                let cut = if depth < MAX_CUT_DEPTH && ids.len() > 1 {
-                    gutter(&ids, lines, 0, COLUMN_GUTTER * body_size)
-                        .filter(|cut| is_column_cut(&ids, lines, *cut))
+            CutTask::Split(x_order, mut y_order, depth) => {
+                let cut = if depth < MAX_CUT_DEPTH && x_order.len() > 1 {
+                    gutter(&x_order, COLUMN_GUTTER * body_size)
+                        .filter(|cut| is_column_cut(&x_order, lines, *cut))
                         .map(|cut| (0usize, cut))
-                        .or_else(|| gutter(&ids, lines, 1, 0.5 * body_size)
+                        .or_else(|| gutter(&y_order, 0.5 * body_size)
                             .map(|cut| (1usize, cut)))
                 } else {
                     None
                 };
                 if let Some((axis, cut)) = cut {
-                    let mut left = Vec::new();
-                    let mut right = Vec::new();
-                    for id in ids {
-                        if let Some(line) = lines.get(id) {
-                            if line.line.bbox[axis] < cut {
-                                left.push(id);
-                            } else {
-                                right.push(id);
+                    let partition = |order: LineOrder| {
+                        let mut left = Vec::new();
+                        let mut right = Vec::new();
+                        for entry in order {
+                            if let Some(line) = lines.get(entry.1) {
+                                if line.line.bbox[axis] < cut {
+                                    left.push(entry);
+                                } else {
+                                    right.push(entry);
+                                }
                             }
                         }
-                    }
+                        (left, right)
+                    };
+                    let (left_x, right_x) = partition(x_order);
+                    let (left_y, right_y) = partition(y_order);
                     tasks.push(CutTask::Join(axis == 0));
-                    tasks.push(CutTask::Split(right, depth.saturating_add(1)));
-                    tasks.push(CutTask::Split(left, depth.saturating_add(1)));
+                    tasks.push(CutTask::Split(right_x, right_y, depth.saturating_add(1)));
+                    tasks.push(CutTask::Split(left_x, left_y, depth.saturating_add(1)));
                 } else {
-                    ids.sort_unstable_by(|a, b| {
-                        match (lines.get(*a), lines.get(*b)) {
-                            (Some(a_line), Some(b_line)) =>
-                                a_line.line.bbox[1].total_cmp(&b_line.line.bbox[1])
-                                    .then_with(|| a_line.line.bbox[0].total_cmp(&b_line.line.bbox[0]))
-                                    .then_with(|| a.cmp(b)),
-                            _ => a.cmp(b),
+                    // Reuse the Y order's storage for the final (top, left, ID)
+                    // order. Usually changing the secondary key leaves it sorted.
+                    for (key, id) in &mut y_order {
+                        if let Some(line) = lines.get(*id) {
+                            *key = coordinate_key(line.line.bbox[1], line.line.bbox[0]);
                         }
-                    });
-                    let columns = if ids.is_empty() { 0 } else { 1 };
+                    }
+                    if y_order.windows(2).any(|pair| {
+                        match (pair.first(), pair.get(1)) {
+                            (Some(left), Some(right)) => left > right,
+                            _ => false,
+                        }
+                    }) {
+                        y_order.sort_unstable();
+                    }
+                    let columns = if y_order.is_empty() { 0 } else { 1 };
                     results.push(CutResult {
-                        order: ids.into_iter().map(|id| (id, 0)).collect(),
+                        order: y_order.into_iter().map(|(_, id)| (id, 0)).collect(),
                         columns,
                     });
                 }
@@ -600,20 +664,10 @@ pub fn layout(text: &PageText) -> PageLayout {
             }
         }
     }
-    items.sort_unstable_by_key(|item| (item.seq, item.id));
+    sort_content(&mut items);
     let items = unique_items(items, text);
     let body_size = median(items.iter().map(|item| item.size).collect());
     let mut pending = candidate_lines(items, text);
-    let mut main = Vec::new();
-    let mut rotated = Vec::new();
-    for (index, line) in pending.iter().enumerate() {
-        if line.angle == 0 {
-            main.push(index);
-        } else {
-            rotated.push(index);
-        }
-    }
-    let mut flow = xy_order(main, &pending, body_size.max(0.01));
     // Order rotated lines in their own text frame: "down" is perpendicular to the
     // baseline, so a page turned 90 degrees reads its lines right to left in
     // display space, exactly as it reads top to bottom before the turn.
@@ -623,23 +677,27 @@ pub fn layout(text: &PageText) -> PageLayout {
         let (cx, cy) = ((x0 + x1) / 2.0, (y0 + y1) / 2.0);
         (cx * -dy + cy * dx, cx * dx + cy * dy)
     };
-    rotated.sort_unstable_by(|a, b| {
-        match (pending.get(*a), pending.get(*b)) {
-            (Some(left), Some(right)) => {
-                let (left_across, left_along) = frame_key(left);
-                let (right_across, right_along) = frame_key(right);
-                left.angle.cmp(&right.angle)
-                    .then_with(|| left_across.total_cmp(&right_across))
-                    .then_with(|| left_along.total_cmp(&right_along))
-                    .then_with(|| a.cmp(b))
-            }
-            _ => a.cmp(b),
+    let mut main = Vec::new();
+    let mut rotated = Vec::new();
+    for (index, line) in pending.iter().enumerate() {
+        if line.angle == 0 {
+            main.push(index);
+        } else {
+            // Angles are normalized to 0..360 by positioned. Compute each
+            // frame once, preserving total_cmp even if the midpoint overflows.
+            let (across, along) = frame_key(line);
+            let key = ((line.angle as u128) << 64)
+                | u128::from(coordinate_key(across, along));
+            rotated.push((key, index));
         }
-    });
+    }
+    let mut flow = xy_order(main, &pending, body_size.max(0.01));
+    // The line index is the original comparator's final tie breaker.
+    rotated.sort_unstable();
     if !rotated.is_empty() {
         flow.columns = flow.columns.max(1);
     }
-    flow.order.extend(rotated.into_iter().map(|id| (id, 0)));
+    flow.order.extend(rotated.into_iter().map(|(_, id)| (id, 0)));
     let mut page = PageLayout {
         lines: Vec::new(),
         blocks: Vec::new(),
