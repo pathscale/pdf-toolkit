@@ -142,7 +142,10 @@ impl<'a> Scan<'a> {
         }
     }
 
-    fn item(&mut self) -> Result<Option<Item<'a>>, DocError> {
+    fn item(
+        &mut self,
+        mut operands: Option<(&mut Vec<Operand<'a>>, &mut u64)>,
+    ) -> Result<Option<Item<'a>>, DocError> {
         loop {
             let Some((token, start, _)) = self.token()? else {
                 return Ok(None);
@@ -214,6 +217,14 @@ impl<'a> Scan<'a> {
                     name => return Ok(Some(Item::Operator(name))),
                 },
             };
+            if let Some((values, dropped)) = operands.as_mut() {
+                if values.len() < MAX_OPERANDS {
+                    values.push(value);
+                } else {
+                    **dropped = (**dropped).saturating_add(1);
+                }
+                continue;
+            }
             return Ok(Some(Item::Value(value)));
         }
     }
@@ -343,7 +354,10 @@ impl<'a> Content<'a> {
         }
 
         loop {
-            let Some(item) = self.scan.item()? else {
+            let Some(item) = self.scan.item(Some((
+                &mut self.operands,
+                &mut self.dropped,
+            )))? else {
                 if self.inline_header {
                     return Err(DocError::Malformed {
                         offset: self.scan.position() as u64,
@@ -352,49 +366,41 @@ impl<'a> Content<'a> {
                 }
                 return Ok(None);
             };
-            match item {
-                Item::Value(value) => {
-                    if self.operands.len() < MAX_OPERANDS {
-                        self.operands.push(value);
-                    } else {
-                        self.dropped = self.dropped.saturating_add(1);
+            let Item::Operator(name) = item else {
+                continue;
+            };
+            if self.inline_header {
+                if name != b"ID" {
+                    self.scan.junk = self.scan.junk.saturating_add(1);
+                    continue;
+                }
+                self.inline_header = false;
+                let mut start = self.scan.position();
+                match self.scan.input.get(start).copied() {
+                    Some(b'\r') => {
+                        start = start.saturating_add(1);
+                        if self.scan.input.get(start) == Some(&b'\n') {
+                            start = start.saturating_add(1);
+                        }
+                    }
+                    Some(byte) if whitespace(byte) => {
+                        start = start.saturating_add(1);
+                    }
+                    _ => {
+                        return Err(DocError::Malformed {
+                            offset: start as u64,
+                            what: "inline_image_separator",
+                        });
                     }
                 }
-                Item::Operator(name) => {
-                    if self.inline_header {
-                        if name != b"ID" {
-                            self.scan.junk = self.scan.junk.saturating_add(1);
-                            continue;
-                        }
-                        self.inline_header = false;
-                        let mut start = self.scan.position();
-                        match self.scan.input.get(start).copied() {
-                            Some(b'\r') => {
-                                start = start.saturating_add(1);
-                                if self.scan.input.get(start) == Some(&b'\n') {
-                                    start = start.saturating_add(1);
-                                }
-                            }
-                            Some(byte) if whitespace(byte) => {
-                                start = start.saturating_add(1);
-                            }
-                            _ => {
-                                return Err(DocError::Malformed {
-                                    offset: start as u64,
-                                    what: "inline_image_separator",
-                                });
-                            }
-                        }
-                        let length = inline_number(&self.operands, b"L", b"Length")
-                            .filter(|number| *number >= 0.0 && *number < usize::MAX as f64)
-                            .map(|number| number as usize);
-                        self.inline_data = Some(InlineData { start, length });
-                    } else if name == b"BI" {
-                        self.inline_header = true;
-                    }
-                    return Ok(Some(Op { name, operands: &self.operands }));
-                }
+                let length = inline_number(&self.operands, b"L", b"Length")
+                    .filter(|number| *number >= 0.0 && *number < usize::MAX as f64)
+                    .map(|number| number as usize);
+                self.inline_data = Some(InlineData { start, length });
+            } else if name == b"BI" {
+                self.inline_header = true;
             }
+            return Ok(Some(Op { name, operands: &self.operands }));
         }
     }
 
@@ -490,7 +496,7 @@ impl<'a> Values<'a> {
 
     pub fn next_value(&mut self) -> Result<Option<Operand<'a>>, DocError> {
         loop {
-            match self.scan.item()? {
+            match self.scan.item(None)? {
                 Some(Item::Value(value)) => return Ok(Some(value)),
                 Some(Item::Operator(_)) => {}
                 None => return Ok(None),
