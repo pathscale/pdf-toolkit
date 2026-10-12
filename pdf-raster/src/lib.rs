@@ -220,6 +220,9 @@ pub fn encode_png(raster: &Raster) -> Vec<u8> {
     if raster.rgba.len() != buffer_len {
         return Vec::new();
     }
+    if let Some(png) = encode_opaque_png(raster) {
+        return png;
+    }
     let Some(mut pixmap) = Pixmap::new(raster.width, raster.height) else {
         return Vec::new();
     };
@@ -245,6 +248,74 @@ pub fn encode_png(raster: &Raster) -> Vec<u8> {
         destination.copy_from_slice(&bytes);
     }
     pixmap.encode_png().unwrap_or_default()
+}
+
+/// Fast PNG for opaque rasters: RGB rows with the Up filter, deflate level 1.
+/// Pages are opaque after the white backdrop; anything with alpha goes through
+/// tiny-skia so its decoded pixels stay exactly as before.
+fn encode_opaque_png(raster: &Raster) -> Option<Vec<u8>> {
+    let width = raster.width as usize;
+    let height = raster.height as usize;
+    if raster.rgba.chunks_exact(4).any(|pixel| pixel[3] != 255) {
+        return None;
+    }
+    let row = width.checked_mul(3)?;
+    let mut filtered = Vec::with_capacity(row.checked_add(1)?.checked_mul(height)?);
+    let mut previous: Vec<u8> = vec![0; row];
+    let mut current: Vec<u8> = Vec::with_capacity(row);
+    for line in raster.rgba.chunks_exact(width * 4) {
+        current.clear();
+        for pixel in line.chunks_exact(4) {
+            current.extend_from_slice(&pixel[..3]);
+        }
+        filtered.push(2);
+        filtered.extend(current.iter().zip(&previous).map(|(byte, above)| byte.wrapping_sub(*above)));
+        core::mem::swap(&mut previous, &mut current);
+    }
+    let compressed = miniz_oxide::deflate::compress_to_vec_zlib(&filtered, 1);
+    let mut png = Vec::with_capacity(compressed.len() + 64);
+    png.extend_from_slice(b"\x89PNG\r\n\x1a\n");
+    let mut header = [0u8; 13];
+    header[..4].copy_from_slice(&raster.width.to_be_bytes());
+    header[4..8].copy_from_slice(&raster.height.to_be_bytes());
+    header[8] = 8;
+    header[9] = 2;
+    png_chunk(&mut png, b"IHDR", &header);
+    png_chunk(&mut png, b"IDAT", &compressed);
+    png_chunk(&mut png, b"IEND", &[]);
+    Some(png)
+}
+
+fn png_chunk(png: &mut Vec<u8>, kind: &[u8; 4], data: &[u8]) {
+    png.extend_from_slice(&(data.len() as u32).to_be_bytes());
+    let start = png.len();
+    png.extend_from_slice(kind);
+    png.extend_from_slice(data);
+    let crc = crc32(&png[start..]);
+    png.extend_from_slice(&crc.to_be_bytes());
+}
+
+fn crc32(bytes: &[u8]) -> u32 {
+    static TABLE: [u32; 256] = {
+        let mut table = [0u32; 256];
+        let mut index = 0;
+        while index < 256 {
+            let mut value = index as u32;
+            let mut bit = 0;
+            while bit < 8 {
+                value = if value & 1 != 0 { 0xEDB8_8320 ^ (value >> 1) } else { value >> 1 };
+                bit += 1;
+            }
+            table[index] = value;
+            index += 1;
+        }
+        table
+    };
+    let mut crc = !0u32;
+    for byte in bytes {
+        crc = TABLE[((crc ^ u32::from(*byte)) & 0xFF) as usize] ^ (crc >> 8);
+    }
+    !crc
 }
 
 fn checked_rgba_len(width: u32, height: u32, maximum: u64) -> Result<usize, DocError> {
