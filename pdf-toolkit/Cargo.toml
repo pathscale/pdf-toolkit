@@ -28,10 +28,10 @@ edit = ["std", "text", "raster", "write", "dep:pdf-edit"]
 sign = ["edit", "pdf-edit/sign"]
 
 [dependencies]
-pdf-core = { package = "pdf-toolkit-core", version = "0.3.8", path = "../pdf-core", default-features = false }
-pdf-text = { package = "pdf-toolkit-text", version = "0.3.8", path = "../pdf-text", default-features = false, optional = true }
-pdf-render = { package = "pdf-toolkit-render", version = "0.3.8", path = "../pdf-render", default-features = false, optional = true }
-pdf-raster = { package = "pdf-toolkit-raster", version = "0.3.8", path = "../pdf-raster", optional = true }
-pdf-write = { package = "pdf-toolkit-write", version = "0.3.8", path = "../pdf-write", optional = true }
-pdf-edit = { package = "pdf-toolkit-edit", version = "0.3.8", path = "../pdf-edit", default-features = false, optional = true }
+pdf-core = { package = "pdf-toolkit-core", version = "0.3.9", path = "../pdf-core", default-features = false }
+pdf-text = { package = "pdf-toolkit-text", version = "0.3.9", path = "../pdf-text", default-features = false, optional = true }
+pdf-render = { package = "pdf-toolkit-render", version = "0.3.9", path = "../pdf-render", default-features = false, optional = true }
+pdf-raster = { package = "pdf-toolkit-raster", version = "0.3.9", path = "../pdf-raster", optional = true }
+pdf-write = { package = "pdf-toolkit-write", version = "0.3.9", path = "../pdf-write", optional = true }
+pdf-edit = { package = "pdf-toolkit-edit", version = "0.3.9", path = "../pdf-edit", default-features = false, optional = true }
 
