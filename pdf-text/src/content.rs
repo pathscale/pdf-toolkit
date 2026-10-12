@@ -149,10 +149,7 @@ impl<'a> Scan<'a> {
             };
             let value = match token.kind() {
                 TokenKind::Number => {
-                    let number = core::str::from_utf8(token.bytes())
-                        .ok()
-                        .and_then(|text| text.parse::<f64>().ok())
-                        .filter(|number| number.is_finite());
+                    let number = parse_number(token.bytes()).filter(|number| number.is_finite());
                     let Some(number) = number else {
                         self.junk = self.junk.saturating_add(1);
                         continue;
@@ -694,3 +691,47 @@ fn hex(byte: u8) -> Option<u8> {
     }
 }
 
+
+/// PDF numbers are `[+-]?digits[.digits]`. A mantissa below 2^53 with at most
+/// 22 fraction digits divides exactly once, which is the correctly rounded value
+/// `str::parse` gives, so the fast path matches it bit for bit.
+fn parse_number(bytes: &[u8]) -> Option<f64> {
+    const POW10: [f64; 23] = [
+        1e0, 1e1, 1e2, 1e3, 1e4, 1e5, 1e6, 1e7, 1e8, 1e9, 1e10, 1e11, 1e12, 1e13, 1e14,
+        1e15, 1e16, 1e17, 1e18, 1e19, 1e20, 1e21, 1e22,
+    ];
+    let (negative, digits) = match bytes.first() {
+        Some(b'-') => (true, &bytes[1..]),
+        Some(b'+') => (false, &bytes[1..]),
+        _ => (false, bytes),
+    };
+    let mut mantissa = 0u64;
+    let mut fraction = 0usize;
+    let mut seen_dot = false;
+    let mut seen_digit = false;
+    for &byte in digits {
+        match byte {
+            b'0'..=b'9' => {
+                mantissa = mantissa.wrapping_mul(10).wrapping_add(u64::from(byte - b'0'));
+                if mantissa >= (1u64 << 53) {
+                    return slow_number(bytes);
+                }
+                seen_digit = true;
+                if seen_dot {
+                    fraction += 1;
+                }
+            }
+            b'.' if !seen_dot => seen_dot = true,
+            _ => return slow_number(bytes),
+        }
+    }
+    if !seen_digit || fraction >= POW10.len() {
+        return slow_number(bytes);
+    }
+    let value = mantissa as f64 / POW10[fraction];
+    Some(if negative { -value } else { value })
+}
+
+fn slow_number(bytes: &[u8]) -> Option<f64> {
+    core::str::from_utf8(bytes).ok().and_then(|text| text.parse::<f64>().ok())
+}
