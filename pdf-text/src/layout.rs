@@ -90,16 +90,19 @@ struct Item {
     bold: bool,
 }
 
+// Runs refer to contiguous ranges in the content-sorted item buffer.
 struct Run {
     angle: i16,
     across: f32,
+    across_key: u32,
     size: f32,
-    items: Vec<Item>,
+    items: Range<usize>,
+    seq: u32,
 }
 
 struct PendingLine {
     line: Line,
-    ids: Vec<u32>,
+    ids: Range<usize>,
     angle: i16,
     bold: bool,
 }
@@ -140,7 +143,7 @@ fn sort_content(items: &mut [Item]) {
     }
 }
 
-fn median(mut values: Vec<f32>) -> f32 {
+fn median(values: &mut [f32]) -> f32 {
     if values.is_empty() {
         return 0.0;
     }
@@ -185,7 +188,13 @@ pub(crate) fn direction(angle: i16) -> (f32, f32) {
     (cos as f32, sin as f32)
 }
 
-fn positioned(id: u32, glyph: &PositionedGlyph, text: &PageText) -> Option<Item> {
+fn positioned(
+    id: u32,
+    glyph: &PositionedGlyph,
+    angle: i16,
+    (dx, dy): (f32, f32),
+    bold: bool,
+) -> Option<Item> {
     if ![glyph.x, glyph.y, glyph.width, glyph.size]
         .iter()
         .all(|value| value.is_finite())
@@ -193,8 +202,6 @@ fn positioned(id: u32, glyph: &PositionedGlyph, text: &PageText) -> Option<Item>
         return None;
     }
     let size = magnitude(glyph.size).max(0.01);
-    let angle = i32::from(glyph.angle).rem_euclid(360) as i16;
-    let (dx, dy) = direction(angle);
     let end_x = glyph.x + dx * glyph.width;
     let end_y = glyph.y + dy * glyph.width;
     let upper_x = glyph.x + dy * size;
@@ -224,8 +231,7 @@ fn positioned(id: u32, glyph: &PositionedGlyph, text: &PageText) -> Option<Item>
         width: glyph.width,
         size,
         bbox,
-        bold: text.fonts.get(usize::from(glyph.font))
-            .map(|font| font.flags.bold).unwrap_or(false),
+        bold,
     })
 }
 
@@ -239,7 +245,7 @@ fn positioned(id: u32, glyph: &PositionedGlyph, text: &PageText) -> Option<Item>
 /// One sort over a quantized 64-bit key replaced a map with 27 lookups per
 /// glyph, which was three quarters of all text time. A glyph sitting on a cell
 /// boundary can escape deduplication; that costs a doubled letter, rarely.
-fn unique_items(items: Vec<Item>, text: &PageText) -> Vec<Item> {
+fn unique_items(mut items: Vec<Item>, text: &PageText) -> Vec<Item> {
     let mut keys: Vec<u128> = Vec::with_capacity(items.len());
     for (index, item) in items.iter().enumerate() {
         let Some(glyph) = text.glyphs.get(item.id as usize) else { continue };
@@ -273,74 +279,113 @@ fn unique_items(items: Vec<Item>, text: &PageText) -> Vec<Item> {
             }
         }
     }
+    let mut index = 0;
+    items.retain(|_| {
+        let kept = keep[index];
+        index += 1;
+        kept
+    });
     items
-        .into_iter()
-        .zip(keep)
-        .filter_map(|(item, kept)| kept.then_some(item))
-        .collect()
 }
 
 fn round_to_i64(value: f32) -> i64 {
     if value >= 0.0 { (value + 0.5) as i64 } else { (value - 0.5) as i64 }
 }
 
-fn finish_line(items: Vec<Item>, text: &PageText, out: &mut Vec<PendingLine>) {
+fn finish_line(
+    items: &[Item],
+    text: &PageText,
+    out: &mut Vec<PendingLine>,
+    ids: &mut Vec<u32>,
+    sizes: &mut Vec<f32>,
+) {
     let Some(first) = items.first() else { return };
     let angle = first.angle;
     let mut bbox = first.bbox;
-    let mut value = String::new();
-    let mut previous: Option<Item> = None;
+    let mut value = String::with_capacity(items.len());
+    let mut previous: Option<&Item> = None;
     let mut bold = 0usize;
-    let mut ids = Vec::new();
-    for item in &items {
+    let start = ids.len();
+    let mut uniform_size = true;
+    // Empty text and text ending in a space both forbid another separator.
+    let mut space_allowed = false;
+    for item in items {
+        uniform_size &= item.size == first.size;
         let Some(glyph) = text.glyphs.get(item.id as usize) else { continue };
         if let Some(last) = previous {
             let gap = item.along - last.along - last.width;
-            if gap > SPACE_GAP * item.size.max(last.size)
-                && !value.is_empty() && !value.ends_with(' ')
-            {
+            if gap > SPACE_GAP * item.size.max(last.size) && space_allowed {
                 value.push(' ');
+                space_allowed = false;
             }
         }
         if glyph.text.is_empty() && !glyph.mapped {
             value.push('\u{fffd}');
+            space_allowed = true;
         } else {
             for character in glyph.text.as_slice() {
                 if character.is_whitespace() {
-                    if !value.is_empty() && !value.ends_with(' ') {
+                    if space_allowed {
                         value.push(' ');
+                        space_allowed = false;
                     }
                 } else {
                     value.push(*character);
+                    space_allowed = true;
                 }
             }
         }
         bbox = union(bbox, item.bbox);
         bold = bold.saturating_add(usize::from(item.bold));
         ids.push(item.id);
-        previous = Some(*item);
+        previous = Some(item);
     }
-    while value.ends_with(' ') {
+    if !space_allowed {
         value.pop();
     }
-    let size = median(items.iter().map(|item| item.size).collect());
+    let size = if uniform_size {
+        first.size
+    } else {
+        sizes.clear();
+        sizes.extend(items.iter().map(|item| item.size));
+        median(sizes)
+    };
     out.push(PendingLine {
         line: Line { bbox, text: value, size, glyphs: 0..0 },
-        ids,
+        ids: start..ids.len(),
         angle,
         bold: bold > items.len() / 2,
     });
 }
 
-fn finish_band(mut items: Vec<Item>, text: &PageText, out: &mut Vec<PendingLine>) {
-    sort_content(&mut items);
-    let jumps = items.windows(2).any(|pair| {
-        match (pair.first(), pair.get(1)) {
-            (Some(left), Some(right)) =>
-                right.along < left.along - 0.1 * left.size.min(right.size),
-            _ => false,
+fn finish_band(
+    items: &mut [Item],
+    text: &PageText,
+    out: &mut Vec<PendingLine>,
+    ids: &mut Vec<u32>,
+    sizes: &mut Vec<f32>,
+) {
+    let mut content_sorted = true;
+    let mut jumps = false;
+    for pair in items.windows(2) {
+        if let [left, right] = pair {
+            if content_key(left) > content_key(right) {
+                content_sorted = false;
+                break;
+            }
+            jumps |= right.along < left.along - 0.1 * left.size.min(right.size);
         }
-    });
+    }
+    if !content_sorted {
+        items.sort_unstable_by_key(content_key);
+        jumps = items.windows(2).any(|pair| {
+            match (pair.first(), pair.get(1)) {
+                (Some(left), Some(right)) =>
+                    right.along < left.along - 0.1 * left.size.min(right.size),
+                _ => false,
+            }
+        });
+    }
     if jumps {
         items.sort_unstable_by(|left, right| {
             left.along.total_cmp(&right.along)
@@ -349,28 +394,33 @@ fn finish_band(mut items: Vec<Item>, text: &PageText, out: &mut Vec<PendingLine>
                 .then_with(|| left.id.cmp(&right.id))
         });
     }
-    let mut line: Vec<Item> = Vec::new();
-    for item in items {
-        let split = line.last().map(|last| {
-            item.along - last.along - last.width
+    let mut start = 0;
+    for (index, pair) in items.windows(2).enumerate() {
+        if let [last, item] = pair {
+            if item.along - last.along - last.width
                 >= COLUMN_GUTTER * item.size.max(last.size)
-        }).unwrap_or(false);
-        if split {
-            finish_line(core::mem::take(&mut line), text, out);
+            {
+                let end = index + 1;
+                finish_line(&items[start..end], text, out, ids, sizes);
+                start = end;
+            }
         }
-        line.push(item);
     }
-    finish_line(line, text, out);
+    finish_line(&items[start..], text, out, ids, sizes);
 }
 
-fn candidate_lines(items: Vec<Item>, text: &PageText) -> Vec<PendingLine> {
+fn candidate_lines(
+    items: Vec<Item>,
+    text: &PageText,
+    sizes: &mut Vec<f32>,
+) -> (Vec<PendingLine>, Vec<u32>) {
     let mut runs: Vec<Run> = Vec::new();
-    for item in items {
+    for (index, item) in items.iter().enumerate() {
         let adjacent = runs.last().map(|run| {
             run.angle == item.angle
                 && magnitude(run.across - item.across)
                     < BASELINE_TOLERANCE * run.size.min(item.size)
-                && run.items.last().map(|last| {
+                && items.get(run.items.end - 1).map(|last| {
                     let gap = item.along - last.along - last.width;
                     gap >= -0.3 * last.size.min(item.size)
                         && gap <= COLUMN_GUTTER * last.size.max(item.size)
@@ -378,28 +428,28 @@ fn candidate_lines(items: Vec<Item>, text: &PageText) -> Vec<PendingLine> {
         }).unwrap_or(false);
         if adjacent {
             if let Some(run) = runs.last_mut() {
-                run.items.push(item);
+                run.items.end = index + 1;
             }
         } else {
             runs.push(Run {
                 angle: item.angle,
                 across: item.across,
+                across_key: float_key(item.across),
                 size: item.size,
-                items: alloc::vec![item],
+                items: index..index + 1,
+                seq: item.seq,
             });
         }
     }
     runs.sort_unstable_by(|left, right| {
         left.angle.cmp(&right.angle)
-            .then_with(|| left.across.total_cmp(&right.across))
-            .then_with(|| {
-                let a = left.items.first().map(|item| item.seq).unwrap_or(0);
-                let b = right.items.first().map(|item| item.seq).unwrap_or(0);
-                a.cmp(&b)
-            })
+            .then_with(|| left.across_key.cmp(&right.across_key))
+            .then_with(|| left.seq.cmp(&right.seq))
     });
-    let mut out = Vec::new();
+    let mut out = Vec::with_capacity(runs.len());
+    let mut ids = Vec::with_capacity(items.len());
     let mut band = Vec::new();
+    sizes.clear();
     let mut anchor: Option<(i16, f32, f32)> = None;
     for run in runs {
         let same = anchor.map(|(angle, across, size)| {
@@ -408,13 +458,14 @@ fn candidate_lines(items: Vec<Item>, text: &PageText) -> Vec<PendingLine> {
                     < BASELINE_TOLERANCE * size.min(run.size)
         }).unwrap_or(false);
         if !same {
-            finish_band(core::mem::take(&mut band), text, &mut out);
+            finish_band(&mut band, text, &mut out, &mut ids, sizes);
+            band.clear();
             anchor = Some((run.angle, run.across, run.size));
         }
-        band.extend(run.items);
+        band.extend_from_slice(&items[run.items]);
     }
-    finish_band(band, text, &mut out);
-    out
+    finish_band(&mut band, text, &mut out, &mut ids, sizes);
+    (out, ids)
 }
 
 struct CutResult {
@@ -656,18 +707,32 @@ fn build_blocks(page: &mut PageLayout, metadata: &[(i16, bool, u8)]) {
 }
 
 pub fn layout(text: &PageText) -> PageLayout {
-    let mut items = Vec::new();
+    let mut items = Vec::with_capacity(text.glyphs.len().min(u32::MAX as usize));
+    let mut raw_angle = 0i16;
+    let mut angle = 0i16;
+    let mut axes = (1.0, 0.0);
+    let mut font = 0u16;
+    let mut bold = text.fonts.first().map(|font| font.flags.bold).unwrap_or(false);
     for (index, glyph) in text.glyphs.iter().take(u32::MAX as usize).enumerate() {
-        if let Ok(id) = u32::try_from(index) {
-            if let Some(item) = positioned(id, glyph, text) {
-                items.push(item);
-            }
+        if glyph.angle != raw_angle {
+            raw_angle = glyph.angle;
+            angle = i32::from(raw_angle).rem_euclid(360) as i16;
+            axes = direction(angle);
+        }
+        if glyph.font != font {
+            font = glyph.font;
+            bold = text.fonts.get(usize::from(font))
+                .map(|font| font.flags.bold).unwrap_or(false);
+        }
+        if let Some(item) = positioned(index as u32, glyph, angle, axes, bold) {
+            items.push(item);
         }
     }
     sort_content(&mut items);
     let items = unique_items(items, text);
-    let body_size = median(items.iter().map(|item| item.size).collect());
-    let mut pending = candidate_lines(items, text);
+    let mut sizes: Vec<f32> = items.iter().map(|item| item.size).collect();
+    let body_size = median(&mut sizes);
+    let (mut pending, ids) = candidate_lines(items, text, &mut sizes);
     // Order rotated lines in their own text frame: "down" is perpendicular to the
     // baseline, so a page turned 90 degrees reads its lines right to left in
     // display space, exactly as it reads top to bottom before the turn.
@@ -699,17 +764,17 @@ pub fn layout(text: &PageText) -> PageLayout {
     }
     flow.order.extend(rotated.into_iter().map(|(_, id)| (id, 0)));
     let mut page = PageLayout {
-        lines: Vec::new(),
+        lines: Vec::with_capacity(pending.len()),
         blocks: Vec::new(),
-        order: Vec::new(),
+        order: Vec::with_capacity(ids.len()),
         columns: flow.columns,
         body_size,
     };
-    let mut metadata = Vec::new();
+    let mut metadata = Vec::with_capacity(pending.len());
     for (id, column) in flow.order {
         let Some(source) = pending.get_mut(id) else { continue };
         let start = count(page.order.len());
-        page.order.extend(core::mem::take(&mut source.ids));
+        page.order.extend_from_slice(&ids[source.ids.start..source.ids.end]);
         let end = count(page.order.len());
         page.lines.push(Line {
             bbox: source.line.bbox,
