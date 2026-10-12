@@ -416,14 +416,11 @@ impl Font {
         let mut remaining = bytes;
         core::iter::from_fn(move || {
             let first = remaining.first().copied()?;
-            let (code, byte_len) = match &self.data.encoding {
-                Some(encoding) => encoding.next_code(remaining),
-                None => (u32::from(first), 1),
+            let (code, byte_len, valid) = match &self.data.encoding {
+                Some(encoding) => encoding.next_code_checked(remaining),
+                None => (u32::from(first), 1, true),
             };
             remaining = remaining.get(usize::from(byte_len)..).unwrap_or(&[]);
-            let valid = self.data.encoding.as_ref()
-                .map(|encoding| encoding.accepts(code, byte_len))
-                .unwrap_or(true);
             let text = if valid {
                 self.data.to_unicode.as_ref().and_then(|map| map.unicode(code))
                     .or_else(|| {

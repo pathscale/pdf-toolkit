@@ -13,6 +13,7 @@ struct CodeSpace {
     start: u32,
     end: u32,
     len: u8,
+    search_end: u32,
 }
 
 impl CodeSpace {
@@ -43,6 +44,15 @@ struct HexText {
 
 impl HexText {
     fn unicode(self, offset: u32) -> Option<GlyphText> {
+        if self.len == 2 {
+            let high = u32::from(*self.bytes.first()?);
+            let low = u32::from(*self.bytes.get(1)?);
+            let scalar = ((high << 8) | low).checked_add(offset)?;
+            if scalar > u32::from(u16::MAX) {
+                return None;
+            }
+            return core::char::from_u32(scalar).map(GlyphText::from_char);
+        }
         let mut bytes = self.bytes;
         let bytes = bytes.get_mut(..usize::from(self.len))?;
         let mut carry = u64::from(offset);
@@ -70,10 +80,34 @@ impl HexText {
 }
 
 #[derive(Clone, Copy, Debug)]
+enum UnicodeDestination {
+    Text(GlyphText),
+    Sequential(HexText),
+}
+
+impl UnicodeDestination {
+    fn new(destination: HexText, single: bool) -> Self {
+        if single {
+            if let Some(text) = destination.unicode(0) {
+                return Self::Text(text);
+            }
+        }
+        Self::Sequential(destination)
+    }
+
+    fn unicode(self, offset: u32) -> Option<GlyphText> {
+        match self {
+            Self::Text(text) => if offset == 0 { Some(text) } else { None },
+            Self::Sequential(destination) => destination.unicode(offset),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
 struct UnicodeRange {
     start: u32,
     end: u32,
-    destination: HexText,
+    destination: UnicodeDestination,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -83,13 +117,31 @@ struct CidRange {
     destination: u32,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct CMap {
     spaces: Vec<CodeSpace>,
+    space_bounds: [usize; 5],
+    one_byte_spaces: [bool; 256],
     unicode_ranges: Vec<UnicodeRange>,
+    one_byte_unicode: [Option<GlyphText>; 256],
     cid_ranges: Vec<CidRange>,
     identity_cid: bool,
     vertical: bool,
+}
+
+impl Default for CMap {
+    fn default() -> Self {
+        Self {
+            spaces: Vec::new(),
+            space_bounds: [0; 5],
+            one_byte_spaces: [false; 256],
+            unicode_ranges: Vec::new(),
+            one_byte_unicode: [None; 256],
+            cid_ranges: Vec::new(),
+            identity_cid: false,
+            vertical: false,
+        }
+    }
 }
 
 impl CMap {
@@ -103,7 +155,9 @@ impl CMap {
             start: 0,
             end: if two_byte { 65_535 } else { 255 },
             len: if two_byte { 2 } else { 1 },
+            search_end: 0,
         });
+        map.index_spaces();
         map.identity_cid = true;
         map.vertical = vertical;
         map
@@ -114,8 +168,13 @@ impl CMap {
     }
 
     pub fn next_code(&self, bytes: &[u8]) -> (u32, u8) {
+        let (code, len, _) = self.next_code_checked(bytes);
+        (code, len)
+    }
+
+    pub(crate) fn next_code_checked(&self, bytes: &[u8]) -> (u32, u8, bool) {
         if bytes.is_empty() {
-            return (0, 0);
+            return (0, 0, false);
         }
         let mut code = 0u32;
         for len in 1u8..=4 {
@@ -124,7 +183,7 @@ impl CMap {
             };
             code = (code << 8) | u32::from(*byte);
             if self.accepts(code, len) {
-                return (code, len);
+                return (code, len, true);
             }
         }
 
@@ -134,13 +193,19 @@ impl CMap {
         for byte in bytes.iter().take(consumed) {
             code = (code << 8) | u32::from(*byte);
         }
-        (code, consumed as u8)
+        // The fallback repeats a prefix already rejected above.
+        (code, consumed as u8, false)
     }
 
     pub fn unicode(&self, code: u32) -> Option<GlyphText> {
-        let index = self.unicode_ranges.binary_search_by(|range| {
-            compare_range(range.start, range.end, code)
-        }).ok()?;
+        if code < 256 {
+            return self.one_byte_unicode.get(code as usize).copied().flatten();
+        }
+        self.unicode_range(code)
+    }
+
+    fn unicode_range(&self, code: u32) -> Option<GlyphText> {
+        let index = self.unicode_ranges.partition_point(|range| range.end < code);
         let range = self.unicode_ranges.get(index)?;
         range.destination.unicode(code.checked_sub(range.start)?)
     }
@@ -159,11 +224,73 @@ impl CMap {
     }
 
     pub(crate) fn accepts(&self, code: u32, len: u8) -> bool {
-        let start = self.spaces.partition_point(|space| space.len < len);
-        let end = self.spaces.partition_point(|space| space.len <= len);
-        self.spaces.get(start..end)
-            .map(|spaces| spaces.iter().any(|space| space.contains(code, len)))
-            .unwrap_or(false)
+        if len == 1 {
+            return usize::try_from(code).ok()
+                .and_then(|index| self.one_byte_spaces.get(index))
+                .copied().unwrap_or(false);
+        }
+        let index = usize::from(len);
+        let (Some(&start), Some(&end)) = (
+            self.space_bounds.get(index.saturating_sub(1)),
+            self.space_bounds.get(index),
+        ) else {
+            return false;
+        };
+        let Some(spaces) = self.spaces.get(start..end) else {
+            return false;
+        };
+        let end = spaces.partition_point(|space| space.start <= code);
+        // Numeric intervals can overlap, and each byte still has its own bounds.
+        // Prefix maxima stop the search only when no earlier interval can match.
+        for space in spaces.get(..end).unwrap_or(&[]).iter().rev() {
+            if space.search_end < code {
+                break;
+            }
+            if space.contains(code, len) {
+                return true;
+            }
+        }
+        false
+    }
+
+    fn index_spaces(&mut self) {
+        self.space_bounds = [0; 5];
+        self.one_byte_spaces = [false; 256];
+        let mut start = 0usize;
+        for len in 1u8..=4 {
+            let count = self.spaces.get(start..).unwrap_or(&[])
+                .partition_point(|space| space.len == len);
+            let end = start.saturating_add(count);
+            if let Some(bound) = self.space_bounds.get_mut(usize::from(len)) {
+                *bound = end;
+            }
+            let mut maximum = 0u32;
+            if let Some(spaces) = self.spaces.get_mut(start..end) {
+                for space in spaces {
+                    maximum = maximum.max(space.end);
+                    space.search_end = maximum;
+                    if len == 1 {
+                        let slots = usize::try_from(space.start).ok()
+                            .zip(usize::try_from(space.end).ok()
+                                .and_then(|end| end.checked_add(1)))
+                            .and_then(|(start, end)| self.one_byte_spaces.get_mut(start..end));
+                        if let Some(slots) = slots {
+                            slots.fill(true);
+                        }
+                    }
+                }
+            }
+            start = end;
+        }
+    }
+
+    fn index_unicode(&mut self) {
+        for code in 0u32..256 {
+            let text = self.unicode_range(code);
+            if let Some(slot) = self.one_byte_unicode.get_mut(code as usize) {
+                *slot = text;
+            }
+        }
     }
 }
 
@@ -326,7 +453,7 @@ impl Parser<'_> {
                         return Err("cmap_limit");
                     }
                     let (start, end, len) = self.endpoints()?;
-                    let space = CodeSpace { start, end, len };
+                    let space = CodeSpace { start, end, len, search_end: 0 };
                     if !space.contains(start, len) || !space.contains(end, len) {
                         return Err("cmap_malformed");
                     }
@@ -339,7 +466,7 @@ impl Parser<'_> {
                     self.map.unicode_ranges.push(UnicodeRange {
                         start: code,
                         end: code,
-                        destination,
+                        destination: UnicodeDestination::new(destination, true),
                     });
                 }
                 Section::BfRange => {
@@ -358,7 +485,7 @@ impl Parser<'_> {
                             self.map.unicode_ranges.push(UnicodeRange {
                                 start: code,
                                 end: code,
-                                destination,
+                                destination: UnicodeDestination::new(destination, true),
                             });
                         }
                         if self.reader.required()?.kind() != TokenKind::ArrayEnd {
@@ -376,7 +503,7 @@ impl Parser<'_> {
                         self.map.unicode_ranges.push(UnicodeRange {
                             start,
                             end,
-                            destination,
+                            destination: UnicodeDestination::new(destination, start == end),
                         });
                     }
                 }
@@ -412,7 +539,7 @@ impl Parser<'_> {
     fn finish(mut self) -> (CMap, Option<&'static str>) {
         if self.map.spaces.is_empty() {
             if self.map.identity_cid {
-                self.map.spaces.push(CodeSpace { start: 0, end: 65_535, len: 2 });
+                self.map.spaces.push(CodeSpace { start: 0, end: 65_535, len: 2, search_end: 0 });
             } else {
                 self.warn("cmap_codespace_missing");
                 for len in 1u8..=4 {
@@ -423,16 +550,17 @@ impl Parser<'_> {
                             1u32.checked_shl(u32::from(len).saturating_mul(8))
                                 .unwrap_or(0).saturating_sub(1)
                         };
-                        self.map.spaces.push(CodeSpace { start: 0, end, len });
+                        self.map.spaces.push(CodeSpace { start: 0, end, len, search_end: 0 });
                     }
                 }
                 if self.map.spaces.is_empty() {
-                    self.map.spaces.push(CodeSpace { start: 0, end: 255, len: 1 });
+                    self.map.spaces.push(CodeSpace { start: 0, end: 255, len: 1, search_end: 0 });
                 }
             }
         }
         self.map.spaces.sort_unstable_by_key(|space| (space.len, space.start, space.end));
         self.map.spaces.dedup_by_key(|space| (space.len, space.start, space.end));
+        self.map.index_spaces();
 
         // Overlapping mappings are malformed. Keep the first sorted range,
         // dropping overlaps so every lookup remains a binary search.
@@ -462,6 +590,7 @@ impl Parser<'_> {
         if overlap {
             self.warn("cmap_overlap");
         }
+        self.map.index_unicode();
         (self.map, self.warning)
     }
 }
@@ -568,4 +697,5 @@ fn hex(byte: u8) -> Option<u8> {
         _ => None,
     }
 }
+
 
