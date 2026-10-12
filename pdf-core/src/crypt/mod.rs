@@ -55,7 +55,7 @@ impl Crypt {
         }
         let version = integer(resolver, dict, b"V")?.unwrap_or(0);
         let revision = integer(resolver, dict, b"R")?.ok_or_else(bad_dictionary)?;
-        let modern = version == 5 && revision == 6;
+        let modern = version == 5 && (revision == 5 || revision == 6);
         if !modern
             && !((version == 1 || version == 2) && (2..=4).contains(&revision))
             && !(version == 4 && revision == 4)
@@ -108,11 +108,12 @@ impl Crypt {
             let _owner = fixed::<48>(resolver, dict, b"O")?;
             let mut salt = [0u8; 8];
             salt.copy_from_slice(&user[32..40]);
-            if !equal(&r6_hash(&salt)?, &user[..32]) {
+            let hash = |salt: &[u8; 8]| if revision == 5 { Ok(sha2::sha256(salt)) } else { r6_hash(salt) };
+            if !equal(&hash(&salt)?, &user[..32]) {
                 return Ok(None);
             }
             salt.copy_from_slice(&user[40..48]);
-            let wrapping_key = r6_hash(&salt)?;
+            let wrapping_key = hash(&salt)?;
             let mut file_key = fixed::<32>(resolver, dict, b"UE")?;
             if !aes::decrypt_cbc(&wrapping_key, [0; 16], &mut file_key) {
                 return Err(bad_dictionary());
@@ -262,7 +263,7 @@ impl Crypt {
     }
 
     fn object_key(&self, id: ObjectRef, method: Method) -> ([u8; 32], usize) {
-        if self.revision == 6 {
+        if self.revision >= 5 {
             return (self.key, 32);
         }
         let number = id.number().to_le_bytes();
