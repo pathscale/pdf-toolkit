@@ -253,6 +253,49 @@ fn format_time(time: &Time) -> String {
     )
 }
 
+/// A PDF date (D:YYYYMMDDHHmmSSOHH'mm', trailing fields optional) as ISO 8601, keeping its UTC offset.
+fn pdf_date_iso(raw: &str) -> Option<String> {
+    let body = raw.strip_prefix("D:").unwrap_or(raw).as_bytes();
+    let digits = body.iter().take_while(|byte| byte.is_ascii_digit()).count();
+    if digits < 4 || digits % 2 != 0 || digits > 14 {
+        return None;
+    }
+    let field = |at: usize, default: &str| {
+        body.get(at..at + 2)
+            .filter(|_| at + 2 <= digits)
+            .map_or(default.to_owned(), |pair| String::from_utf8_lossy(pair).into_owned())
+    };
+    let year = String::from_utf8_lossy(&body[..4]);
+    let date = format!(
+        "{year}-{}-{}T{}:{}:{}",
+        field(4, "01"),
+        field(6, "01"),
+        field(8, "00"),
+        field(10, "00"),
+        field(12, "00"),
+    );
+    let zone = &body[digits..];
+    let zone = match zone.first() {
+        None => String::new(),
+        Some(b'Z') => "Z".to_owned(),
+        Some(&sign @ (b'+' | b'-')) => {
+            let numbers: Vec<u8> = zone[1..].iter().copied().filter(u8::is_ascii_digit).collect();
+            if numbers.len() != 2 && numbers.len() != 4 {
+                return None;
+            }
+            let hours = String::from_utf8_lossy(&numbers[..2]);
+            let minutes = numbers.get(2..4).map_or("00".into(), String::from_utf8_lossy);
+            if hours == "00" && minutes == "00" {
+                "Z".to_owned()
+            } else {
+                format!("{}{hours}:{minutes}", sign as char)
+            }
+        }
+        Some(_) => return None,
+    };
+    Some(date + &zone)
+}
+
 fn signer_certificate<'a>(signed: &'a SignedData, info: &SignerInfo) -> Option<&'a Certificate> {
     let certificates = signed.certificates.as_ref()?;
     let mut first = None;
@@ -439,7 +482,10 @@ pub fn verify(bytes: Arc<[u8]>, limits: Limits) -> Result<Vec<SignatureReport>, 
         let modified = dict
             .get(b"M")
             .and_then(|value| value.as_str())
-            .map(|string| text(&string.decode()));
+            .map(|string| {
+                let raw = text(&string.decode());
+                pdf_date_iso(&raw).unwrap_or(raw)
+            });
         let range = byte_range(dict);
         let parts = range.and_then(|range| ranges(&bytes, range));
         let mut check = check_cms(&contents, parts);

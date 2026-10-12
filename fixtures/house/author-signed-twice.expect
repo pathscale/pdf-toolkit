@@ -24,7 +24,7 @@ signature.1.algorithm=ecdsa-p384-sha384
 signature.1.digest=match
 signature.1.signature=valid
 signature.1.signer=CN=pdf-toolkit house signer P-384,O=pathscale
-signature.1.signing_time=D:20260402083000+02'00'
+signature.1.signing_time=2026-04-02T08:30:00+02:00
 signature.1.covers_revision=true
 signature.1.modified_after=false
 signature.1.later_revisions=0

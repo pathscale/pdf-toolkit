@@ -189,7 +189,7 @@ pub fn build() -> Result<Vec<SignedFixture>, String> {
         "signature.1.field=SecondSignature\nsignature.1.sub_filter=ETSI.CAdES.detached\n\
          signature.1.algorithm=ecdsa-p384-sha384\nsignature.1.digest=match\n\
          signature.1.signature=valid\nsignature.1.signer={SUBJECT_P384}\n\
-         signature.1.signing_time=D:20260402083000+02'00'\n\
+         signature.1.signing_time=2026-04-02T08:30:00+02:00\n\
          signature.1.covers_revision=true\nsignature.1.modified_after=false\n\
          signature.1.later_revisions=0\n"
     ));
