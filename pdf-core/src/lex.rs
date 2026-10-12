@@ -127,16 +127,20 @@ pub struct Lexer<'input> {
     offset: usize,
     emitted: usize,
     limits: LexerLimits,
+    number: Option<f64>,
     terminated: bool,
 }
 
 impl<'input> Lexer<'input> {
     pub const fn new(input: &'input [u8]) -> Self {
-        Self::with_limits(input, LexerLimits::new(
-            DEFAULT_MAX_TOKEN_COUNT,
-            DEFAULT_MAX_TOKEN_BYTES,
-            DEFAULT_MAX_LITERAL_NESTING,
-        ))
+        Self::with_limits(
+            input,
+            LexerLimits::new(
+                DEFAULT_MAX_TOKEN_COUNT,
+                DEFAULT_MAX_TOKEN_BYTES,
+                DEFAULT_MAX_LITERAL_NESTING,
+            ),
+        )
     }
 
     pub const fn with_limits(input: &'input [u8], limits: LexerLimits) -> Self {
@@ -145,6 +149,7 @@ impl<'input> Lexer<'input> {
             offset: 0,
             emitted: 0,
             limits,
+            number: None,
             terminated: false,
         }
     }
@@ -159,6 +164,11 @@ impl<'input> Lexer<'input> {
 
     pub const fn limits(&self) -> LexerLimits {
         self.limits
+    }
+
+    /// Returns the fast parsed value when the last token was a number.
+    pub fn number(&self) -> Option<f64> {
+        self.number
     }
 
     fn skip_trivia(&mut self) -> Result<(), LexError> {
@@ -186,7 +196,7 @@ impl<'input> Lexer<'input> {
         }
     }
 
-    fn scan_token(&self, start: usize) -> Result<(TokenKind, usize), LexError> {
+    fn scan_token(&mut self, start: usize) -> Result<(TokenKind, usize), LexError> {
         let byte = byte_at(self.input, start).ok_or(LexError::InvalidSpan {
             start,
             end: start,
@@ -254,8 +264,20 @@ impl<'input> Lexer<'input> {
         }
     }
 
-    fn scan_regular(&self, start: usize) -> Result<(TokenKind, usize), LexError> {
+    fn scan_regular(&mut self, start: usize) -> Result<(TokenKind, usize), LexError> {
+        const POW10: [f64; 23] = [
+            1e0, 1e1, 1e2, 1e3, 1e4, 1e5, 1e6, 1e7, 1e8, 1e9, 1e10, 1e11, 1e12, 1e13, 1e14,
+            1e15, 1e16, 1e17, 1e18, 1e19, 1e20, 1e21, 1e22,
+        ];
         let mut end = start;
+        let mut is_number = true;
+        let mut negative = false;
+        let mut mantissa = 0u64;
+        let mut fraction = 0usize;
+        let mut seen_dot = false;
+        let mut seen_digit = false;
+        let mut needs_slow = false;
+
         loop {
             let Some(byte) = byte_at(self.input, end) else {
                 break;
@@ -263,6 +285,26 @@ impl<'input> Lexer<'input> {
             if is_pdf_whitespace(byte) || is_delimiter(byte) {
                 break;
             }
+
+            if is_number {
+                match byte {
+                    b'+' if end == start => {}
+                    b'-' if end == start => negative = true,
+                    b'0'..=b'9' => {
+                        mantissa = mantissa.wrapping_mul(10).wrapping_add(u64::from(byte - b'0'));
+                        if mantissa >= (1u64 << 53) {
+                            needs_slow = true;
+                        }
+                        seen_digit = true;
+                        if seen_dot {
+                            fraction += 1;
+                        }
+                    }
+                    b'.' if !seen_dot => seen_dot = true,
+                    _ => is_number = false,
+                }
+            }
+
             end = next_offset(end, start)?;
             check_token_length(start, end, self.limits)?;
         }
@@ -271,15 +313,15 @@ impl<'input> Lexer<'input> {
             return Err(LexError::InvalidDelimiter { offset: start });
         }
 
-        let bytes = self
-            .input
-            .get(start..end)
-            .ok_or(LexError::InvalidSpan { start, end })?;
-        let kind = if is_pdf_number(bytes) {
+        let kind = if is_number && seen_digit {
             TokenKind::Number
         } else {
             TokenKind::Keyword
         };
+        if kind == TokenKind::Number && !needs_slow && fraction < POW10.len() {
+            let value = mantissa as f64 / POW10[fraction];
+            self.number = Some(if negative { -value } else { value });
+        }
         Ok((kind, end))
     }
 
@@ -293,8 +335,17 @@ impl<'input> Lexer<'input> {
             });
         }
         check_token_length(start, end, self.limits)?;
+        let limit_end = start.saturating_add(self.limits.max_token_bytes);
+        let window_end = limit_end.min(self.input.len());
 
         loop {
+            let run = self.input.get(end..window_end).unwrap_or(&[]);
+            let stop = run
+                .iter()
+                .position(|byte| matches!(*byte, b'\\' | b'(' | b')'))
+                .unwrap_or(run.len());
+            end = end.saturating_add(stop);
+
             let Some(byte) = byte_at(self.input, end) else {
                 return Err(LexError::UnterminatedLiteralString { offset: start });
             };
@@ -347,8 +398,19 @@ impl<'input> Lexer<'input> {
     fn scan_hex_string(&self, start: usize) -> Result<(TokenKind, usize), LexError> {
         let mut end = next_offset(start, start)?;
         check_token_length(start, end, self.limits)?;
+        let limit_end = start.saturating_add(self.limits.max_token_bytes);
+        let window_end = limit_end.min(self.input.len());
 
         loop {
+            let run = self.input.get(end..window_end).unwrap_or(&[]);
+            let stop = run
+                .iter()
+                .position(|byte| {
+                    !matches!(*byte, b'0'..=b'9' | b'a'..=b'f' | b'A'..=b'F')
+                })
+                .unwrap_or(run.len());
+            end = end.saturating_add(stop);
+
             let Some(byte) = byte_at(self.input, end) else {
                 return Err(LexError::UnterminatedHexString { offset: start });
             };
@@ -372,6 +434,7 @@ impl<'input> Iterator for Lexer<'input> {
     type Item = Result<Token<'input>, LexError>;
 
     fn next(&mut self) -> Option<Self::Item> {
+        self.number = None;
         if self.terminated {
             return None;
         }
@@ -464,25 +527,3 @@ fn is_hex_digit(byte: u8) -> bool {
     byte.is_ascii_hexdigit()
 }
 
-fn is_pdf_number(bytes: &[u8]) -> bool {
-    let mut offset = 0usize;
-    if matches!(byte_at(bytes, offset), Some(b'+') | Some(b'-')) {
-        offset += 1;
-    }
-
-    let mut has_digit = false;
-    while matches!(byte_at(bytes, offset), Some(b'0'..=b'9')) {
-        has_digit = true;
-        offset += 1;
-    }
-
-    if byte_at(bytes, offset) == Some(b'.') {
-        offset += 1;
-        while matches!(byte_at(bytes, offset), Some(b'0'..=b'9')) {
-            has_digit = true;
-            offset += 1;
-        }
-    }
-
-    has_digit && offset == bytes.len()
-}

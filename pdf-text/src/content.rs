@@ -51,6 +51,7 @@ struct Scan<'a> {
     lexer: Lexer<'a>,
     base: usize,
     tokens: u64,
+    token_limit: u64,
     limits: Limits,
     containers: Vec<TokenKind>,
     junk: u64,
@@ -59,15 +60,17 @@ struct Scan<'a> {
 impl<'a> Scan<'a> {
     fn new(input: &'a [u8], limits: Limits, cursor: ContentCursor) -> Self {
         let base = cursor.offset.min(input.len());
+        let token_limit = token_limit(limits);
         let lexer = Lexer::with_limits(
             input.get(base..).unwrap_or(&[]),
-            lexer_limits(limits, cursor.tokens),
+            lexer_limits(limits, cursor.tokens, token_limit),
         );
         Self {
             input,
             lexer,
             base,
             tokens: cursor.tokens,
+            token_limit,
             limits,
             containers: Vec::new(),
             junk: 0,
@@ -82,30 +85,26 @@ impl<'a> Scan<'a> {
         self.base = offset.min(self.input.len());
         self.lexer = Lexer::with_limits(
             self.input.get(self.base..).unwrap_or(&[]),
-            lexer_limits(self.limits, self.tokens),
+            lexer_limits(self.limits, self.tokens, self.token_limit),
         );
     }
 
-    fn token(&mut self) -> Result<Option<(Token<'a>, usize, usize)>, DocError> {
+    fn token(&mut self) -> Result<Option<Token<'a>>, DocError> {
         loop {
             match self.lexer.next() {
                 Some(Ok(token)) => {
                     self.tokens = self.tokens.saturating_add(1);
-                    let maximum = token_limit(self.limits);
-                    check(LimitKind::Tokens, self.tokens, maximum)?;
-                    let start = self.base.saturating_add(token.span().start());
-                    let end = self.base.saturating_add(token.span().end());
-                    return Ok(Some((token, start, end)));
+                    return Ok(Some(token));
                 }
                 Some(Err(error)) => {
                     self.tokens = self.tokens.saturating_add(1);
-                    check(LimitKind::Tokens, self.tokens, token_limit(self.limits))?;
+                    check(LimitKind::Tokens, self.tokens, self.token_limit)?;
                     let offset = match error {
                         LexError::TokenBudgetExceeded { .. } => {
                             return Err(refusal(
                                 LimitKind::Tokens,
-                                token_limit(self.limits).saturating_add(1),
-                                token_limit(self.limits),
+                                self.token_limit.saturating_add(1),
+                                self.token_limit,
                             ));
                         }
                         LexError::TokenTooLong { .. } => {
@@ -147,12 +146,16 @@ impl<'a> Scan<'a> {
         mut operands: Option<(&mut Vec<Operand<'a>>, &mut u64)>,
     ) -> Result<Option<Item<'a>>, DocError> {
         loop {
-            let Some((token, start, _)) = self.token()? else {
+            let Some(token) = self.token()? else {
                 return Ok(None);
             };
             let value = match token.kind() {
                 TokenKind::Number => {
-                    let number = parse_number(token.bytes()).filter(|number| number.is_finite());
+                    let number = self
+                        .lexer
+                        .number()
+                        .or_else(|| parse_number(token.bytes()))
+                        .filter(|number| number.is_finite());
                     let Some(number) = number else {
                         self.junk = self.junk.saturating_add(1);
                         continue;
@@ -164,10 +167,11 @@ impl<'a> Scan<'a> {
                     Operand::String(token.bytes())
                 }
                 TokenKind::ArrayStart | TokenKind::DictionaryStart => {
+                    let start = self.base.saturating_add(token.span().start());
                     self.containers.clear();
                     self.open(token.kind())?;
                     let end = loop {
-                        let Some((next, _, end)) = self.token()? else {
+                        let Some(next) = self.token()? else {
                             return Err(DocError::Malformed {
                                 offset: start as u64,
                                 what: "content_container",
@@ -193,7 +197,7 @@ impl<'a> Scan<'a> {
                                     });
                                 }
                                 if self.containers.is_empty() {
-                                    break end;
+                                    break self.base.saturating_add(next.span().end());
                                 }
                             }
                             _ => {}
@@ -664,9 +668,9 @@ fn token_limit(limits: Limits) -> u64 {
     limits.max_content_ops.saturating_mul(8).min(usize::MAX as u64)
 }
 
-fn lexer_limits(limits: Limits, used: u64) -> LexerLimits {
+fn lexer_limits(limits: Limits, used: u64, maximum: u64) -> LexerLimits {
     LexerLimits::new(
-        usize::try_from(token_limit(limits).saturating_sub(used)).unwrap_or(usize::MAX),
+        usize::try_from(maximum.saturating_sub(used)).unwrap_or(usize::MAX),
         usize::try_from(limits.max_object_bytes).unwrap_or(usize::MAX),
         limits.max_depth as usize,
     )
