@@ -350,6 +350,8 @@ struct Run {
     paths: Vec<GlyphPath>,
 }
 
+// Kept unboxed on purpose: these values live in hot per-item paths and boxing the large variant adds an allocation each.
+#[allow(clippy::large_enum_variant)]
 enum Task {
     Stream(Frame),
     Array(ArrayTask),
@@ -2013,7 +2015,7 @@ impl Builder<'_> {
         let mut channels = 1usize;
         let mut unsupported = bpc != Some(8.0);
         let mut decode = None;
-        for pair in header.chunks_exact(2) {
+        for pair in header.as_chunks::<2>().0 {
             let Some(Operand::Name(key)) = pair.first() else {
                 continue;
             };

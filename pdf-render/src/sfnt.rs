@@ -286,7 +286,7 @@ pub(crate) fn wrap_cff(source: &Bytes, maximum_bytes: u64) -> Result<Option<Byte
         put16(&mut output, hhea.checked_add(10)?, upem)?;
         put16(&mut output, hhea.checked_add(34)?, glyph_count)?;
         let metrics_end = hmtx.checked_add(metrics_size)?;
-        for metric in output.get_mut(hmtx..metrics_end)?.chunks_exact_mut(4) {
+        for metric in output.get_mut(hmtx..metrics_end)?.as_chunks_mut::<4>().0 {
             metric.get_mut(..2)?.copy_from_slice(&upem.to_be_bytes());
         }
         put32(&mut output, maxp, 0x0000_5000)?;

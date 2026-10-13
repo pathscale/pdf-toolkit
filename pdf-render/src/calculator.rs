@@ -236,7 +236,7 @@ impl Calculator {
             match instruction {
                 Instruction::Push(value) => stack.push(value)?,
                 Instruction::Open(close) => {
-                    if close < pc || close >= end {
+                    if !(pc..end).contains(&close) {
                         return Err(bad("calculator_program"));
                     }
                     stack.push(Cell::Procedure(pc, close))?;

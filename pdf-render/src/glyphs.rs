@@ -198,6 +198,8 @@ enum Backend {
     Type1(Type1Font),
 }
 
+// Kept unboxed on purpose: these values live in hot per-item paths and boxing the large variant adds an allocation each.
+#[allow(clippy::large_enum_variant)]
 enum Mapping {
     Simple([Option<u16>; 256]),
     Type1([Option<GlyphName>; 256]),
@@ -524,7 +526,7 @@ fn load_source(
                 Some(value) => {
                     let bytes =
                         budget.stream(resolver, &value, maximum_bytes.min(MAX_CID_MAP_BYTES))?;
-                    if bytes.len() % 2 != 0 {
+                    if !bytes.len().is_multiple_of(2) {
                         return Err(failed());
                     }
                     Some(bytes)
@@ -828,7 +830,7 @@ impl Budget {
             )
     }
     fn charge(&mut self, bytes: usize) -> Result<(), DocError> {
-        let requested = self.used.checked_add(bytes as u64).unwrap_or(u64::MAX);
+        let requested = self.used.saturating_add(bytes as u64);
         sfnt::check(
             LimitKind::TotalDecodedBytes,
             requested,

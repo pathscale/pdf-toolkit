@@ -58,6 +58,8 @@ impl Basic {
 }
 
 #[derive(Clone, Debug, PartialEq)]
+// Kept unboxed on purpose: these values live in hot per-item paths and boxing the large variant adds an allocation each.
+#[allow(clippy::large_enum_variant)]
 enum Mapping {
     Indexed {
         palette: Arc<[u8]>,
@@ -563,6 +565,8 @@ struct Segment {
     function: Type2,
 }
 
+// Kept unboxed on purpose: these values live in hot per-item paths and boxing the large variant adds an allocation each.
+#[allow(clippy::large_enum_variant)]
 enum Function {
     Exponential(Type2),
     Stitch {
