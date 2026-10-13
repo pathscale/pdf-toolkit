@@ -10,6 +10,8 @@ jobs:
     runs-on: ubicloud-standard-2
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo check -p pdf-toolkit-core -p pdf-toolkit-text -p pdf-toolkit-render --no-default-features
       - run: cargo check -p pdf-toolkit --no-default-features && cargo check -p pdf-toolkit --all-features
@@ -21,6 +23,8 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo build --release --workspace
       # Regenerating must reproduce the committed fixtures byte for byte.
