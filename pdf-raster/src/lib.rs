@@ -235,8 +235,10 @@ pub fn encode_png(raster: &Raster) -> Vec<u8> {
     };
     for (destination, source) in pixmap
         .data_mut()
-        .chunks_exact_mut(4)
-        .zip(raster.rgba.chunks_exact(4))
+        .as_chunks_mut::<4>()
+        .0
+        .iter_mut()
+        .zip(raster.rgba.as_chunks::<4>().0)
     {
         let alpha = u16::from(source.get(3).copied().unwrap_or(0));
         let red = (u16::from(source.first().copied().unwrap_or(0))
@@ -263,7 +265,13 @@ pub fn encode_png(raster: &Raster) -> Vec<u8> {
 fn encode_opaque_png(raster: &Raster) -> Option<Vec<u8>> {
     let width = raster.width as usize;
     let height = raster.height as usize;
-    if raster.rgba.chunks_exact(4).any(|pixel| pixel[3] != 255) {
+    if raster
+        .rgba
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .any(|pixel| pixel[3] != 255)
+    {
         return None;
     }
     let row = width.checked_mul(3)?;
@@ -272,7 +280,7 @@ fn encode_opaque_png(raster: &Raster) -> Option<Vec<u8>> {
     let mut current: Vec<u8> = Vec::with_capacity(row);
     for line in raster.rgba.chunks_exact(width * 4) {
         current.clear();
-        for pixel in line.chunks_exact(4) {
+        for pixel in line.as_chunks::<4>().0 {
             current.extend_from_slice(&pixel[..3]);
         }
         filtered.push(2);
@@ -522,7 +530,13 @@ fn paint_texture(
         return Err(allocation_refusal(maximum));
     };
     let width = destination.width() as usize;
-    for (index, pixel) in texture.data_mut().chunks_exact_mut(4).enumerate() {
+    for (index, pixel) in texture
+        .data_mut()
+        .as_chunks_mut::<4>()
+        .0
+        .iter_mut()
+        .enumerate()
+    {
         *work = work.checked_add(1).ok_or(DocError::Refused(Refusal {
             limit: LimitKind::ContentOps,
             requested: u64::MAX,
@@ -605,10 +619,11 @@ fn paint_to_skia<'a>(
 }
 
 fn sk_paint<'a>(shader: Shader<'a>) -> SkPaint<'a> {
-    let mut paint = SkPaint::default();
-    paint.shader = shader;
-    paint.anti_alias = true;
-    paint
+    SkPaint {
+        shader,
+        anti_alias: true,
+        ..SkPaint::default()
+    }
 }
 
 fn dash_to_skia(dash: &pdf_render::display::Dash) -> Option<StrokeDash> {
@@ -623,14 +638,14 @@ fn dash_to_skia(dash: &pdf_render::display::Dash) -> Option<StrokeDash> {
     {
         return None;
     }
-    let capacity = if dash.array.len() % 2 == 0 {
+    let capacity = if dash.array.len().is_multiple_of(2) {
         dash.array.len()
     } else {
         dash.array.len().checked_mul(2)?
     };
     let mut values = Vec::with_capacity(capacity);
     values.extend(dash.array.iter().copied());
-    if dash.array.len() % 2 == 1 {
+    if !dash.array.len().is_multiple_of(2) {
         values.extend(dash.array.iter().copied());
     }
     StrokeDash::new(values, dash.phase)
@@ -643,27 +658,28 @@ fn stroke_to_skia(
     if !stroke.width.is_finite() || stroke.width < 0.0 {
         return None;
     }
-    let mut output = SkStroke::default();
-    output.width = stroke.width;
-    output.miter_limit = if stroke.miter.is_finite() && stroke.miter >= 1.0 {
-        stroke.miter
-    } else {
-        1.0
-    };
-    output.line_cap = match stroke.cap {
-        1 => LineCap::Round,
-        2 => LineCap::Square,
-        _ => LineCap::Butt,
-    };
-    output.line_join = match stroke.join {
-        1 => LineJoin::Round,
-        2 => LineJoin::Bevel,
-        _ => LineJoin::Miter,
-    };
-    output.dash = dash.and_then(dash_to_skia);
-    Some(output)
+    Some(SkStroke {
+        width: stroke.width,
+        miter_limit: if stroke.miter.is_finite() && stroke.miter >= 1.0 {
+            stroke.miter
+        } else {
+            1.0
+        },
+        line_cap: match stroke.cap {
+            1 => LineCap::Round,
+            2 => LineCap::Square,
+            _ => LineCap::Butt,
+        },
+        line_join: match stroke.join {
+            1 => LineJoin::Round,
+            2 => LineJoin::Bevel,
+            _ => LineJoin::Miter,
+        },
+        dash: dash.and_then(dash_to_skia),
+    })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn draw_image(
     resolver: &mut Resolver<'_>,
     destination: &mut Pixmap,
@@ -701,13 +717,14 @@ fn draw_image(
     let Some(source) = Pixmap::from_vec(rgba, size) else {
         return Ok(());
     };
-    let mut paint = PixmapPaint::default();
-    paint.blend_mode = blend;
-    paint.quality = FilterQuality::Bilinear;
-    paint.opacity = if alpha.is_finite() {
-        alpha.clamp(0.0, 1.0)
-    } else {
-        0.0
+    let paint = PixmapPaint {
+        blend_mode: blend,
+        quality: FilterQuality::Bilinear,
+        opacity: if alpha.is_finite() {
+            alpha.clamp(0.0, 1.0)
+        } else {
+            0.0
+        },
     };
     destination.draw_pixmap(0, 0, source.as_ref(), &paint, transform, mask);
     Ok(())
@@ -835,10 +852,7 @@ fn apply_external_soft_mask(
     rgba: &mut [u8],
     maximum: u64,
 ) -> Result<(), DocError> {
-    let object = match resolver.get(image_id) {
-        Ok(object) => object,
-        Err(error) => return Err(error),
-    };
+    let object = resolver.get(image_id)?;
     let Some(dict) = object.dict() else {
         return Ok(());
     };
@@ -849,10 +863,7 @@ fn apply_external_soft_mask(
     let Some(mask_id) = mask_value.get().as_ref() else {
         return Ok(());
     };
-    let mask = match pdf_text::images::load_image(resolver, mask_id, maximum / 4) {
-        Ok(mask) => mask,
-        Err(error) => return Err(error),
-    };
+    let mask = pdf_text::images::load_image(resolver, mask_id, maximum / 4)?;
     if mask.color_space != pdf_text::images::ColorSpace::Gray || mask.image_mask {
         return Ok(());
     }
@@ -868,7 +879,7 @@ fn apply_external_soft_mask(
     if image_width == 0 || height == 0 {
         return Ok(());
     }
-    for (index, pixel) in rgba.chunks_exact_mut(4).enumerate() {
+    for (index, pixel) in rgba.as_chunks_mut::<4>().0.iter_mut().enumerate() {
         let x = index % image_width;
         let y = index / image_width;
         let source_x = (x as u64).saturating_mul(u64::from(mask.width)) / u64::from(width);
@@ -895,7 +906,7 @@ fn is_fatal(error: &DocError) -> bool {
 }
 
 fn premultiply(rgba: &mut [u8]) {
-    for pixel in rgba.chunks_exact_mut(4) {
+    for pixel in rgba.as_chunks_mut::<4>().0 {
         let alpha = u16::from(pixel.get(3).copied().unwrap_or(0));
         for channel in pixel.iter_mut().take(3) {
             *channel = (u16::from(*channel)
