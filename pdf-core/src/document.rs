@@ -157,6 +157,7 @@ impl Document {
         match result {
             Ok(crypt) => self.crypt = crypt.map(Arc::new),
             Err(error @ DocError::Refused(_)) => return Err(error),
+            Err(error @ DocError::Unsupported { .. }) => return Err(error),
             Err(_) => self.warnings.push(Warning {
                 offset: None,
                 object: value.get().as_ref(),

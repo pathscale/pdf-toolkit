@@ -8,15 +8,13 @@ use crate::limits::{check, LimitKind, Refusal};
 use crate::object::{DictRef, Object, Value};
 use crate::work::ObjectRef;
 
-mod aes;
 mod md5;
 mod rc4;
-mod sha2;
 
 const SECURITY_STRING_BYTES: u64 = 4096;
 const SECURITY_NAME_BYTES: u64 = 256;
 const CRYPT_FILTERS: u64 = 64;
-const R6_ROUNDS: usize = 287;
+
 const PASSWORD_PAD: [u8; 32] = [
     0x28, 0xbf, 0x4e, 0x5e, 0x4e, 0x75, 0x8a, 0x41,
     0x64, 0x00, 0x4e, 0x56, 0xff, 0xfa, 0x01, 0x08,
@@ -28,14 +26,13 @@ const PASSWORD_PAD: [u8; 32] = [
 pub(crate) enum Method {
     Identity,
     Rc4,
-    Aes128,
-    Aes256,
+
 }
 
 pub(crate) struct Crypt {
     key: [u8; 32],
     key_len: usize,
-    revision: i64,
+
     encrypt_id: Option<ObjectRef>,
     metadata: bool,
     strings: Method,
@@ -55,28 +52,22 @@ impl Crypt {
         }
         let version = integer(resolver, dict, b"V")?.unwrap_or(0);
         let revision = integer(resolver, dict, b"R")?.ok_or_else(bad_dictionary)?;
-        let modern = version == 5 && (revision == 5 || revision == 6);
-        if !modern
-            && !((version == 1 || version == 2) && (2..=4).contains(&revision))
+        if version == 5 {
+            return Err(unsupported());
+        }
+        if !((version == 1 || version == 2) && (2..=4).contains(&revision))
             && !(version == 4 && revision == 4)
         {
             return Err(unsupported());
         }
         let bits = integer(resolver, dict, b"Length")?
-            .unwrap_or(if modern { 256 } else { 40 });
-        let key_len = if modern {
-            if bits != 256 {
-                return Err(bad_dictionary());
-            }
-            32
-        } else {
-            if !(40..=128).contains(&bits) || bits % 8 != 0
-                || ((version == 1 || revision == 2) && bits != 40)
-            {
-                return Err(bad_dictionary());
-            }
-            usize::try_from(bits / 8).map_err(|_| bad_dictionary())?
-        };
+            .unwrap_or(if version == 1 || revision == 2 { 40 } else { 128 });
+        if !(40..=128).contains(&bits) || bits % 8 != 0
+            || ((version == 1 || revision == 2) && bits != 40)
+        {
+            return Err(bad_dictionary());
+        }
+        let key_len = usize::try_from(bits / 8).map_err(|_| bad_dictionary())?;
         let permissions = integer(resolver, dict, b"P")?
             .and_then(|number| i32::try_from(number).ok())
             .ok_or_else(bad_dictionary)?;
@@ -89,7 +80,6 @@ impl Crypt {
         let mut crypt = Self {
             key: [0; 32],
             key_len,
-            revision,
             encrypt_id: value.object().id(),
             metadata,
             strings: Method::Rc4,
@@ -98,38 +88,11 @@ impl Crypt {
             filters: Vec::new(),
         };
         if version >= 4 {
-            crypt.read_filters(resolver, dict, modern)?;
+            crypt.read_filters(resolver, dict)?;
             crypt.strings = crypt.selected(resolver, dict, b"StrF", Method::Identity)?;
             crypt.streams = crypt.selected(resolver, dict, b"StmF", Method::Identity)?;
             crypt.embedded = crypt.selected(resolver, dict, b"EFF", crypt.streams)?;
         }
-        if modern {
-            let user = fixed::<48>(resolver, dict, b"U")?;
-            let _owner = fixed::<48>(resolver, dict, b"O")?;
-            let mut salt = [0u8; 8];
-            salt.copy_from_slice(&user[32..40]);
-            let hash = |salt: &[u8; 8]| if revision == 5 { Ok(sha2::sha256(salt)) } else { r6_hash(salt) };
-            if !equal(&hash(&salt)?, &user[..32]) {
-                return Ok(None);
-            }
-            salt.copy_from_slice(&user[40..48]);
-            let wrapping_key = hash(&salt)?;
-            let mut file_key = fixed::<32>(resolver, dict, b"UE")?;
-            if !aes::decrypt_cbc(&wrapping_key, [0; 16], &mut file_key) {
-                return Err(bad_dictionary());
-            }
-            let mut perms = fixed::<16>(resolver, dict, b"Perms")?;
-            let cipher = aes::Aes::new(&file_key).ok_or_else(bad_dictionary)?;
-            cipher.decrypt(&mut perms);
-            if !equal(&perms[..4], &permissions.to_le_bytes())
-                || perms[4..8] != [255; 4]
-                || perms[8] != if metadata { b'T' } else { b'F' }
-                || &perms[9..12] != b"adb"
-            {
-                return Ok(None);
-            }
-            crypt.key = file_key;
-        } else {
             let owner = fixed::<32>(resolver, dict, b"O")?;
             let user = fixed::<32>(resolver, dict, b"U")?;
             let trailer = resolver.document().trailer().clone();
@@ -186,7 +149,6 @@ impl Crypt {
                     return Ok(None);
                 }
             }
-        }
         Ok(Some(crypt))
     }
 
@@ -194,7 +156,7 @@ impl Crypt {
         &mut self,
         resolver: &mut Resolver<'_>,
         dict: DictRef<'_>,
-        modern: bool,
+
     ) -> Result<(), DocError> {
         let Some(value) = resolver.resolve_dict_key(dict, b"CF")? else {
             return Ok(());
@@ -216,9 +178,7 @@ impl Crypt {
             let dict = value.get().as_dict().ok_or_else(bad_dictionary)?;
             let method = match name(resolver, dict, b"CFM")?.as_deref() {
                 None | Some(b"None") => Method::Identity,
-                Some(b"V2") if !modern => Method::Rc4,
-                Some(b"AESV2") if !modern && self.key_len == 16 => Method::Aes128,
-                Some(b"AESV3") if modern => Method::Aes256,
+                Some(b"V2") => Method::Rc4,
                 _ => return Err(unsupported()),
             };
             if method != Method::Identity {
@@ -262,19 +222,15 @@ impl Crypt {
         self.encrypt_id.is_some() && self.encrypt_id == id
     }
 
-    fn object_key(&self, id: ObjectRef, method: Method) -> ([u8; 32], usize) {
-        if self.revision >= 5 {
-            return (self.key, 32);
-        }
+    fn object_key(&self, id: ObjectRef) -> ([u8; 32], usize) {
+
         let number = id.number().to_le_bytes();
         let generation = id.generation().to_le_bytes();
         let mut digest = md5::Md5::new();
         digest.update(&self.key[..self.key_len]);
         digest.update(&number[..3]);
         digest.update(&generation);
-        if method == Method::Aes128 {
-            digest.update(b"sAlT");
-        }
+
         let digest = digest.finish();
         let mut key = [0u8; 32];
         key[..16].copy_from_slice(&digest);
@@ -288,8 +244,7 @@ impl Crypt {
         bytes: &[u8],
         maximum: u64,
     ) -> Result<(Vec<u8>, bool), DocError> {
-        let allowance = if matches!(method, Method::Aes128 | Method::Aes256) { 32 } else { 0 };
-        let bytes = copy(bytes, maximum.saturating_add(allowance))?;
+        let bytes = copy(bytes, maximum)?;
         self.decrypt_owned(id, method, bytes, maximum)
     }
 
@@ -300,36 +255,16 @@ impl Crypt {
         mut bytes: Vec<u8>,
         maximum: u64,
     ) -> Result<(Vec<u8>, bool), DocError> {
-        let allowance = if matches!(method, Method::Aes128 | Method::Aes256) { 32 } else { 0 };
-        check(LimitKind::DecodedBytes, bytes.len() as u64, maximum.saturating_add(allowance))?;
-        let mut bad_padding = false;
+        check(LimitKind::DecodedBytes, bytes.len() as u64, maximum)?;
+
         if method != Method::Identity {
-            let (key, length) = self.object_key(id, method);
-            if method == Method::Rc4 {
-                if !rc4::apply(&key[..length], &mut bytes) {
-                    return Err(malformed(0, "crypt RC4 key"));
-                }
-            } else {
-                let mut iv = [0u8; 16];
-                iv.copy_from_slice(bytes.get(..16).ok_or_else(|| malformed(0, "crypt IV"))?);
-                bytes.drain(..16);
-                if !aes::decrypt_cbc(&key[..length], iv, &mut bytes) {
-                    return Err(malformed(0, "crypt AES blocks"));
-                }
-                let padding = usize::from(bytes.last().copied().unwrap_or(0));
-                let valid = (1..=16).contains(&padding)
-                    && bytes.get(bytes.len().saturating_sub(padding)..)
-                        .is_some_and(|tail| tail.len() == padding
-                            && tail.iter().all(|byte| usize::from(*byte) == padding));
-                if valid {
-                    bytes.truncate(bytes.len().saturating_sub(padding));
-                } else {
-                    bad_padding = true;
-                }
+            let (key, length) = self.object_key(id);
+            if !rc4::apply(&key[..length], &mut bytes) {
+                return Err(malformed(0, "crypt RC4 key"));
             }
         }
         check(LimitKind::DecodedBytes, bytes.len() as u64, maximum)?;
-        Ok((bytes, bad_padding))
+        Ok((bytes, false))
     }
 }
 
@@ -374,26 +309,12 @@ fn fixed<const N: usize>(
     resolver: &mut Resolver<'_>, dict: DictRef<'_>, key: &[u8],
 ) -> Result<[u8; N], DocError> {
     let value = resolver.resolve_dict_key(dict, key)?.ok_or_else(bad_dictionary)?;
-    // Some R6 writers pad U and O with zero bytes after their 48-byte payload.
-    // Keep the security-string bound and authenticate the original payload.
-    let padded = resolver.document().repair_mode()
-        && N == 48 && matches!(key, b"U" | b"O");
-    let maximum = if padded { SECURITY_STRING_BYTES } else { N as u64 };
-    let bytes = binary_value(resolver, &value, maximum)?;
-    if bytes.len() > N {
-        if !padded || !bytes[N..].iter().all(|byte| *byte == 0) {
-            check(LimitKind::ObjectBytes, bytes.len() as u64, N as u64)?;
-        }
-        resolver.warn(Warning {
-            offset: Some(value.get().span().start as u64),
-            object: value.object().id(),
-            what: "crypt_string_padding_recovered",
-        });
-    } else if bytes.len() != N {
+    let bytes = binary_value(resolver, &value, N as u64)?;
+    if bytes.len() != N {
         return Err(bad_dictionary());
     }
     let mut result = [0u8; N];
-    result.copy_from_slice(&bytes[..N]);
+    result.copy_from_slice(&bytes);
     Ok(result)
 }
 
@@ -402,48 +323,6 @@ fn equal(left: &[u8], right: &[u8]) -> bool {
         && left.iter().zip(right).fold(0u8, |difference, (a, b)| difference | (*a ^ *b)) == 0
 }
 
-fn r6_hash(salt: &[u8; 8]) -> Result<[u8; 32], DocError> {
-    // Algorithm 2.B specialized to the empty user password. No owner-user-key
-    // suffix is used when verifying or deriving the empty user's key.
-    let mut key = [0u8; 64];
-    key[..32].copy_from_slice(&sha2::sha256(salt));
-    let mut length = 32usize;
-    let mut buffer = [0u8; 4096];
-    for round in 0..R6_ROUNDS {
-        let size = length * 64;
-        for block in buffer[..size].chunks_exact_mut(length) {
-            block.copy_from_slice(&key[..length]);
-        }
-        let mut iv = [0u8; 16];
-        iv.copy_from_slice(&key[16..32]);
-        if !aes::encrypt_cbc(&key[..16], iv, &mut buffer[..size]) {
-            return Err(bad_dictionary());
-        }
-        let last = buffer[size - 1];
-        let selector = buffer[..16].iter().fold(0usize, |sum, byte| sum + usize::from(*byte)) % 3;
-        match selector {
-            0 => {
-                key[..32].copy_from_slice(&sha2::sha256(&buffer[..size]));
-                length = 32;
-            }
-            1 => {
-                key = sha2::sha512(&buffer[..size], true);
-                length = 48;
-            }
-            _ => {
-                key = sha2::sha512(&buffer[..size], false);
-                length = 64;
-            }
-        }
-        let completed = round + 1;
-        if completed >= 64 && usize::from(last) <= completed - 32 {
-            let mut result = [0u8; 32];
-            result.copy_from_slice(&key[..32]);
-            return Ok(result);
-        }
-    }
-    Err(refusal(LimitKind::CodecWork, R6_ROUNDS as u64 + 1, R6_ROUNDS as u64))
-}
 
 pub(crate) fn decode_stream(
     resolver: &mut Resolver<'_>,

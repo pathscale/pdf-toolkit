@@ -21,6 +21,8 @@ can also be used directly (embedders such as a browser take only the no_std core
 | `pdf-toolkit-edit` | Incremental updates that keep the original bytes: annotations, page rotation, deletion, reordering and import, document info, ECDSA P-256 and P-384 signing and offline verification (feature `sign`), and `pdf-roundtrip`, which checks the writer and editor by reading their output back. |
 | `pdf-toolkit-inspect` | The `pdf-inspect` binary: `summary`, `streams`, `text`, `receipt`, `semantic`, `image`, `render`, `repair`, `bench`, `mutate` (deterministic mutation fuzzing), `signatures` (signature reports) and `check` (fixture manifests). |
 
+The reader supports Standard-handler RC4 encryption and its private PSChaCha format. Standard-handler AESV2 (AES-128) and AESV3 (AES-256, including R5/R6) PDFs are unsupported.
+
 ## Example
 
 ```rust
