@@ -257,7 +257,7 @@ fn format_time(time: &Time) -> String {
 fn pdf_date_iso(raw: &str) -> Option<String> {
     let body = raw.strip_prefix("D:").unwrap_or(raw).as_bytes();
     let digits = body.iter().take_while(|byte| byte.is_ascii_digit()).count();
-    if digits < 4 || digits % 2 != 0 || digits > 14 {
+    if digits < 4 || !digits.is_multiple_of(2) || digits > 14 {
         return None;
     }
     let field = |at: usize, default: &str| {

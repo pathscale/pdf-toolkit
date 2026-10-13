@@ -164,8 +164,10 @@ fn compare_pixels(
     let mut outside = 0usize;
     for (index, (a, b)) in before
         .rgba
-        .chunks_exact(4)
-        .zip(after.rgba.chunks_exact(4))
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .zip(after.rgba.as_chunks::<4>().0)
         .enumerate()
     {
         if a == b {

@@ -100,8 +100,8 @@ impl Editor {
                 .get(*index as usize)
                 .ok_or_else(|| malformed("source page index"))?;
             let new = self.import_id(&mut next)?;
-            if !mapping.contains_key(&key(old)) {
-                mapping.insert(key(old), new);
+            if let std::collections::btree_map::Entry::Vacant(e) = mapping.entry(key(old)) {
+                e.insert(new);
                 queue.push_back((old, 0u64));
             }
             selected.push((old, new));

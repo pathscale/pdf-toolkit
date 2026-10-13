@@ -111,7 +111,7 @@ impl Report {
         let result = if passed || detail.is_empty() {
             writeln!(io::stdout().lock(), "{status} {name} {check}")
         } else {
-            let detail = detail.replace('\n', " ").replace('\r', " ");
+            let detail = detail.replace(['\n', '\r'], " ");
             writeln!(io::stdout().lock(), "{status} {name} {check}: {detail}")
         };
         self.output_failed |= result.is_err();
@@ -996,6 +996,7 @@ fn edit(bytes: Arc<[u8]>, title: &str) -> CheckResult<Editor> {
     Ok(editor)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_incremental(
     report: &mut Report,
     config: &Config,
