@@ -767,7 +767,7 @@ pub fn page_count_hint(resolver: &mut Resolver<'_>) -> Result<u32, DocError> {
     Ok(count)
 }
 
-fn page_count_hint_strict(resolver: &mut Resolver<'_>) -> Result<u32, DocError> {
+pub fn page_count_hint_strict(resolver: &mut Resolver<'_>) -> Result<u32, DocError> {
     let catalog_id = resolver
         .document()
         .root_ref()
