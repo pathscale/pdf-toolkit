@@ -1114,7 +1114,9 @@ fn write_image_output(base: &Path, image: &pdf_text::images::Image) -> Result<()
             }
             let has_alpha = soft_mask.is_some()
                 || rgba
-                    .chunks_exact(4)
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
                     .any(|pixel| pixel.get(3).copied().unwrap_or(255) < 255);
 
             let (suffix, header) = if has_alpha {
@@ -1132,7 +1134,7 @@ fn write_image_output(base: &Path, image: &pdf_text::images::Image) -> Result<()
                 )
             };
             let mut output = header.into_bytes();
-            for (index, pixel) in rgba.chunks_exact(4).enumerate() {
+            for (index, pixel) in rgba.as_chunks::<4>().0.iter().enumerate() {
                 let rgb = pixel.get(..3).ok_or_else(invalid_image_data)?;
                 output.extend_from_slice(rgb);
                 if has_alpha {
@@ -1665,9 +1667,8 @@ fn bench_sample(path: &Path, limits: Limits) -> Result<BenchSample, String> {
             match PageWalk::new(&mut resolver) {
                 Ok(walk) => {
                     let mut walk = walk;
-                    match walk.next() {
-                        Some(item) => record_bench_page(item, &mut pages, &mut refusal),
-                        None => {}
+                    if let Some(item) = walk.next() {
+                        record_bench_page(item, &mut pages, &mut refusal)
                     }
                     first_page_ms = overall_start.elapsed().as_secs_f64() * 1000.0;
                     for item in walk {

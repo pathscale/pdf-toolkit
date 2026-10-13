@@ -95,8 +95,8 @@ pub(crate) fn page_boxes(
             continue;
         };
         let mut parts = Vec::new();
-        for index in 0..array.len() {
-            let number = array.get(index).and_then(|item| item.as_f64());
+        for item in array.iter() {
+            let number = item.as_f64();
             parts.push(number.map_or_else(|| "?".to_string(), format_number));
         }
         actuals.insert(format!("{prefix}.{label}"), parts.join(" "));
