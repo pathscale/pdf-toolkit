@@ -4,8 +4,7 @@ use std::io;
 
 use super::encrypt::Encryption;
 use super::{
-    manifest, name, page_truth, page_value, reference, ContentTruth,
-    Fixture, House, LETTER,
+    manifest, name, page_truth, page_value, reference, ContentTruth, Fixture, House, LETTER,
 };
 use crate::{encode, Value};
 
@@ -14,8 +13,7 @@ const PLAIN: &[u8] =
 const TEXT_NORM: &str = "Empty user password Encrypted strings and streams";
 
 fn build() -> io::Result<Fixture> {
-    let (label, title, version, xref_kind) =
-        ("encrypted-rc4", "Encrypted RC4", "1.7", "table");
+    let (label, title, version, xref_kind) = ("encrypted-rc4", "Encrypted RC4", "1.7", "table");
     let encryption = Encryption::new(label.as_bytes())?;
     let mut house = House::new(version)?;
     let page = house.writer.alloc()?;
@@ -34,10 +32,7 @@ fn build() -> io::Result<Fixture> {
     let title_ciphertext = encryption.encrypt(info, title.as_bytes())?;
     house.writer.object(
         info,
-        &Value::Dict(vec![(
-            "Title".to_owned(),
-            Value::Str(title_ciphertext),
-        )]),
+        &Value::Dict(vec![("Title".to_owned(), Value::Str(title_ciphertext))]),
     )?;
     house.writer.object(encrypt, &encryption.dictionary())?;
 

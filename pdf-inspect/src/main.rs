@@ -1,12 +1,12 @@
-use std::alloc::{GlobalAlloc, Layout};
 use rusty_alloc::RustyAlloc as System;
+use std::alloc::{GlobalAlloc, Layout};
 use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
-use std::io::Read;
 
 use pdf_core::document::{Document, Resolver, XrefEntry, XrefKind};
 use pdf_core::error::{DocError, Warning};
@@ -16,9 +16,9 @@ use pdf_core::object::{DictRef, Object};
 use pdf_core::pages::{page_count_hint, Page, PageWalk};
 use pdf_core::source::PdfSource;
 use pdf_core::work::ObjectRef;
-use pdf_toolkit_inspect::{digest_hex, format_number, JsonWriter, Sha256};
 use pdf_raster::{encode_png, render_page as rasterize_page};
 use pdf_render::RenderOptions;
+use pdf_toolkit_inspect::{digest_hex, format_number, JsonWriter, Sha256};
 
 /// println! that ends the process quietly once stdout is closed, for example by `head`.
 macro_rules! out {
@@ -87,12 +87,8 @@ fn record_allocation(size: usize) {
 
     let mut peak = PEAK_BYTES.load(Ordering::Relaxed);
     while current > peak {
-        match PEAK_BYTES.compare_exchange_weak(
-            peak,
-            current,
-            Ordering::Relaxed,
-            Ordering::Relaxed,
-        ) {
+        match PEAK_BYTES.compare_exchange_weak(peak, current, Ordering::Relaxed, Ordering::Relaxed)
+        {
             Ok(_) => break,
             Err(observed) => peak = observed,
         }
@@ -174,17 +170,15 @@ fn run() -> u8 {
             }
         },
         "render" => match parse_render_args(&args) {
-            Some((path, page, output, dpi, font, repair)) => {
-                run_render(
-                    &path,
-                    page,
-                    &output,
-                    dpi,
-                    font.as_deref(),
-                    repair,
-                    Limits::default(),
-                )
-            }
+            Some((path, page, output, dpi, font, repair)) => run_render(
+                &path,
+                page,
+                &output,
+                dpi,
+                font.as_deref(),
+                repair,
+                Limits::default(),
+            ),
             None => {
                 print_usage();
                 1
@@ -255,9 +249,7 @@ fn parse_single_path(args: &[OsString]) -> Option<PathBuf> {
 fn parse_path_repair(args: &[OsString]) -> Option<(PathBuf, bool)> {
     match args.len() {
         2 => Some((PathBuf::from(args.get(1)?), false)),
-        3 if args.get(2)?.to_str()? == "--repair" => {
-            Some((PathBuf::from(args.get(1)?), true))
-        }
+        3 if args.get(2)?.to_str()? == "--repair" => Some((PathBuf::from(args.get(1)?), true)),
         _ => None,
     }
 }
@@ -377,10 +369,8 @@ fn parse_bench_args(args: &[OsString]) -> Option<(Vec<PathBuf>, usize)> {
         let argument = args.get(index)?;
         let text = argument.to_str()?;
         if text == "--repeat" {
-            repeat = usize::try_from(parse_u64_argument(
-                args.get(index.saturating_add(1))?,
-            )?)
-            .ok()?;
+            repeat =
+                usize::try_from(parse_u64_argument(args.get(index.saturating_add(1))?)?).ok()?;
             if repeat == 0 {
                 return None;
             }
@@ -415,10 +405,9 @@ fn parse_mutate_args(args: &[OsString]) -> Option<(PathBuf, u64, usize)> {
                 index = index.saturating_add(2);
             }
             "--count" => {
-                let parsed = usize::try_from(parse_u64_argument(
-                    args.get(index.saturating_add(1))?,
-                )?)
-                .ok()?;
+                let parsed =
+                    usize::try_from(parse_u64_argument(args.get(index.saturating_add(1))?)?)
+                        .ok()?;
                 if parsed > MAX_MUTATE_CASES {
                     return None;
                 }
@@ -447,7 +436,11 @@ fn parse_u32_argument(argument: &OsStr) -> Option<u32> {
     u32::try_from(parse_u64_argument(argument)?).ok()
 }
 
-fn open_source(path: &Path, limits: Limits, repair: bool) -> Result<PdfSource, file::FileOpenError> {
+fn open_source(
+    path: &Path,
+    limits: Limits,
+    repair: bool,
+) -> Result<PdfSource, file::FileOpenError> {
     if repair {
         file::open_repair(path, limits.max_file_bytes)
     } else {
@@ -455,11 +448,7 @@ fn open_source(path: &Path, limits: Limits, repair: bool) -> Result<PdfSource, f
     }
 }
 
-fn open_document(
-    source: PdfSource,
-    limits: Limits,
-    repair: bool,
-) -> Result<Document, DocError> {
+fn open_document(source: PdfSource, limits: Limits, repair: bool) -> Result<Document, DocError> {
     if repair {
         Document::open_with(source, limits, pdf_core::OpenMode::Repair)
     } else {
@@ -505,10 +494,7 @@ fn warning_record(warning: &Warning) -> WarningRecord {
     }
 }
 
-fn append_resolver_warnings(
-    resolver: &mut Resolver<'_>,
-    warnings: &mut Vec<WarningRecord>,
-) {
+fn append_resolver_warnings(resolver: &mut Resolver<'_>, warnings: &mut Vec<WarningRecord>) {
     for warning in resolver.take_warnings() {
         warnings.push(warning_record(&warning));
     }
@@ -606,9 +592,7 @@ fn write_file_info(json: &mut JsonWriter, source: &PdfSource) {
     json.member("bytes");
     json.number(source.bytes().len() as u64);
     json.member("sha256");
-    json.string(&digest_hex(
-        source.identity().digest().as_bytes(),
-    ));
+    json.string(&digest_hex(source.identity().digest().as_bytes()));
     json.member("version");
     json.string(&source.header().version().to_string());
     json.end_object();
@@ -715,10 +699,7 @@ fn write_semantic_bbox(json: &mut JsonWriter, bbox: [f32; 4]) {
     json.end_array();
 }
 
-fn write_semantic_target(
-    json: &mut JsonWriter,
-    target: Option<&pdf_text::semantic::LinkTarget>,
-) {
+fn write_semantic_target(json: &mut JsonWriter, target: Option<&pdf_text::semantic::LinkTarget>) {
     let Some(target) = target else {
         json.null();
         return;
@@ -925,11 +906,7 @@ fn write_repaired_semantic_document(json: &mut JsonWriter, document: &Document) 
     json.member("pages");
     json.begin_array();
     for page in &report.pages {
-        let receipt = pdf_text::extract::page_receipt_cached(
-            &mut resolver,
-            page,
-            &mut fonts,
-        );
+        let receipt = pdf_text::extract::page_receipt_cached(&mut resolver, page, &mut fonts);
         json.begin_object();
         json.member("index");
         json.number(page.index as u64);
@@ -1024,7 +1001,8 @@ fn run_semantic(path: &Path, limits: Limits, repair: bool) -> u8 {
             }
         };
         let mut json = JsonWriter::new();
-        match pdf_text::semantic::semantic_document_with(source, limits, pdf_core::OpenMode::Repair) {
+        match pdf_text::semantic::semantic_document_with(source, limits, pdf_core::OpenMode::Repair)
+        {
             Ok(document) => write_semantic_document(&mut json, &document),
             Err(_) => write_repaired_semantic_document(&mut json, &repaired),
         }
@@ -1056,15 +1034,16 @@ fn run_repair(path: &Path, limits: Limits) -> u8 {
             return 3;
         }
     };
-    let strict = Document::open(source.clone(), limits).err().map(|error| error.code());
-    let document =
-        match Document::open_with(source, limits, pdf_core::OpenMode::Repair) {
-            Ok(document) => document,
-            Err(error) => {
-                out!("{{\"strict\":{:?},\"repair\":{:?}}}", strict, error.code());
-                return 1;
-            }
-        };
+    let strict = Document::open(source.clone(), limits)
+        .err()
+        .map(|error| error.code());
+    let document = match Document::open_with(source, limits, pdf_core::OpenMode::Repair) {
+        Ok(document) => document,
+        Err(error) => {
+            out!("{{\"strict\":{:?},\"repair\":{:?}}}", strict, error.code());
+            return 1;
+        }
+    };
     let mut resolver = document.resolver();
     let (mut pages, mut page_errors, mut glyphs) = (0u32, 0u32, 0usize);
     let walked: Vec<_> = match PageWalk::new(&mut resolver) {
@@ -1108,13 +1087,13 @@ fn image_output_path(base: &Path, suffix: &str) -> PathBuf {
 }
 
 fn invalid_image_data() -> std::io::Error {
-    std::io::Error::new(std::io::ErrorKind::InvalidData, "invalid decoded image data")
+    std::io::Error::new(
+        std::io::ErrorKind::InvalidData,
+        "invalid decoded image data",
+    )
 }
 
-fn write_image_output(
-    base: &Path,
-    image: &pdf_text::images::Image,
-) -> Result<(), std::io::Error> {
+fn write_image_output(base: &Path, image: &pdf_text::images::Image) -> Result<(), std::io::Error> {
     match &image.data {
         pdf_text::images::ImageData::Jpeg(bytes) => {
             std::fs::write(image_output_path(base, ".jpg"), bytes)
@@ -1162,9 +1141,8 @@ fn write_image_output(
                         .and_then(|mask| mask.get(index))
                         .copied()
                         .map(|mask_alpha| {
-                            (u16::from(pixel_alpha)
-                                .saturating_mul(u16::from(mask_alpha))
-                                / 255) as u8
+                            (u16::from(pixel_alpha).saturating_mul(u16::from(mask_alpha)) / 255)
+                                as u8
                         })
                         .unwrap_or(pixel_alpha);
                     output.push(alpha);
@@ -1201,17 +1179,14 @@ fn run_image(path: &Path, object_number: u32, output: &Path, limits: Limits) -> 
     };
 
     let mut resolver = document.resolver();
-    let image = match pdf_text::images::load_image(
-        &mut resolver,
-        object,
-        limits.max_decoded_bytes / 4,
-    ) {
-        Ok(image) => image,
-        Err(error) => {
-            eprintln!("{error}");
-            return 3;
-        }
-    };
+    let image =
+        match pdf_text::images::load_image(&mut resolver, object, limits.max_decoded_bytes / 4) {
+            Ok(image) => image,
+            Err(error) => {
+                eprintln!("{error}");
+                return 3;
+            }
+        };
     if let Err(error) = write_image_output(output, &image) {
         eprintln!("{error}");
         return 3;
@@ -1314,12 +1289,7 @@ fn run_render(
         scale: dpi as f32 / 72.0,
         fallback_font,
     };
-    let raster = match rasterize_page(
-        &mut resolver,
-        &page,
-        &options,
-        [255, 255, 255, 255],
-    ) {
+    let raster = match rasterize_page(&mut resolver, &page, &options, [255, 255, 255, 255]) {
         Ok(raster) => raster,
         Err(error) => {
             eprintln!("{error}");
@@ -1462,10 +1432,7 @@ struct StreamRecord {
     refusal: Option<RefusalReport>,
 }
 
-fn stream_filter_names(
-    resolver: &mut Resolver<'_>,
-    object: &Object,
-) -> Vec<Vec<u8>> {
+fn stream_filter_names(resolver: &mut Resolver<'_>, object: &Object) -> Vec<Vec<u8>> {
     let Some(dict) = object.dict() else {
         return Vec::new();
     };
@@ -1752,12 +1719,8 @@ fn bench_sample(path: &Path, limits: Limits) -> Result<BenchSample, String> {
                 scale: 1.0,
                 fallback_font: None,
             };
-            if let Err(error) = rasterize_page(
-                &mut resolver,
-                page,
-                &options,
-                [255, 255, 255, 255],
-            ) {
+            if let Err(error) = rasterize_page(&mut resolver, page, &options, [255, 255, 255, 255])
+            {
                 if refusal.is_none() {
                     refusal = Some(error.code().to_string());
                 }
@@ -2045,10 +2008,7 @@ fn mutate_bytes(bytes: &mut Vec<u8>, state: &mut u64) {
             let start = random_below(state, bytes.len());
             let available = bytes.len().saturating_sub(start).min(4096);
             if available > 0 {
-                let length = 1usize.saturating_add(random_below(
-                    state,
-                    available,
-                ));
+                let length = 1usize.saturating_add(random_below(state, available));
                 let insert_at = random_below(state, bytes.len().saturating_add(1));
                 let end = start.saturating_add(length);
                 if let Some(range) = bytes.get(start..end) {
@@ -2070,10 +2030,7 @@ fn mutate_bytes(bytes: &mut Vec<u8>, state: &mut u64) {
             let start = random_below(state, bytes.len());
             let available = bytes.len().saturating_sub(start).min(4096);
             if available > 0 {
-                let length = 1usize.saturating_add(random_below(
-                    state,
-                    available,
-                ));
+                let length = 1usize.saturating_add(random_below(state, available));
                 let end = start.saturating_add(length);
                 if let Some(range) = bytes.get_mut(start..end) {
                     range.fill(0);
@@ -2216,8 +2173,7 @@ fn mutation_render_scale(page: &Page) -> Option<f32> {
         return Some(BASE_SCALE as f32);
     }
 
-    let target_width = ((MAX_DEVICE_PIXELS as f64 * base_width as f64
-        / base_height as f64)
+    let target_width = ((MAX_DEVICE_PIXELS as f64 * base_width as f64 / base_height as f64)
         .sqrt()
         .floor()
         .max(1.0) as u64)
@@ -2286,11 +2242,7 @@ fn run_mutated(bytes: Vec<u8>, limits: Limits) -> MutateCaseReport {
     let source_result = run_fuzz_stage(&mut report.stages.source, || {
         PdfSource::new(Arc::<[u8]>::from(bytes)).map_err(|_| "source".to_string())
     });
-    remember_fuzz_outcome(
-        &source_result,
-        &mut report.refusal,
-        &mut report.panicked,
-    );
+    remember_fuzz_outcome(&source_result, &mut report.refusal, &mut report.panicked);
     let source = match source_result {
         FuzzStageOutcome::Success(source) => Some(source),
         FuzzStageOutcome::Refused(_) | FuzzStageOutcome::Panicked => None,
@@ -2301,11 +2253,7 @@ fn run_mutated(bytes: Vec<u8>, limits: Limits) -> MutateCaseReport {
         let strict_result = run_fuzz_stage(&mut report.stages.strict_open, || {
             Document::open(source.clone(), limits).map_err(|error| error.code().to_string())
         });
-        remember_fuzz_outcome(
-            &strict_result,
-            &mut report.refusal,
-            &mut report.panicked,
-        );
+        remember_fuzz_outcome(&strict_result, &mut report.refusal, &mut report.panicked);
         match strict_result {
             // Later stages see what a robust consumer gets: the repair-mode document, whose
             // page walk rebuilds a broken page tree even when the xref opened strictly.
@@ -2317,18 +2265,10 @@ fn run_mutated(bytes: Vec<u8>, limits: Limits) -> MutateCaseReport {
             }
             FuzzStageOutcome::Refused(_) | FuzzStageOutcome::Panicked => {
                 let repair_result = run_fuzz_stage(&mut report.stages.repair_open, || {
-                    Document::open_with(
-                        source.clone(),
-                        limits,
-                        pdf_core::OpenMode::Repair,
-                    )
-                    .map_err(|error| error.code().to_string())
+                    Document::open_with(source.clone(), limits, pdf_core::OpenMode::Repair)
+                        .map_err(|error| error.code().to_string())
                 });
-                remember_fuzz_outcome(
-                    &repair_result,
-                    &mut report.refusal,
-                    &mut report.panicked,
-                );
+                remember_fuzz_outcome(&repair_result, &mut report.refusal, &mut report.panicked);
                 if let FuzzStageOutcome::Success(opened) = repair_result {
                     document = Some(opened);
                 }
@@ -2340,19 +2280,14 @@ fn run_mutated(bytes: Vec<u8>, limits: Limits) -> MutateCaseReport {
     if let Some(document) = document.as_ref() {
         let page_result = run_fuzz_stage(&mut report.stages.page_walk, || {
             let mut resolver = document.resolver();
-            let walk = PageWalk::new(&mut resolver)
-                .map_err(|error| error.code().to_string())?;
+            let walk = PageWalk::new(&mut resolver).map_err(|error| error.code().to_string())?;
             let mut pages = Vec::new();
             for item in walk {
                 pages.push(item.map_err(|error| error.code().to_string())?);
             }
             Ok(pages)
         });
-        remember_fuzz_outcome(
-            &page_result,
-            &mut report.refusal,
-            &mut report.panicked,
-        );
+        remember_fuzz_outcome(&page_result, &mut report.refusal, &mut report.panicked);
         if let FuzzStageOutcome::Success(walked) = page_result {
             pages = Some(walked);
         }
@@ -2372,11 +2307,7 @@ fn run_mutated(bytes: Vec<u8>, limits: Limits) -> MutateCaseReport {
                 }
                 Ok(())
             });
-            remember_fuzz_outcome(
-                &stream_result,
-                &mut report.refusal,
-                &mut report.panicked,
-            );
+            remember_fuzz_outcome(&stream_result, &mut report.refusal, &mut report.panicked);
 
             let text_result = run_fuzz_stage(&mut report.stages.text, || {
                 let mut refusal = None;
@@ -2386,25 +2317,21 @@ fn run_mutated(bytes: Vec<u8>, limits: Limits) -> MutateCaseReport {
                     None => Ok(()),
                 }
             });
-            remember_fuzz_outcome(
-                &text_result,
-                &mut report.refusal,
-                &mut report.panicked,
-            );
+            remember_fuzz_outcome(&text_result, &mut report.refusal, &mut report.panicked);
         }
     }
 
     let mut semantic = None;
     if let Some(source) = source.as_ref() {
         let semantic_result = run_fuzz_stage(&mut report.stages.semantic_document, || {
-            pdf_text::semantic::semantic_document_with(source.clone(), limits, pdf_core::OpenMode::Repair)
-                .map_err(|error| error.code().to_string())
+            pdf_text::semantic::semantic_document_with(
+                source.clone(),
+                limits,
+                pdf_core::OpenMode::Repair,
+            )
+            .map_err(|error| error.code().to_string())
         });
-        remember_fuzz_outcome(
-            &semantic_result,
-            &mut report.refusal,
-            &mut report.panicked,
-        );
+        remember_fuzz_outcome(&semantic_result, &mut report.refusal, &mut report.panicked);
         if let FuzzStageOutcome::Success(value) = semantic_result {
             semantic = Some(value);
         }
@@ -2439,11 +2366,7 @@ fn run_mutated(bytes: Vec<u8>, limits: Limits) -> MutateCaseReport {
                     .map(|_| ())
                     .map_err(|error| error.code().to_string())
                 });
-                remember_fuzz_outcome(
-                    &image_result,
-                    &mut report.refusal,
-                    &mut report.panicked,
-                );
+                remember_fuzz_outcome(&image_result, &mut report.refusal, &mut report.panicked);
             }
         }
     }
@@ -2454,28 +2377,19 @@ fn run_mutated(bytes: Vec<u8>, limits: Limits) -> MutateCaseReport {
             .and_then(|pages| pages.iter().find(|page| page.index == 0));
         if let Some(page) = page_zero {
             let render_result = run_fuzz_stage(&mut report.stages.render_page_0, || {
-                let scale = mutation_render_scale(page)
-                    .ok_or_else(|| "invalid_page_bounds".to_string())?;
+                let scale =
+                    mutation_render_scale(page).ok_or_else(|| "invalid_page_bounds".to_string())?;
                 let options = RenderOptions {
                     scale,
                     fallback_font: None,
                 };
                 let mut resolver = document.resolver();
-                let raster = rasterize_page(
-                    &mut resolver,
-                    page,
-                    &options,
-                    [255, 255, 255, 255],
-                )
-                .map_err(|_| "render_failed".to_string())?;
+                let raster = rasterize_page(&mut resolver, page, &options, [255, 255, 255, 255])
+                    .map_err(|_| "render_failed".to_string())?;
                 let _ = std::hint::black_box(raster);
                 Ok(())
             });
-            remember_fuzz_outcome(
-                &render_result,
-                &mut report.refusal,
-                &mut report.panicked,
-            );
+            remember_fuzz_outcome(&render_result, &mut report.refusal, &mut report.panicked);
         } else {
             record_fuzz_refusal(&mut report.stages.render_page_0, "page_0_unavailable");
             if report.refusal.is_none() {
@@ -2594,7 +2508,10 @@ fn parse_manifest(text: &str) -> Result<Manifest, String> {
         let key = key.trim().to_string();
         let value = value.trim().to_string();
         if key.is_empty() {
-            return Err(format!("line {} has an empty key", line_number.saturating_add(1)));
+            return Err(format!(
+                "line {} has an empty key",
+                line_number.saturating_add(1)
+            ));
         }
 
         if key.starts_with("limit.") {
@@ -2709,10 +2626,7 @@ fn add_semantic_fixture_values(
             }
         }
         actuals.insert(format!("{prefix}.links"), links.join(" | "));
-        actuals.insert(
-            format!("{prefix}.images"),
-            page.images.len().to_string(),
-        );
+        actuals.insert(format!("{prefix}.images"), page.images.len().to_string());
         actuals.insert(
             format!("{prefix}.spans"),
             page.blocks
@@ -2720,7 +2634,6 @@ fn add_semantic_fixture_values(
                 .map(semantic_spans_manifest)
                 .unwrap_or_default(),
         );
-
     }
 
     // Every image object, painted or not (a soft mask is never painted itself):
@@ -2785,7 +2698,11 @@ fn semantic_with_warnings(
         .map(|warning| warning.what.to_string())
         .collect();
     (
-        Some(pdf_text::semantic::SemanticDoc { info, outline, pages }),
+        Some(pdf_text::semantic::SemanticDoc {
+            info,
+            outline,
+            pages,
+        }),
         warnings,
     )
 }
@@ -2813,10 +2730,7 @@ fn mark_render_failure(
     page_index: u32,
     code: &str,
 ) {
-    actuals.insert(
-        format!("page.{page_index}.render"),
-        code.to_string(),
-    );
+    actuals.insert(format!("page.{page_index}.render"), code.to_string());
     for (key, _) in expectations {
         if parse_pixel_key(key).is_some_and(|(index, _, _)| index == page_index) {
             actuals.insert(key.clone(), "unavailable".to_string());
@@ -2831,8 +2745,8 @@ fn mark_requested_render_failures(
 ) {
     let mut indices = BTreeMap::new();
     for (key, _) in expectations {
-        if let Some(index) = parse_render_page_key(key)
-            .or_else(|| parse_pixel_key(key).map(|(index, _, _)| index))
+        if let Some(index) =
+            parse_render_page_key(key).or_else(|| parse_pixel_key(key).map(|(index, _, _)| index))
         {
             indices.insert(index, ());
         }
@@ -2889,8 +2803,8 @@ fn render_fixture_expectations(
 ) {
     let mut indices = BTreeMap::new();
     for (key, _) in expectations {
-        if let Some(index) = parse_render_page_key(key)
-            .or_else(|| parse_pixel_key(key).map(|(index, _, _)| index))
+        if let Some(index) =
+            parse_render_page_key(key).or_else(|| parse_pixel_key(key).map(|(index, _, _)| index))
         {
             indices.insert(index, ());
         }
@@ -2906,12 +2820,7 @@ fn render_fixture_expectations(
             scale: 1.0,
             fallback_font: None,
         };
-        match rasterize_page(
-            &mut resolver,
-            page,
-            &options,
-            [255, 255, 255, 255],
-        ) {
+        match rasterize_page(&mut resolver, page, &options, [255, 255, 255, 255]) {
             Ok(raster) => {
                 actuals.insert(format!("page.{index}.render"), "ok".to_string());
                 for (key, _) in expectations {
@@ -2941,12 +2850,11 @@ fn actual_fixture_values(
 ) -> Result<(BTreeMap<String, String>, Vec<String>), String> {
     let source = file::open(path, limits.max_file_bytes).map_err(|error| error.to_string())?;
     let mut actuals = BTreeMap::new();
-    actuals.insert(
-        "version".to_string(),
-        source.header().version().to_string(),
-    );
+    actuals.insert("version".to_string(), source.header().version().to_string());
 
-    let password = expectations.iter().find(|(key, _)| key == "open.password")
+    let password = expectations
+        .iter()
+        .find(|(key, _)| key == "open.password")
         .map(|(_, value)| value.as_bytes());
     let (semantic, semantic_warnings) = if password.is_some() {
         (None, Vec::new())
@@ -2994,23 +2902,22 @@ fn actual_fixture_values(
         "xref_sections".to_string(),
         document.xref().sections().to_string(),
     );
-    actuals.insert(
-        "encrypted".to_string(),
-        document.encrypted().to_string(),
-    );
+    actuals.insert("encrypted".to_string(), document.encrypted().to_string());
 
     if let Some(password) = password {
         let mut resolver = document.resolver();
         let mut corruption = "unavailable".to_string();
         for number in 1..document.xref().size() {
-            let Some(pdf_core::XrefEntry::InUse { generation, .. }) =
-                document.xref().get(number)
+            let Some(pdf_core::XrefEntry::InUse { generation, .. }) = document.xref().get(number)
             else {
                 continue;
             };
-            let object = resolver.get(pdf_core::ObjectRef::new(number, generation))
+            let object = resolver
+                .get(pdf_core::ObjectRef::new(number, generation))
                 .map_err(|error| error.to_string())?;
-            let xref = object.dict().and_then(|dict| dict.get(b"Type"))
+            let xref = object
+                .dict()
+                .and_then(|dict| dict.get(b"Type"))
                 .and_then(|value| value.as_name())
                 .is_some_and(|name| name.eq_bytes(b"XRef"));
             if xref || object.id() == document.encryption_ref() {
@@ -3019,9 +2926,12 @@ fn actual_fixture_values(
             if let Some(range) = object.stream_range() {
                 if range.len() >= 40 {
                     let mut damaged = source.bytes().to_vec();
-                    let position = range.start.checked_add(24)
+                    let position = range
+                        .start
+                        .checked_add(24)
                         .ok_or_else(|| "ciphertext position overflow".to_string())?;
-                    let byte = damaged.get_mut(position)
+                    let byte = damaged
+                        .get_mut(position)
                         .ok_or_else(|| "ciphertext position outside file".to_string())?;
                     *byte ^= 1;
                     let damaged = PdfSource::new(std::sync::Arc::<[u8]>::from(damaged))
@@ -3037,7 +2947,9 @@ fn actual_fixture_values(
         actuals.insert("open.corrupt_ciphertext".to_string(), corruption);
         if let Some(info) = document.info_ref() {
             let object = resolver.get(info).map_err(|error| error.to_string())?;
-            if let Some(title) = object.dict().and_then(|dict| dict.get(b"Title"))
+            if let Some(title) = object
+                .dict()
+                .and_then(|dict| dict.get(b"Title"))
                 .and_then(|value| value.as_str())
             {
                 let bytes = resolver.decode_string(info, title);
@@ -3048,10 +2960,7 @@ fn actual_fixture_values(
 
     let mut report = inspect_pages(&document);
     actuals.insert("pages".to_string(), report.pages.len().to_string());
-    actuals.insert(
-        "page_errors".to_string(),
-        report.errors.len().to_string(),
-    );
+    actuals.insert("page_errors".to_string(), report.errors.len().to_string());
 
     let mut resolver = document.resolver();
     let mut text_resolver = document.resolver();
@@ -3063,18 +2972,9 @@ fn actual_fixture_values(
     signatures::fixture_values(&mut actuals, source.bytes(), limits, expectations);
     for page in &report.pages {
         let prefix = format!("page.{}", page.index);
-        actuals.insert(
-            format!("{prefix}.media_box"),
-            box_manifest(page.media_box),
-        );
-        actuals.insert(
-            format!("{prefix}.crop_box"),
-            box_manifest(page.crop_box),
-        );
-        actuals.insert(
-            format!("{prefix}.rotate"),
-            page.rotate.to_string(),
-        );
+        actuals.insert(format!("{prefix}.media_box"), box_manifest(page.media_box));
+        actuals.insert(format!("{prefix}.crop_box"), box_manifest(page.crop_box));
+        actuals.insert(format!("{prefix}.rotate"), page.rotate.to_string());
         metadata::page_boxes(&mut actuals, &prefix, &mut resolver, page.id);
         actuals.insert(
             format!("{prefix}.contents"),
@@ -3224,17 +3124,14 @@ fn run_check(directory: &Path) -> u8 {
             checked_keys = checked_keys.saturating_add(1);
         }
 
-        let (actuals, warnings) = match actual_fixture_values(
-            &pdf_path,
-            manifest.limits,
-            &manifest.expectations,
-        ) {
-            Ok(values) => values,
-            Err(error) => {
-                eprintln!("{error}");
-                return 3;
-            }
-        };
+        let (actuals, warnings) =
+            match actual_fixture_values(&pdf_path, manifest.limits, &manifest.expectations) {
+                Ok(values) => values,
+                Err(error) => {
+                    eprintln!("{error}");
+                    return 3;
+                }
+            };
 
         for (key, expected) in &manifest.expectations {
             let actual = if key == "warning" {
@@ -3275,9 +3172,7 @@ fn run_check(directory: &Path) -> u8 {
         }
     }
 
-    out!(
-        "fixtures: {passed_fixtures} passed, {failed_fixtures} failed, {checked_keys} keys"
-    );
+    out!("fixtures: {passed_fixtures} passed, {failed_fixtures} failed, {checked_keys} keys");
     if failed_fixtures > 0 {
         1
     } else {

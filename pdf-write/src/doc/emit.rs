@@ -14,7 +14,12 @@ pub(super) fn reference(id: u32) -> Value {
 }
 
 pub(super) fn dict(entries: Vec<(&str, Value)>) -> Value {
-    Value::Dict(entries.into_iter().map(|(key, value)| (key.to_owned(), value)).collect())
+    Value::Dict(
+        entries
+            .into_iter()
+            .map(|(key, value)| (key.to_owned(), value))
+            .collect(),
+    )
 }
 
 fn real(value: f32) -> Value {
@@ -22,7 +27,10 @@ fn real(value: f32) -> Value {
 }
 
 fn page_ref(ids: &[u32], index: usize) -> io::Result<Value> {
-    ids.get(index).copied().map(reference).ok_or_else(|| invalid("destination page is missing"))
+    ids.get(index)
+        .copied()
+        .map(reference)
+        .ok_or_else(|| invalid("destination page is missing"))
 }
 
 fn optional(value: Option<f32>) -> Value {
@@ -32,8 +40,16 @@ fn optional(value: Option<f32>) -> Value {
 fn destination(ids: &[u32], target: &Destination) -> io::Result<Value> {
     let page = page_ref(ids, target.page())?;
     Ok(Value::Array(match *target {
-        Destination::Xyz { left, top, zoom, .. } => {
-            vec![page, name("XYZ"), optional(left), optional(top), optional(zoom)]
+        Destination::Xyz {
+            left, top, zoom, ..
+        } => {
+            vec![
+                page,
+                name("XYZ"),
+                optional(left),
+                optional(top),
+                optional(zoom),
+            ]
         }
         Destination::Fit { .. } => vec![page, name("Fit")],
         Destination::FitWidth { top, .. } => vec![page, name("FitH"), optional(top)],
@@ -55,16 +71,20 @@ impl Output {
         let (writer, allocated) = match encrypt {
             None => (Writer::new(&version)?, 0),
             // The security dictionary takes the first object number.
-            Some(encrypt) if encrypt.fixture => {
-                (Writer::new_encrypted_fixture(&version, &encrypt.password)?, 1)
-            }
-            Some(encrypt) => {
-                (Writer::new_encrypted(&version, &encrypt.password, encrypt.costs)?, 1)
-            }
+            Some(encrypt) if encrypt.fixture => (
+                Writer::new_encrypted_fixture(&version, &encrypt.password)?,
+                1,
+            ),
+            Some(encrypt) => (
+                Writer::new_encrypted(&version, &encrypt.password, encrypt.costs)?,
+                1,
+            ),
         };
         Ok(Self {
             writer,
-            pending: Vec::new(), pending_bytes: 0, allocated,
+            pending: Vec::new(),
+            pending_bytes: 0,
+            allocated,
             object_streams: options.object_streams && encrypt.is_none(),
             compress: options.compress,
         })
@@ -101,9 +121,19 @@ impl Output {
         Ok(())
     }
 
-    pub fn stream(&mut self, id: u32, mut dict: Dict, data: &[u8], compress: bool) -> io::Result<()> {
+    pub fn stream(
+        &mut self,
+        id: u32,
+        mut dict: Dict,
+        data: &[u8],
+        compress: bool,
+    ) -> io::Result<()> {
         check("stream_bytes", data.len(), MAX_BYTES)?;
-        let encoded = if compress { Some(encode::flate(data)) } else { None };
+        let encoded = if compress {
+            Some(encode::flate(data))
+        } else {
+            None
+        };
         let data = encoded.as_deref().unwrap_or(data);
         if compress {
             dict.push(("Filter".to_owned(), name("FlateDecode")));
@@ -134,7 +164,11 @@ impl Output {
         self.flush()?;
         self.space(add(mul(add(self.allocated, 2)?, 40)?, 4096)?)?;
         if self.object_streams {
-            let compression = if self.compress { XrefCompression::Flate } else { XrefCompression::None };
+            let compression = if self.compress {
+                XrefCompression::Flate
+            } else {
+                XrefCompression::None
+            };
             self.writer.finish_stream(root, compression, extra)?;
         } else {
             self.writer.finish_table(root, extra)?;
@@ -152,7 +186,11 @@ fn validate(doc: &DocumentBuilder, options: &WriteOptions) -> io::Result<()> {
     if options.object_streams {
         minimum = minimum.max((1, 5));
     }
-    if doc.fonts.iter().any(|font| matches!(font, Font::TrueType(_))) {
+    if doc
+        .fonts
+        .iter()
+        .any(|font| matches!(font, Font::TrueType(_)))
+    {
         minimum = minimum.max((1, 4));
     }
     for image in &doc.images {
@@ -169,7 +207,9 @@ fn validate(doc: &DocumentBuilder, options: &WriteOptions) -> io::Result<()> {
         minimum = minimum.max((1, 4));
     }
     if options.version < minimum {
-        return Err(invalid("PDF version is too old for selected document features"));
+        return Err(invalid(
+            "PDF version is too old for selected document features",
+        ));
     }
     for page in &doc.pages {
         for link in &page.links {
@@ -205,10 +245,15 @@ pub(super) fn finish(mut doc: DocumentBuilder, options: &WriteOptions) -> io::Re
         let id = match font {
             Font::Standard(font) => {
                 let id = out.alloc()?;
-                out.object(id, dict(vec![
-                    ("Type", name("Font")), ("Subtype", name("Type1")),
-                    ("BaseFont", name(font.name())), ("Encoding", name("WinAnsiEncoding")),
-                ]))?;
+                out.object(
+                    id,
+                    dict(vec![
+                        ("Type", name("Font")),
+                        ("Subtype", name("Type1")),
+                        ("BaseFont", name(font.name())),
+                        ("Encoding", name("WinAnsiEncoding")),
+                    ]),
+                )?;
                 id
             }
             Font::TrueType(font) => font.write(&mut out)?,
@@ -226,7 +271,11 @@ pub(super) fn finish(mut doc: DocumentBuilder, options: &WriteOptions) -> io::Re
             ("BitsPerComponent".to_owned(), Value::Int(8)),
         ];
         match &image.pixels {
-            Pixels::Jpeg { data, components, invert } => {
+            Pixels::Jpeg {
+                data,
+                components,
+                invert,
+            } => {
                 let space = match components {
                     1 => "DeviceGray",
                     3 => "DeviceRGB",
@@ -236,10 +285,19 @@ pub(super) fn finish(mut doc: DocumentBuilder, options: &WriteOptions) -> io::Re
                 entries.push(("ColorSpace".to_owned(), name(space)));
                 entries.push(("Filter".to_owned(), name("DCTDecode")));
                 if *invert {
-                    entries.push(("Decode".to_owned(), Value::Array(vec![
-                        Value::Int(1), Value::Int(0), Value::Int(1), Value::Int(0),
-                        Value::Int(1), Value::Int(0), Value::Int(1), Value::Int(0),
-                    ])));
+                    entries.push((
+                        "Decode".to_owned(),
+                        Value::Array(vec![
+                            Value::Int(1),
+                            Value::Int(0),
+                            Value::Int(1),
+                            Value::Int(0),
+                            Value::Int(1),
+                            Value::Int(0),
+                            Value::Int(1),
+                            Value::Int(0),
+                        ]),
+                    ));
                 }
                 out.stream(id, entries, data, false)?;
             }
@@ -247,14 +305,19 @@ pub(super) fn finish(mut doc: DocumentBuilder, options: &WriteOptions) -> io::Re
                 entries.push(("ColorSpace".to_owned(), name("DeviceRGB")));
                 if let Some(alpha) = alpha {
                     let mask = out.alloc()?;
-                    out.stream(mask, vec![
-                        ("Type".to_owned(), name("XObject")),
-                        ("Subtype".to_owned(), name("Image")),
-                        ("Width".to_owned(), Value::Int(i64::from(image.width))),
-                        ("Height".to_owned(), Value::Int(i64::from(image.height))),
-                        ("BitsPerComponent".to_owned(), Value::Int(8)),
-                        ("ColorSpace".to_owned(), name("DeviceGray")),
-                    ], alpha, true)?;
+                    out.stream(
+                        mask,
+                        vec![
+                            ("Type".to_owned(), name("XObject")),
+                            ("Subtype".to_owned(), name("Image")),
+                            ("Width".to_owned(), Value::Int(i64::from(image.width))),
+                            ("Height".to_owned(), Value::Int(i64::from(image.height))),
+                            ("BitsPerComponent".to_owned(), Value::Int(8)),
+                            ("ColorSpace".to_owned(), name("DeviceGray")),
+                        ],
+                        alpha,
+                        true,
+                    )?;
                     entries.push(("SMask".to_owned(), reference(mask)));
                 }
                 out.stream(id, entries, data, true)?;
@@ -272,31 +335,44 @@ pub(super) fn finish(mut doc: DocumentBuilder, options: &WriteOptions) -> io::Re
         let mut fonts = Vec::new();
         for id in &page.fonts {
             let index = usize::try_from(*id).map_err(|_| invalid("font index overflow"))?;
-            let object = *font_ids.get(index).ok_or_else(|| invalid("page font is missing"))?;
+            let object = *font_ids
+                .get(index)
+                .ok_or_else(|| invalid("page font is missing"))?;
             fonts.push((format!("F{id}"), reference(object)));
         }
         let mut images = Vec::new();
         for id in &page.images {
             let index = usize::try_from(*id).map_err(|_| invalid("image index overflow"))?;
-            let object = *image_ids.get(index).ok_or_else(|| invalid("page image is missing"))?;
+            let object = *image_ids
+                .get(index)
+                .ok_or_else(|| invalid("page image is missing"))?;
             images.push((format!("I{id}"), reference(object)));
         }
         let resources = dict(vec![
-            ("Font", Value::Dict(fonts)), ("XObject", Value::Dict(images)),
+            ("Font", Value::Dict(fonts)),
+            ("XObject", Value::Dict(images)),
         ]);
         let mut annotations = Vec::new();
         for link in &page.links {
             let id = out.alloc()?;
             let mut entries = vec![
-                ("Type", name("Annot")), ("Subtype", name("Link")),
-                ("Rect", Value::Array(link.rect.iter().copied().map(real).collect())),
-                ("Border", Value::Array(vec![Value::Int(0), Value::Int(0), Value::Int(0)])),
+                ("Type", name("Annot")),
+                ("Subtype", name("Link")),
+                (
+                    "Rect",
+                    Value::Array(link.rect.iter().copied().map(real).collect()),
+                ),
+                (
+                    "Border",
+                    Value::Array(vec![Value::Int(0), Value::Int(0), Value::Int(0)]),
+                ),
                 ("P", page_ref(&page_ids, index)?),
             ];
             match &link.target {
-                Target::Uri(uri) => entries.push(("A", dict(vec![
-                    ("S", name("URI")), ("URI", Value::Str(uri.clone())),
-                ]))),
+                Target::Uri(uri) => entries.push((
+                    "A",
+                    dict(vec![("S", name("URI")), ("URI", Value::Str(uri.clone()))]),
+                )),
                 Target::Destination(target) => {
                     entries.push(("Dest", destination(&page_ids, target)?));
                 }
@@ -307,7 +383,10 @@ pub(super) fn finish(mut doc: DocumentBuilder, options: &WriteOptions) -> io::Re
         for parts in &page.annotations {
             let appearance = out.alloc()?;
             out.stream(
-                appearance, parts.ap_dict.clone(), &parts.ap_content, options.compress,
+                appearance,
+                parts.ap_dict.clone(),
+                &parts.ap_content,
+                options.compress,
             )?;
             let id = out.alloc()?;
             let mut entries = parts.dict.clone();
@@ -317,13 +396,24 @@ pub(super) fn finish(mut doc: DocumentBuilder, options: &WriteOptions) -> io::Re
             push(&mut annotations, reference(id), "annotations", MAX_LINKS)?;
         }
         let mut entries = vec![
-            ("Type", name("Page")), ("Parent", reference(pages_root)),
-            ("MediaBox", Value::Array(vec![
-                Value::Int(0), Value::Int(0), real(page.width), real(page.height),
-            ])),
-            ("Resources", resources), ("Contents", reference(content)),
+            ("Type", name("Page")),
+            ("Parent", reference(pages_root)),
+            (
+                "MediaBox",
+                Value::Array(vec![
+                    Value::Int(0),
+                    Value::Int(0),
+                    real(page.width),
+                    real(page.height),
+                ]),
+            ),
+            ("Resources", resources),
+            ("Contents", reference(content)),
         ];
-        for (key, rect) in ["CropBox", "BleedBox", "TrimBox", "ArtBox"].into_iter().zip(page.boxes) {
+        for (key, rect) in ["CropBox", "BleedBox", "TrimBox", "ArtBox"]
+            .into_iter()
+            .zip(page.boxes)
+        {
             if let Some(rect) = rect {
                 entries.push((key, Value::Array(rect.into_iter().map(real).collect())));
             }
@@ -331,13 +421,22 @@ pub(super) fn finish(mut doc: DocumentBuilder, options: &WriteOptions) -> io::Re
         if !annotations.is_empty() {
             entries.push(("Annots", Value::Array(annotations)));
         }
-        let id = *page_ids.get(index).ok_or_else(|| invalid("page object is missing"))?;
+        let id = *page_ids
+            .get(index)
+            .ok_or_else(|| invalid("page object is missing"))?;
         out.object(id, dict(entries))?;
     }
-    out.object(pages_root, dict(vec![
-        ("Type", name("Pages")), ("Count", Value::Int(page_ids.len() as i64)),
-        ("Kids", Value::Array(page_ids.iter().copied().map(reference).collect())),
-    ]))?;
+    out.object(
+        pages_root,
+        dict(vec![
+            ("Type", name("Pages")),
+            ("Count", Value::Int(page_ids.len() as i64)),
+            (
+                "Kids",
+                Value::Array(page_ids.iter().copied().map(reference).collect()),
+            ),
+        ]),
+    )?;
     let mut catalog = vec![("Type", name("Catalog")), ("Pages", reference(pages_root))];
     if !doc.outlines.is_empty() {
         let outline = write_outlines(&mut out, &doc.outlines, &page_ids)?;
@@ -348,9 +447,11 @@ pub(super) fn finish(mut doc: DocumentBuilder, options: &WriteOptions) -> io::Re
     let mut trailer = Vec::new();
     if !doc.info.is_empty() {
         let id = out.alloc()?;
-        let entries = doc.info.into_iter().map(|(key, bytes)| {
-            (key.to_owned(), Value::HexStr(bytes))
-        }).collect();
+        let entries = doc
+            .info
+            .into_iter()
+            .map(|(key, bytes)| (key.to_owned(), Value::HexStr(bytes)))
+            .collect();
         out.object(id, Value::Dict(entries))?;
         trailer.push(("Info".to_owned(), reference(id)));
     }
@@ -375,30 +476,49 @@ fn write_outlines(out: &mut Output, items: &[Outline], pages: &[u32]) -> io::Res
         push(&mut ids, out.alloc()?, "outline_items", MAX_OUTLINES)?;
         push(&mut nodes, Node::default(), "outline_items", MAX_OUTLINES)?;
     }
-    let base = items.first().ok_or_else(|| invalid("outline is empty"))?.level;
+    let base = items
+        .first()
+        .ok_or_else(|| invalid("outline is empty"))?
+        .level;
     let mut stack = Vec::<usize>::new();
     let mut root_first = None;
     let mut root_last = None;
     for (index, item) in items.iter().enumerate() {
-        let depth = usize::from(item.level.checked_sub(base).ok_or_else(|| invalid("outline level"))?);
+        let depth = usize::from(
+            item.level
+                .checked_sub(base)
+                .ok_or_else(|| invalid("outline level"))?,
+        );
         if depth > stack.len() {
             return Err(invalid("outline parent is missing"));
         }
         stack.truncate(depth);
         let parent = stack.last().copied();
         let previous = match parent {
-            Some(parent) => nodes.get(parent).ok_or_else(|| invalid("outline parent"))?.last,
+            Some(parent) => {
+                nodes
+                    .get(parent)
+                    .ok_or_else(|| invalid("outline parent"))?
+                    .last
+            }
             None => root_last,
         };
-        let node = nodes.get_mut(index).ok_or_else(|| invalid("outline node"))?;
+        let node = nodes
+            .get_mut(index)
+            .ok_or_else(|| invalid("outline node"))?;
         node.parent = parent;
         node.previous = previous;
         if let Some(previous) = previous {
-            nodes.get_mut(previous).ok_or_else(|| invalid("outline sibling"))?.next = Some(index);
+            nodes
+                .get_mut(previous)
+                .ok_or_else(|| invalid("outline sibling"))?
+                .next = Some(index);
         }
         match parent {
             Some(parent) => {
-                let node = nodes.get_mut(parent).ok_or_else(|| invalid("outline parent"))?;
+                let node = nodes
+                    .get_mut(parent)
+                    .ok_or_else(|| invalid("outline parent"))?;
                 if node.first.is_none() {
                     node.first = Some(index);
                 }
@@ -412,23 +532,36 @@ fn write_outlines(out: &mut Output, items: &[Outline], pages: &[u32]) -> io::Res
             }
         }
         for ancestor in &stack {
-            let node = nodes.get_mut(*ancestor).ok_or_else(|| invalid("outline ancestor"))?;
+            let node = nodes
+                .get_mut(*ancestor)
+                .ok_or_else(|| invalid("outline ancestor"))?;
             node.descendants = add(node.descendants, 1)?;
         }
         push(&mut stack, index, "outline_depth", MAX_DEPTH)?;
     }
     let resolve = |index: usize| -> io::Result<Value> {
-        ids.get(index).copied().map(reference).ok_or_else(|| invalid("outline object is missing"))
+        ids.get(index)
+            .copied()
+            .map(reference)
+            .ok_or_else(|| invalid("outline object is missing"))
     };
     for (index, (item, node)) in items.iter().zip(&nodes).enumerate() {
         let mut entries = vec![
             ("Title", Value::HexStr(item.title.clone())),
-            ("Parent", match node.parent { Some(parent) => resolve(parent)?, None => reference(root) }),
+            (
+                "Parent",
+                match node.parent {
+                    Some(parent) => resolve(parent)?,
+                    None => reference(root),
+                },
+            ),
             ("Dest", destination(pages, &item.destination)?),
         ];
         for (key, target) in [
-            ("Prev", node.previous), ("Next", node.next),
-            ("First", node.first), ("Last", node.last),
+            ("Prev", node.previous),
+            ("Next", node.next),
+            ("First", node.first),
+            ("Last", node.last),
         ] {
             if let Some(target) = target {
                 entries.push((key, resolve(target)?));
@@ -437,15 +570,21 @@ fn write_outlines(out: &mut Output, items: &[Outline], pages: &[u32]) -> io::Res
         if node.first.is_some() {
             entries.push(("Count", Value::Int(node.descendants as i64)));
         }
-        let id = *ids.get(index).ok_or_else(|| invalid("outline object is missing"))?;
+        let id = *ids
+            .get(index)
+            .ok_or_else(|| invalid("outline object is missing"))?;
         out.object(id, dict(entries))?;
     }
     let first = root_first.ok_or_else(|| invalid("outline first item is missing"))?;
     let last = root_last.ok_or_else(|| invalid("outline last item is missing"))?;
-    out.object(root, dict(vec![
-        ("Type", name("Outlines")), ("First", resolve(first)?),
-        ("Last", resolve(last)?), ("Count", Value::Int(items.len() as i64)),
-    ]))?;
+    out.object(
+        root,
+        dict(vec![
+            ("Type", name("Outlines")),
+            ("First", resolve(first)?),
+            ("Last", resolve(last)?),
+            ("Count", Value::Int(items.len() as i64)),
+        ]),
+    )?;
     Ok(root)
 }
-

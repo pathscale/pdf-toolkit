@@ -11,8 +11,8 @@ pub mod annot;
 pub mod doc;
 pub mod encode;
 pub mod encode_jpx;
-pub mod encryption;
 pub(crate) mod encrypt;
+pub mod encryption;
 pub mod fixtures;
 pub mod sha256;
 
@@ -54,8 +54,7 @@ fn name_bytes(out: &mut Vec<u8>, name: &str) {
         if !(33..=126).contains(&byte)
             || matches!(
                 byte,
-                b'#' | b'(' | b')' | b'\\' | b'<' | b'>' | b'[' | b']'
-                    | b'{' | b'}' | b'/' | b'%'
+                b'#' | b'(' | b')' | b'\\' | b'<' | b'>' | b'[' | b']' | b'{' | b'}' | b'/' | b'%'
             )
         {
             out.extend_from_slice(format!("#{byte:02X}").as_bytes());
@@ -118,9 +117,7 @@ pub fn serialize_value(value: &Value) -> io::Result<Vec<u8>> {
                             12 => out.extend_from_slice(b"\\f"),
                             32..=126 => out.push(*byte),
                             _ => {
-                                out.extend_from_slice(
-                                    format!("\\{byte:03o}").as_bytes(),
-                                );
+                                out.extend_from_slice(format!("\\{byte:03o}").as_bytes());
                             }
                         }
                     }
@@ -154,9 +151,7 @@ pub fn serialize_value(value: &Value) -> io::Result<Vec<u8>> {
                     }
                 }
                 Value::Ref(number, generation) => {
-                    out.extend_from_slice(
-                        format!("{number} {generation} R").as_bytes(),
-                    );
+                    out.extend_from_slice(format!("{number} {generation} R").as_bytes());
                 }
             },
         }
@@ -192,8 +187,7 @@ impl Writer {
     pub fn new(version: &str) -> io::Result<Self> {
         if !matches!(
             version,
-            "1.0" | "1.1" | "1.2" | "1.3" | "1.4"
-                | "1.5" | "1.6" | "1.7" | "2.0"
+            "1.0" | "1.1" | "1.2" | "1.3" | "1.4" | "1.5" | "1.6" | "1.7" | "2.0"
         ) {
             return Err(invalid("unsupported PDF header version"));
         }
@@ -254,12 +248,7 @@ impl Writer {
     }
 
     /// Returns the exact physical range occupied by the encoded stream data.
-    pub fn stream(
-        &mut self,
-        number: u32,
-        mut dict: Dict,
-        data: &[u8],
-    ) -> io::Result<Range<usize>> {
+    pub fn stream(&mut self, number: u32, mut dict: Dict, data: &[u8]) -> io::Result<Range<usize>> {
         self.check_id(number)?;
         let exempt = matches!(dict.iter().rev().find(|(key, _)| key == "Type"),
             Some((_, Value::Name(kind))) if kind == "XRef");
@@ -296,7 +285,9 @@ impl Writer {
     ) -> io::Result<()> {
         self.check_id(number)?;
         if self.encryption.is_some() {
-            return Err(invalid("PSChaCha writes individual objects, not object streams"));
+            return Err(invalid(
+                "PSChaCha writes individual objects, not object streams",
+            ));
         }
         let mut seen = BTreeSet::new();
         let mut header = Vec::new();
@@ -329,7 +320,13 @@ impl Writer {
         };
         self.stream(number, dict, &data)?;
         for (id, index) in compressed {
-            self.entries.insert(id, Entry::Compressed { stream: number, index });
+            self.entries.insert(
+                id,
+                Entry::Compressed {
+                    stream: number,
+                    index,
+                },
+            );
         }
         Ok(())
     }
@@ -343,8 +340,8 @@ impl Writer {
         set(&mut extra, "Root", Value::Ref(root, 0));
         extra.retain(|(key, _)| key != "Prev");
         if let Some(offset) = prev {
-            let offset = i64::try_from(offset)
-                .map_err(|_| invalid("previous xref offset exceeds i64"))?;
+            let offset =
+                i64::try_from(offset).map_err(|_| invalid("previous xref offset exceeds i64"))?;
             set(&mut extra, "Prev", Value::Int(offset));
         }
         Ok(extra)
@@ -387,7 +384,8 @@ impl Writer {
         let offset = self.position();
         let section = self.table_bytes(root, extra, prev)?;
         self.bytes.extend_from_slice(&section);
-        self.bytes.extend_from_slice(&Self::eof(reported.unwrap_or(offset)));
+        self.bytes
+            .extend_from_slice(&Self::eof(reported.unwrap_or(offset)));
         self.last_xref = Some(offset);
         Ok(offset)
     }

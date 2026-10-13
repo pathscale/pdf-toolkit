@@ -50,7 +50,10 @@ fn repeat_at(input: &[u8], position: usize) -> usize {
     let Some(first) = tail.first() else {
         return 0;
     };
-    tail.iter().take(128).take_while(|byte| *byte == first).count()
+    tail.iter()
+        .take(128)
+        .take_while(|byte| *byte == first)
+        .count()
 }
 
 pub fn run_length(input: &[u8]) -> Vec<u8> {
@@ -65,10 +68,7 @@ pub fn run_length(input: &[u8]) -> Vec<u8> {
             continue;
         }
         let mut end = position.saturating_add(1);
-        while end < input.len()
-            && end - position < 128
-            && repeat_at(input, end) < 3
-        {
+        while end < input.len() && end - position < 128 && repeat_at(input, end) < 3 {
             end = end.saturating_add(1);
         }
         if let Some(literal) = input.get(position..end) {
@@ -139,9 +139,7 @@ impl LzwBits {
         } else if code != 257 {
             if self.has_previous && self.decoder_next < 4096 {
                 self.decoder_next += 1;
-                if self.width < 12
-                    && self.decoder_next + 1 == (1u16 << self.width)
-                {
+                if self.width < 12 && self.decoder_next + 1 == (1u16 << self.width) {
                     self.width += 1;
                 }
             }
@@ -190,4 +188,3 @@ pub fn lzw(input: &[u8]) -> Vec<u8> {
     bits.emit(257);
     bits.finish()
 }
-

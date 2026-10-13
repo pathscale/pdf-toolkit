@@ -36,7 +36,9 @@ fn key(id: ObjectRef) -> Key {
 
 impl Editor {
     fn import_id(&self, next: &mut u32) -> Result<ObjectRef, DocError> {
-        let count = next.checked_sub(self.next).and_then(|count| count.checked_add(1))
+        let count = next
+            .checked_sub(self.next)
+            .and_then(|count| count.checked_add(1))
             .ok_or_else(|| malformed("import object count"))?;
         let after = self.fresh(count)?;
         let id = ObjectRef::new(*next, 0);
@@ -64,7 +66,11 @@ impl Editor {
         if requested.is_empty() {
             return Ok(());
         }
-        check(LimitKind::FileBytes, source.len() as u64, limits.max_file_bytes)?;
+        check(
+            LimitKind::FileBytes,
+            source.len() as u64,
+            limits.max_file_bytes,
+        )?;
         let document = Document::open(PdfSource::new(source)?, limits)?;
         if document.encrypted() {
             return Err(DocError::Encrypted);
@@ -75,8 +81,10 @@ impl Editor {
                 return Err(malformed("source page index"));
             }
         }
-        let source_pages: BTreeMap<_, _> = source_pages.into_iter()
-            .map(|page| (key(page.id), page)).collect();
+        let source_pages: BTreeMap<_, _> = source_pages
+            .into_iter()
+            .map(|page| (key(page.id), page))
+            .collect();
         let mut resolver = document.resolver();
         let mut mapping = BTreeMap::new();
         let mut queue = VecDeque::new();
@@ -85,9 +93,12 @@ impl Editor {
         // Resolve the source page order independently of object-number order.
         let mut walk_resolver = document.resolver();
         let order: Vec<_> = pdf_core::pages::PageWalk::new(&mut walk_resolver)?
-            .map(|page| page.map(|page| page.id)).collect::<Result<_, _>>()?;
+            .map(|page| page.map(|page| page.id))
+            .collect::<Result<_, _>>()?;
         for index in requested {
-            let old = *order.get(*index as usize).ok_or_else(|| malformed("source page index"))?;
+            let old = *order
+                .get(*index as usize)
+                .ok_or_else(|| malformed("source page index"))?;
             let new = self.import_id(&mut next)?;
             if !mapping.contains_key(&key(old)) {
                 mapping.insert(key(old), new);
@@ -102,16 +113,27 @@ impl Editor {
         while let Some((old, depth)) = queue.pop_front() {
             check(LimitKind::Depth, depth, u64::from(limits.max_depth))?;
             steps = value::add(steps, 1, LimitKind::ContentOps, limits.max_content_ops)?;
-            let id = *mapping.get(&key(old)).ok_or_else(|| malformed("import mapping"))?;
+            let id = *mapping
+                .get(&key(old))
+                .ok_or_else(|| malformed("import mapping"))?;
             let object = resolver.get(old)?;
             let mut body = value::checked_object(&object, &limits)?;
             let data = if object.is_stream() {
-                let range = object.stream_range().ok_or_else(|| malformed("source stream"))?;
-                let raw = object.stream_raw().ok_or_else(|| malformed("source stream"))?;
+                let range = object
+                    .stream_range()
+                    .ok_or_else(|| malformed("source stream"))?;
+                let raw = object
+                    .stream_raw()
+                    .ok_or_else(|| malformed("source stream"))?;
                 let length = i64::try_from(raw.len()).map_err(|_| malformed("stream Length"))?;
-                let Value::Dict(dict) = &mut body else { return Err(malformed("stream dictionary")) };
+                let Value::Dict(dict) = &mut body else {
+                    return Err(malformed("stream dictionary"));
+                };
                 set(dict, "Length", Value::Int(length));
-                Some(StreamData { bytes: object.buffer().clone(), range })
+                Some(StreamData {
+                    bytes: object.buffer().clone(),
+                    range,
+                })
             } else {
                 None
             };
@@ -119,7 +141,8 @@ impl Editor {
                 if let Some(entry) = source_pages.get(&key(old)) {
                     pages::explicit(dict, entry);
                     dict.retain(|(name, _)| name != "Parent");
-                } else if matches!(get(dict, "Type"), Some(Value::Name(name)) if name == "Page" || name == "Pages") {
+                } else if matches!(get(dict, "Type"), Some(Value::Name(name)) if name == "Page" || name == "Pages")
+                {
                     dict.retain(|(name, _)| name != "Parent");
                 }
             }
@@ -135,8 +158,8 @@ impl Editor {
                                 let child_depth = depth.saturating_add(1);
                                 check(LimitKind::Depth, child_depth, u64::from(limits.max_depth))?;
                                 let target = self.import_id(&mut next)?;
-                                let metadata = (mapping.len() as u64).saturating_add(1)
-                                    .saturating_mul(128);
+                                let metadata =
+                                    (mapping.len() as u64).saturating_add(1).saturating_mul(128);
                                 check(
                                     LimitKind::TotalDecodedBytes,
                                     metadata,
@@ -162,7 +185,12 @@ impl Editor {
             staged_bytes = value::add(staged_bytes, cost, LimitKind::FileBytes, maximum)?;
             value::add(
                 self.bytes.len() as u64,
-                value::add(self.pending_bytes, staged_bytes, LimitKind::FileBytes, maximum)?,
+                value::add(
+                    self.pending_bytes,
+                    staged_bytes,
+                    LimitKind::FileBytes,
+                    maximum,
+                )?,
                 LimitKind::FileBytes,
                 maximum,
             )?;
@@ -171,21 +199,48 @@ impl Editor {
                 staged_bytes.saturating_add((mapping.len() as u64).saturating_mul(128)),
                 limits.max_total_decoded_bytes,
             )?;
-            staged.insert(id.number(), Pending { id, value: body, data, cost });
+            staged.insert(
+                id.number(),
+                Pending {
+                    id,
+                    value: body,
+                    data,
+                    cost,
+                },
+            );
         }
         let mut inserted = Vec::new();
         for (old, id) in selected {
-            let first = *mapping.get(&key(old)).ok_or_else(|| malformed("import page mapping"))?;
+            let first = *mapping
+                .get(&key(old))
+                .ok_or_else(|| malformed("import page mapping"))?;
             if first != id {
-                let body = staged.get(&first.number())
-                    .ok_or_else(|| malformed("import page dictionary"))?.value.clone();
+                let body = staged
+                    .get(&first.number())
+                    .ok_or_else(|| malformed("import page dictionary"))?
+                    .value
+                    .clone();
                 let cost = self.cost(id, &body, None)?;
                 staged_bytes = value::add(staged_bytes, cost, LimitKind::FileBytes, maximum)?;
-                staged.insert(id.number(), Pending { id, value: body, data: None, cost });
+                staged.insert(
+                    id.number(),
+                    Pending {
+                        id,
+                        value: body,
+                        data: None,
+                        cost,
+                    },
+                );
             }
-            inserted.push(PageEntry { id, inherited: Vec::new() });
+            inserted.push(PageEntry {
+                id,
+                inherited: Vec::new(),
+            });
         }
-        let changes: Vec<_> = staged.values().map(|pending| (pending.id, pending.cost)).collect();
+        let changes: Vec<_> = staged
+            .values()
+            .map(|pending| (pending.id, pending.cost))
+            .collect();
         let total = self.changed_size(&changes)?;
         check(
             LimitKind::TotalDecodedBytes,

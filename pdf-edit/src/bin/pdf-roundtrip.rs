@@ -15,23 +15,23 @@ use std::sync::Arc;
 
 use pdf_core::pages::{Page, PageWalk};
 use pdf_core::{Document, Limits, PdfSource, XrefKind};
-use pdf_toolkit_edit::Editor;
 use pdf_raster::Raster;
 use pdf_render::RenderOptions;
 use pdf_text::images::{ColorSpace, ImageData};
 use pdf_text::semantic::{Link, LinkTarget, OutlineItem, SemanticDoc};
+use pdf_toolkit_edit::Editor;
 use pdf_write::doc::{Color, DocumentBuilder, StandardFont, WriteOptions};
 
-#[path = "../roundtrip_edits.rs"]
-mod editing;
 #[path = "../roundtrip_chacha.rs"]
 mod chacha;
-#[cfg(feature = "sign")]
-#[path = "../roundtrip_sign.rs"]
-mod signing;
+#[path = "../roundtrip_edits.rs"]
+mod editing;
 #[cfg(feature = "sign")]
 #[path = "../sign_fixtures.rs"]
 mod sign_fixtures;
+#[cfg(feature = "sign")]
+#[path = "../roundtrip_sign.rs"]
+mod signing;
 
 type CheckResult<T> = Result<T, String>;
 
@@ -60,18 +60,37 @@ const STREAM_TEXT: &[&str] = &[
     "Compressed house page 2",
     "Compressed house page 3",
 ];
-const RGBA: [u8; 16] = [
-    255, 0, 0, 255,
-    0, 255, 0, 128,
-    0, 0, 255, 0,
-    17, 34, 51, 64,
-];
-const BLACK: Color = Color { r: 0.0, g: 0.0, b: 0.0 };
-const RED: Color = Color { r: 1.0, g: 0.0, b: 0.0 };
-const GREEN: Color = Color { r: 0.0, g: 1.0, b: 0.0 };
-const BLUE: Color = Color { r: 0.0, g: 0.0, b: 1.0 };
-const CYAN: Color = Color { r: 0.0, g: 1.0, b: 1.0 };
-const ORANGE: Color = Color { r: 1.0, g: 0.5, b: 0.0 };
+const RGBA: [u8; 16] = [255, 0, 0, 255, 0, 255, 0, 128, 0, 0, 255, 0, 17, 34, 51, 64];
+const BLACK: Color = Color {
+    r: 0.0,
+    g: 0.0,
+    b: 0.0,
+};
+const RED: Color = Color {
+    r: 1.0,
+    g: 0.0,
+    b: 0.0,
+};
+const GREEN: Color = Color {
+    r: 0.0,
+    g: 1.0,
+    b: 0.0,
+};
+const BLUE: Color = Color {
+    r: 0.0,
+    g: 0.0,
+    b: 1.0,
+};
+const CYAN: Color = Color {
+    r: 0.0,
+    g: 1.0,
+    b: 1.0,
+};
+const ORANGE: Color = Color {
+    r: 1.0,
+    g: 0.5,
+    b: 0.0,
+};
 
 #[derive(Default)]
 struct Report {
@@ -98,13 +117,7 @@ impl Report {
         self.output_failed |= result.is_err();
     }
 
-    fn equal<T: Debug + PartialEq>(
-        &mut self,
-        name: &str,
-        check: &str,
-        actual: &T,
-        expected: &T,
-    ) {
+    fn equal<T: Debug + PartialEq>(&mut self, name: &str, check: &str, actual: &T, expected: &T) {
         let passed = actual == expected;
         let detail = if passed {
             String::new()
@@ -133,7 +146,8 @@ impl Report {
             "TOTAL pass={} fail={}",
             self.passed,
             self.failed,
-        ).is_err();
+        )
+        .is_err();
         if self.failed != 0 || self.output_failed {
             ExitCode::FAILURE
         } else {
@@ -193,11 +207,17 @@ fn config() -> CheckResult<Config> {
             PathBuf::from(classic.as_os_str()),
             PathBuf::from(stream.as_os_str()),
         ),
-        _ => return Err(
-            "usage: pdf-roundtrip OUT_DIR [HOUSE_DIR | CLASSIC_PDF XREF_PDF]".to_owned(),
-        ),
+        _ => {
+            return Err(
+                "usage: pdf-roundtrip OUT_DIR [HOUSE_DIR | CLASSIC_PDF XREF_PDF]".to_owned(),
+            )
+        }
     };
-    Ok(Config { output, classic, stream })
+    Ok(Config {
+        output,
+        classic,
+        stream,
+    })
 }
 
 /// House directory for the argument split `config` accepts.
@@ -220,10 +240,16 @@ struct FixturePlan {
 
 fn fixture_plan(report: &mut Report) -> FixturePlan {
     let Some(house) = active_house_dir() else {
-        return FixturePlan { house_pass: false, open_inputs: true };
+        return FixturePlan {
+            house_pass: false,
+            open_inputs: true,
+        };
     };
     if house.is_dir() {
-        return FixturePlan { house_pass: true, open_inputs: true };
+        return FixturePlan {
+            house_pass: true,
+            open_inputs: true,
+        };
     }
     report.check(
         "setup",
@@ -231,7 +257,10 @@ fn fixture_plan(report: &mut Report) -> FixturePlan {
         false,
         &format!("missing fixture directory: {}", house.display()),
     );
-    FixturePlan { house_pass: false, open_inputs: false }
+    FixturePlan {
+        house_pass: false,
+        open_inputs: false,
+    }
 }
 
 fn read_bounded(path: &Path) -> CheckResult<Arc<[u8]>> {
@@ -244,21 +273,23 @@ fn read_bounded(path: &Path) -> CheckResult<Arc<[u8]>> {
     let capacity = usize::try_from(metadata.len()).map_err(describe)?;
     let mut bytes = Vec::new();
     bytes.try_reserve_exact(capacity).map_err(describe)?;
-    let read_limit = MAX_FILE_BYTES.checked_add(1)
+    let read_limit = MAX_FILE_BYTES
+        .checked_add(1)
         .ok_or_else(|| "file byte limit overflow".to_owned())?;
-    file.take(read_limit).read_to_end(&mut bytes).map_err(describe)?;
+    file.take(read_limit)
+        .read_to_end(&mut bytes)
+        .map_err(describe)?;
     let requested = u64::try_from(bytes.len()).map_err(describe)?;
     bounded("file_bytes", requested, MAX_FILE_BYTES)?;
     Ok(Arc::from(bytes))
 }
 
-fn persist(
-    directory: &Path,
-    name: &str,
-    bytes: &[u8],
-    inputs: &[&Path],
-) -> CheckResult<Arc<[u8]>> {
-    bounded("file_bytes", u64::try_from(bytes.len()).map_err(describe)?, MAX_FILE_BYTES)?;
+fn persist(directory: &Path, name: &str, bytes: &[u8], inputs: &[&Path]) -> CheckResult<Arc<[u8]>> {
+    bounded(
+        "file_bytes",
+        u64::try_from(bytes.len()).map_err(describe)?,
+        MAX_FILE_BYTES,
+    )?;
     let path = directory.join(format!("{name}.pdf"));
     if path.exists() {
         let destination = fs::canonicalize(&path).map_err(describe)?;
@@ -284,8 +315,7 @@ fn jpeg_program() -> Arc<[u8]> {
     bytes.extend_from_slice(&[0xff, 0xdb, 0x00, 0x43, 0x00]);
     bytes.extend_from_slice(&[1; 64]);
     bytes.extend_from_slice(&[
-        0xff, 0xc0, 0x00, 0x0b, 8,
-        0x00, 0x08, 0x00, 0x08, 1, 1, 0x11, 0,
+        0xff, 0xc0, 0x00, 0x0b, 8, 0x00, 0x08, 0x00, 0x08, 1, 1, 0x11, 0,
     ]);
     bytes.extend_from_slice(&[0xff, 0xc4, 0x00, 0x26]);
     for table in [0x00, 0x10] {
@@ -294,8 +324,7 @@ fn jpeg_program() -> Arc<[u8]> {
         bytes.push(0);
     }
     bytes.extend_from_slice(&[
-        0xff, 0xda, 0x00, 0x08, 1, 1, 0x00, 0, 63, 0,
-        0x3f, 0xff, 0xd9,
+        0xff, 0xda, 0x00, 0x08, 1, 1, 0x00, 0, 63, 0, 0x3f, 0xff, 0xd9,
     ]);
     Arc::from(bytes)
 }
@@ -314,7 +343,10 @@ fn document(font: Arc<[u8]>, jpeg: Arc<[u8]>) -> CheckResult<DocumentBuilder> {
         (StandardFont::TimesItalic, "Times Italic"),
         (StandardFont::Courier, "Courier"),
         (StandardFont::CourierBold, "Courier Bold"),
-    ].into_iter().map(|(font, label)| (document.standard_font(font), label)).collect();
+    ]
+    .into_iter()
+    .map(|(font, label)| (document.standard_font(font), label))
+    .collect();
     let rgba = document.rgba(2, 2, &RGBA);
     let jpeg = document.jpeg(jpeg, 8, 8, 1);
     {
@@ -373,13 +405,19 @@ fn build(
         let count = document.finish_to(options, &mut bytes).map_err(describe)?;
         let actual = u64::try_from(bytes.len()).map_err(describe)?;
         if count != actual {
-            return Err(format!("finish_to length: reported {count}, wrote {actual}"));
+            return Err(format!(
+                "finish_to length: reported {count}, wrote {actual}"
+            ));
         }
         bytes
     } else {
         document.finish(options).map_err(describe)?
     };
-    bounded("file_bytes", u64::try_from(bytes.len()).map_err(describe)?, MAX_FILE_BYTES)?;
+    bounded(
+        "file_bytes",
+        u64::try_from(bytes.len()).map_err(describe)?,
+        MAX_FILE_BYTES,
+    )?;
     Ok(bytes)
 }
 
@@ -416,7 +454,11 @@ fn sample_indexes(page_count: usize) -> Vec<usize> {
 }
 
 fn snapshot(bytes: Arc<[u8]>, font: Arc<[u8]>) -> CheckResult<Snapshot> {
-    bounded("file_bytes", u64::try_from(bytes.len()).map_err(describe)?, MAX_FILE_BYTES)?;
+    bounded(
+        "file_bytes",
+        u64::try_from(bytes.len()).map_err(describe)?,
+        MAX_FILE_BYTES,
+    )?;
     let source = PdfSource::new(bytes).map_err(describe)?;
     let document = Document::open(source.clone(), limits()).map_err(describe)?;
     if document.encrypted() {
@@ -427,25 +469,32 @@ fn snapshot(bytes: Arc<[u8]>, font: Arc<[u8]>) -> CheckResult<Snapshot> {
     for page in PageWalk::new(&mut resolver).map_err(describe)? {
         pages.push(page.map_err(describe)?);
     }
-    let options = RenderOptions { scale: 1.0, fallback_font: Some(font) };
+    let options = RenderOptions {
+        scale: 1.0,
+        fallback_font: Some(font),
+    };
     let mut text = Vec::new();
     let mut unmapped = Vec::new();
     let mut rasters = Vec::new();
     let mut retained = 0u64;
     // Sample order matches document order when there are at most MAX_PAGES pages.
     for index in sample_indexes(pages.len()) {
-        let page = pages.get(index).ok_or_else(|| format!("missing sampled page {index}"))?;
+        let page = pages
+            .get(index)
+            .ok_or_else(|| format!("missing sampled page {index}"))?;
         let interpreted = pdf_text::page_text(&mut resolver, page).map_err(describe)?;
         let plain = pdf_text::layout(&interpreted).plain_text();
-        let raster = pdf_raster::render_page(
-            &mut resolver, page, &options, [255; 4],
-        ).map_err(describe)?;
+        let raster =
+            pdf_raster::render_page(&mut resolver, page, &options, [255; 4]).map_err(describe)?;
         for bytes in [plain.len(), raster.rgba.len()] {
-            retained = retained.checked_add(u64::try_from(bytes).map_err(describe)?)
-                .ok_or_else(|| format!(
-                    "total_decoded_bytes requested {}, maximum {MAX_TOTAL_BYTES}",
-                    u64::MAX,
-                ))?;
+            retained = retained
+                .checked_add(u64::try_from(bytes).map_err(describe)?)
+                .ok_or_else(|| {
+                    format!(
+                        "total_decoded_bytes requested {}, maximum {MAX_TOTAL_BYTES}",
+                        u64::MAX,
+                    )
+                })?;
             bounded("total_decoded_bytes", retained, MAX_TOTAL_BYTES)?;
         }
         text.push(plain);
@@ -455,13 +504,22 @@ fn snapshot(bytes: Arc<[u8]>, font: Arc<[u8]>) -> CheckResult<Snapshot> {
     drop(resolver);
     let semantic = pdf_text::semantic::semantic_document(source, limits()).map_err(describe)?;
     for index in sample_indexes(semantic.pages.len()) {
-        let page = semantic.pages.get(index)
+        let page = semantic
+            .pages
+            .get(index)
             .ok_or_else(|| format!("missing sampled semantic page {index}"))?;
         if let Some(refusal) = page.refusal {
             return Err(format!("semantic page {} refused: {refusal}", page.index));
         }
     }
-    Ok(Snapshot { document, pages, text, unmapped, semantic, rasters })
+    Ok(Snapshot {
+        document,
+        pages,
+        text,
+        unmapped,
+        semantic,
+        rasters,
+    })
 }
 
 fn collapsed_equal(left: &str, right: &str) -> bool {
@@ -470,8 +528,18 @@ fn collapsed_equal(left: &str, right: &str) -> bool {
 
 fn check_text(report: &mut Report, name: &str, snapshot: &Snapshot, expected: &[&str]) {
     report.equal(name, "page-count", &snapshot.pages.len(), &expected.len());
-    report.equal(name, "text-page-count", &snapshot.text.len(), &expected.len());
-    report.equal(name, "semantic-page-count", &snapshot.semantic.pages.len(), &expected.len());
+    report.equal(
+        name,
+        "text-page-count",
+        &snapshot.text.len(),
+        &expected.len(),
+    );
+    report.equal(
+        name,
+        "semantic-page-count",
+        &snapshot.semantic.pages.len(),
+        &expected.len(),
+    );
     for (index, expected) in expected.iter().take(MAX_PAGES as usize).enumerate() {
         let check = format!("page.{index}.text");
         match snapshot.text.get(index) {
@@ -479,15 +547,19 @@ fn check_text(report: &mut Report, name: &str, snapshot: &Snapshot, expected: &[
                 let passed = collapsed_equal(actual, expected);
                 let preview: String = actual.chars().take(256).collect();
                 report.check(
-                    name, &check, passed,
+                    name,
+                    &check,
+                    passed,
                     &format!("expected {expected:?}, got {preview:?}"),
                 );
             }
             None => report.check(name, &check, false, "missing page"),
         }
         report.equal(
-            name, &format!("page.{index}.unmapped"),
-            &snapshot.unmapped.get(index).copied(), &Some(0),
+            name,
+            &format!("page.{index}.unmapped"),
+            &snapshot.unmapped.get(index).copied(),
+            &Some(0),
         );
     }
 }
@@ -496,15 +568,23 @@ fn pixel(raster: &Raster, x: u32, pdf_y: u32) -> CheckResult<[u8; 4]> {
     if x >= raster.width {
         return Err("pixel outside raster width".to_owned());
     }
-    let y = raster.height.checked_sub(pdf_y).and_then(|value| value.checked_sub(1))
+    let y = raster
+        .height
+        .checked_sub(pdf_y)
+        .and_then(|value| value.checked_sub(1))
         .ok_or_else(|| "pixel outside raster height".to_owned())?;
-    let offset = u64::from(y).checked_mul(u64::from(raster.width))
+    let offset = u64::from(y)
+        .checked_mul(u64::from(raster.width))
         .and_then(|value| value.checked_add(u64::from(x)))
         .and_then(|value| value.checked_mul(4))
         .and_then(|value| usize::try_from(value).ok())
         .ok_or_else(|| "pixel offset overflow".to_owned())?;
-    let end = offset.checked_add(4).ok_or_else(|| "pixel end overflow".to_owned())?;
-    let bytes = raster.rgba.get(offset..end)
+    let end = offset
+        .checked_add(4)
+        .ok_or_else(|| "pixel end overflow".to_owned())?;
+    let bytes = raster
+        .rgba
+        .get(offset..end)
         .ok_or_else(|| "pixel outside RGBA buffer".to_owned())?;
     let mut value = [0; 4];
     value.copy_from_slice(bytes);
@@ -519,17 +599,35 @@ fn check_pixels(
     probes: &[(u32, u32, [u8; 4])],
 ) {
     let Some(raster) = snapshot.rasters.get(page) else {
-        report.check(name, &format!("page.{page}.pixels"), false, "missing raster");
+        report.check(
+            name,
+            &format!("page.{page}.pixels"),
+            false,
+            "missing raster",
+        );
         return;
     };
-    report.equal(name, &format!("page.{page}.raster-size"), &(raster.width, raster.height), &(360, 300));
+    report.equal(
+        name,
+        &format!("page.{page}.raster-size"),
+        &(raster.width, raster.height),
+        &(360, 300),
+    );
     for (x, y, expected) in probes.iter().take(32) {
         let check = format!("page.{page}.pixel.{x}.{y}");
         match pixel(raster, *x, *y) {
             // Same tolerance as the fixture manifests: anti-aliasing moves edge pixels a little.
             Ok(actual) => {
-                let close = actual.iter().zip(expected).all(|(a, e)| a.abs_diff(*e) <= 8);
-                report.check(name, &check, close, &format!("expected {expected:?}, got {actual:?}"));
+                let close = actual
+                    .iter()
+                    .zip(expected)
+                    .all(|(a, e)| a.abs_diff(*e) <= 8);
+                report.check(
+                    name,
+                    &check,
+                    close,
+                    &format!("expected {expected:?}, got {actual:?}"),
+                );
             }
             Err(error) => report.check(name, &check, false, &error),
         }
@@ -537,14 +635,25 @@ fn check_pixels(
 }
 
 fn uri_link(bbox: [f32; 4], uri: &str) -> Link {
-    Link { bbox, target: LinkTarget::Uri(uri.to_owned()) }
+    Link {
+        bbox,
+        target: LinkTarget::Uri(uri.to_owned()),
+    }
 }
 
-fn check_links(report: &mut Report, name: &str, snapshot: &Snapshot, page: usize, expected: &[Link]) {
+fn check_links(
+    report: &mut Report,
+    name: &str,
+    snapshot: &Snapshot,
+    page: usize,
+    expected: &[Link],
+) {
     match snapshot.semantic.pages.get(page) {
         Some(page) => report.equal(
-            name, &format!("page.{}.links", page.index),
-            &page.links.as_slice(), &expected,
+            name,
+            &format!("page.{}.links", page.index),
+            &page.links.as_slice(),
+            &expected,
         ),
         None => report.check(name, &format!("page.{page}.links"), false, "missing page"),
     }
@@ -556,17 +665,26 @@ fn expected_outline() -> Vec<OutlineItem> {
         OutlineItem {
             title: "First page".to_owned(),
             level: 1,
-            target: Some(LinkTarget::Page { index: 0, y: Some(20.0) }),
+            target: Some(LinkTarget::Page {
+                index: 0,
+                y: Some(20.0),
+            }),
         },
         OutlineItem {
             title: "Images and ABO".to_owned(),
             level: 2,
-            target: Some(LinkTarget::Page { index: 0, y: Some(90.0) }),
+            target: Some(LinkTarget::Page {
+                index: 0,
+                y: Some(90.0),
+            }),
         },
         OutlineItem {
             title: "Second page".to_owned(),
             level: 1,
-            target: Some(LinkTarget::Page { index: 1, y: Some(20.0) }),
+            target: Some(LinkTarget::Page {
+                index: 1,
+                y: Some(20.0),
+            }),
         },
     ]
 }
@@ -585,43 +703,89 @@ fn check_images(report: &mut Report, name: &str, snapshot: &Snapshot, jpeg: &[u8
         ("rgba", 2, 2, [20.0, 200.0, 80.0, 260.0]),
         ("jpeg", 8, 8, [100.0, 212.0, 148.0, 260.0]),
     ] {
-        let Some(reference) = page.images.iter().find(|image| {
-            image.width == width && image.height == height
-        }) else {
+        let Some(reference) = page
+            .images
+            .iter()
+            .find(|image| image.width == width && image.height == height)
+        else {
             report.check(name, &format!("image.{label}"), false, "missing image");
             continue;
         };
         report.equal(name, &format!("image.{label}.bbox"), &reference.bbox, &bbox);
-        report.equal(name, &format!("image.{label}.inline"), &reference.inline, &false);
+        report.equal(
+            name,
+            &format!("image.{label}.inline"),
+            &reference.inline,
+            &false,
+        );
         let Some(id) = reference.object else {
-            report.check(name, &format!("image.{label}.object"), false, "missing image object");
+            report.check(
+                name,
+                &format!("image.{label}.object"),
+                false,
+                "missing image object",
+            );
             continue;
         };
         let result = pdf_text::images::load_image(&mut resolver, id, 64).map_err(describe);
         let Some(image) = report.obtain(name, &format!("image.{label}.decode"), result) else {
             continue;
         };
-        report.equal(name, &format!("image.{label}.size"), &(image.width, image.height), &(width, height));
-        report.equal(name, &format!("image.{label}.bits"), &image.bits_per_component, &8);
+        report.equal(
+            name,
+            &format!("image.{label}.size"),
+            &(image.width, image.height),
+            &(width, height),
+        );
+        report.equal(
+            name,
+            &format!("image.{label}.bits"),
+            &image.bits_per_component,
+            &8,
+        );
         if label == "rgba" {
-            report.equal(name, "image.rgba.color-space", &image.color_space, &ColorSpace::Rgb);
+            report.equal(
+                name,
+                "image.rgba.color-space",
+                &image.color_space,
+                &ColorSpace::Rgb,
+            );
             report.equal(name, "image.rgba.soft-mask", &image.has_soft_mask, &true);
             match image.data {
                 ImageData::Pixels { rgba } => report.check(
-                    name, "image.rgba.equality", rgba.as_slice() == RGBA.as_slice(),
+                    name,
+                    "image.rgba.equality",
+                    rgba.as_slice() == RGBA.as_slice(),
                     "decoded RGBA differs from the authored samples",
                 ),
-                _ => report.check(name, "image.rgba.equality", false, "expected decoded pixels"),
+                _ => report.check(
+                    name,
+                    "image.rgba.equality",
+                    false,
+                    "expected decoded pixels",
+                ),
             }
         } else {
-            report.equal(name, "image.jpeg.color-space", &image.color_space, &ColorSpace::Gray);
+            report.equal(
+                name,
+                "image.jpeg.color-space",
+                &image.color_space,
+                &ColorSpace::Gray,
+            );
             report.equal(name, "image.jpeg.soft-mask", &image.has_soft_mask, &false);
             match image.data {
                 ImageData::Jpeg(bytes) => report.check(
-                    name, "image.jpeg.passthrough", bytes.as_slice() == jpeg,
+                    name,
+                    "image.jpeg.passthrough",
+                    bytes.as_slice() == jpeg,
                     "JPEG payload was changed",
                 ),
-                _ => report.check(name, "image.jpeg.passthrough", false, "expected encoded JPEG"),
+                _ => report.check(
+                    name,
+                    "image.jpeg.passthrough",
+                    false,
+                    "expected encoded JPEG",
+                ),
             }
         }
     }
@@ -636,18 +800,28 @@ fn run_generated(
     jpeg: Arc<[u8]>,
 ) {
     let Some(bytes) = report.obtain(
-        name, "build", build(options, font.clone(), jpeg.clone(), false),
+        name,
+        "build",
+        build(options, font.clone(), jpeg.clone(), false),
     ) else {
         return;
     };
     if let Some(second) = report.obtain(
-        name, "second-build-to-sink", build(options, font.clone(), jpeg.clone(), true),
+        name,
+        "second-build-to-sink",
+        build(options, font.clone(), jpeg.clone(), true),
     ) {
         report.check(name, "determinism", bytes == second, "second build differs");
     }
     let Some(saved) = report.obtain(
-        name, "save-and-read",
-        persist(&config.output, name, &bytes, &[&config.classic, &config.stream]),
+        name,
+        "save-and-read",
+        persist(
+            &config.output,
+            name,
+            &bytes,
+            &[&config.classic, &config.stream],
+        ),
     ) else {
         return;
     };
@@ -655,50 +829,107 @@ fn run_generated(
         return;
     };
     check_text(report, name, &snapshot, &[FIRST_TEXT, SECOND_TEXT]);
-    report.equal(name, "info.title", &snapshot.semantic.info.title.as_deref(), &Some(TITLE));
-    report.equal(name, "info.author", &snapshot.semantic.info.author.as_deref(), &Some(AUTHOR));
-    report.equal(name, "info.subject", &snapshot.semantic.info.subject.as_deref(), &Some(SUBJECT));
-    report.equal(name, "outline", &snapshot.semantic.outline, &expected_outline());
-    let expected_kind = if options.object_streams { XrefKind::Stream } else { XrefKind::Table };
-    report.equal(name, "xref-kind", &snapshot.document.xref().kind(), &expected_kind);
-    report.equal(name, "xref-sections", &snapshot.document.xref().sections(), &1);
+    report.equal(
+        name,
+        "info.title",
+        &snapshot.semantic.info.title.as_deref(),
+        &Some(TITLE),
+    );
+    report.equal(
+        name,
+        "info.author",
+        &snapshot.semantic.info.author.as_deref(),
+        &Some(AUTHOR),
+    );
+    report.equal(
+        name,
+        "info.subject",
+        &snapshot.semantic.info.subject.as_deref(),
+        &Some(SUBJECT),
+    );
+    report.equal(
+        name,
+        "outline",
+        &snapshot.semantic.outline,
+        &expected_outline(),
+    );
+    let expected_kind = if options.object_streams {
+        XrefKind::Stream
+    } else {
+        XrefKind::Table
+    };
+    report.equal(
+        name,
+        "xref-kind",
+        &snapshot.document.xref().kind(),
+        &expected_kind,
+    );
+    report.equal(
+        name,
+        "xref-sections",
+        &snapshot.document.xref().sections(),
+        &1,
+    );
     report.check(
-        name, "object-streams",
+        name,
+        "object-streams",
         (snapshot.document.xref().counts().compressed != 0) == options.object_streams,
         "compressed-object presence differs from WriteOptions",
     );
-    check_links(report, name, &snapshot, 0, &[
-        uri_link([20.0, 20.0, 300.0, 40.0], URI),
-        Link {
-            bbox: [20.0, 275.0, 140.0, 295.0],
-            target: LinkTarget::Page { index: 1, y: Some(30.0) },
-        },
-    ]);
-    check_links(report, name, &snapshot, 1, &[
-        uri_link([20.0, 275.0, 160.0, 295.0], SECOND_URI),
-    ]);
+    check_links(
+        report,
+        name,
+        &snapshot,
+        0,
+        &[
+            uri_link([20.0, 20.0, 300.0, 40.0], URI),
+            Link {
+                bbox: [20.0, 275.0, 140.0, 295.0],
+                target: LinkTarget::Page {
+                    index: 1,
+                    y: Some(30.0),
+                },
+            },
+        ],
+    );
+    check_links(
+        report,
+        name,
+        &snapshot,
+        1,
+        &[uri_link([20.0, 275.0, 160.0, 295.0], SECOND_URI)],
+    );
     check_images(report, name, &snapshot, &jpeg);
-    check_pixels(report, name, &snapshot, 0, &[
-        (30, 140, [255, 0, 0, 255]),
-        (50, 150, [255, 0, 0, 255]),
-        (90, 140, [0, 255, 0, 255]),
-        (110, 150, [0, 255, 0, 255]),
-        (150, 140, [0, 0, 255, 255]),
-        (170, 150, [0, 0, 255, 255]),
-        (5, 145, [255; 4]),
-        (220, 145, [255; 4]),
-        (200, 145, [0, 0, 0, 255]),
-        (260, 50, [255, 128, 0, 255]),
-        (26, 216, [0, 0, 0, 255]),
-        (59, 216, [0, 0, 0, 255]),
-        (64, 218, [255; 4]),
-        (35, 85, [255, 0, 0, 255]),
-        (124, 64, [128, 128, 128, 255]),
-    ]);
-    check_pixels(report, name, &snapshot, 1, &[
-        (40, 40, [0, 255, 255, 255]),
-        (10, 40, [255; 4]),
-    ]);
+    check_pixels(
+        report,
+        name,
+        &snapshot,
+        0,
+        &[
+            (30, 140, [255, 0, 0, 255]),
+            (50, 150, [255, 0, 0, 255]),
+            (90, 140, [0, 255, 0, 255]),
+            (110, 150, [0, 255, 0, 255]),
+            (150, 140, [0, 0, 255, 255]),
+            (170, 150, [0, 0, 255, 255]),
+            (5, 145, [255; 4]),
+            (220, 145, [255; 4]),
+            (200, 145, [0, 0, 0, 255]),
+            (260, 50, [255, 128, 0, 255]),
+            (26, 216, [0, 0, 0, 255]),
+            (59, 216, [0, 0, 0, 255]),
+            (64, 218, [255; 4]),
+            (35, 85, [255, 0, 0, 255]),
+            (124, 64, [128, 128, 128, 255]),
+        ],
+    );
+    check_pixels(
+        report,
+        name,
+        &snapshot,
+        1,
+        &[(40, 40, [0, 255, 255, 255]), (10, 40, [255; 4])],
+    );
 }
 
 fn pdf_space(byte: u8) -> bool {
@@ -706,12 +937,19 @@ fn pdf_space(byte: u8) -> bool {
 }
 
 fn startxref(bytes: &[u8]) -> CheckResult<u64> {
-    let tail = bytes.get(bytes.len().saturating_sub(1024)..)
+    let tail = bytes
+        .get(bytes.len().saturating_sub(1024)..)
         .ok_or_else(|| "missing PDF tail".to_owned())?;
-    let marker = tail.windows(9).rposition(|window| window == b"startxref")
+    let marker = tail
+        .windows(9)
+        .rposition(|window| window == b"startxref")
         .ok_or_else(|| "missing startxref".to_owned())?;
-    let begin = marker.checked_add(9).ok_or_else(|| "startxref position overflow".to_owned())?;
-    let rest = tail.get(begin..).ok_or_else(|| "missing startxref value".to_owned())?;
+    let begin = marker
+        .checked_add(9)
+        .ok_or_else(|| "startxref position overflow".to_owned())?;
+    let rest = tail
+        .get(begin..)
+        .ok_or_else(|| "missing startxref value".to_owned())?;
     let mut value = 0u64;
     let mut digits = 0usize;
     for byte in rest.iter().copied().skip_while(|byte| pdf_space(*byte)) {
@@ -722,8 +960,14 @@ fn startxref(bytes: &[u8]) -> CheckResult<u64> {
             break;
         }
         digits = digits.saturating_add(1);
-        bounded("startxref_digits", digits as u64, MAX_STARTXREF_DIGITS as u64)?;
-        value = value.checked_mul(10).and_then(|value| value.checked_add(u64::from(byte - b'0')))
+        bounded(
+            "startxref_digits",
+            digits as u64,
+            MAX_STARTXREF_DIGITS as u64,
+        )?;
+        value = value
+            .checked_mul(10)
+            .and_then(|value| value.checked_add(u64::from(byte - b'0')))
             .ok_or_else(|| "startxref integer overflow".to_owned())?;
     }
     if digits == 0 || value >= u64::try_from(bytes.len()).map_err(describe)? {
@@ -733,14 +977,22 @@ fn startxref(bytes: &[u8]) -> CheckResult<u64> {
 }
 
 fn first_id(document: &Document) -> Option<Vec<u8>> {
-    document.trailer().dict()?.get(b"ID")?.as_array()?.get(0)?.as_str()
+    document
+        .trailer()
+        .dict()?
+        .get(b"ID")?
+        .as_array()?
+        .get(0)?
+        .as_str()
         .map(|string| string.decode())
 }
 
 fn edit(bytes: Arc<[u8]>, title: &str) -> CheckResult<Editor> {
     let mut editor = Editor::open(bytes, limits()).map_err(describe)?;
     editor.set_info("Title", title);
-    editor.add_uri_link(0, [30.0, 30.0, 130.0, 50.0], EDIT_URI).map_err(describe)?;
+    editor
+        .add_uri_link(0, [30.0, 30.0, 130.0, 50.0], EDIT_URI)
+        .map_err(describe)?;
     Ok(editor)
 }
 
@@ -757,48 +1009,88 @@ fn run_incremental(
     let Some(original) = report.obtain(name, "read-input", read_bounded(path)) else {
         return;
     };
-    let Some(before) = report.obtain(name, "read-original", snapshot(original.clone(), font.clone())) else {
+    let Some(before) = report.obtain(
+        name,
+        "read-original",
+        snapshot(original.clone(), font.clone()),
+    ) else {
         return;
     };
     // A house input has exactly the fixture pages; any other file (a real book) is checked only for what an
     // incremental edit must preserve, never against the fixture text, links or layout.
     let fixture = before.pages.len() == expected_text.len();
-    let kind = if fixture { kind } else { before.document.xref().kind() };
+    let kind = if fixture {
+        kind
+    } else {
+        before.document.xref().kind()
+    };
     if fixture {
         check_text(report, &format!("{name}.original"), &before, expected_text);
-        report.equal(name, "original.xref-sections", &before.document.xref().sections(), &1);
+        report.equal(
+            name,
+            "original.xref-sections",
+            &before.document.xref().sections(),
+            &1,
+        );
     }
-    report.equal(name, "original.xref-kind", &before.document.xref().kind(), &kind);
+    report.equal(
+        name,
+        "original.xref-kind",
+        &before.document.xref().kind(),
+        &kind,
+    );
     let Some(previous) = report.obtain(name, "original.startxref", startxref(&original)) else {
         return;
     };
     let Some(editor) = report.obtain(name, "edit", edit(original.clone(), title)) else {
         return;
     };
-    let Some(bytes) = report.obtain(name, "incremental-save", editor.save().map_err(describe)) else {
+    let Some(bytes) = report.obtain(name, "incremental-save", editor.save().map_err(describe))
+    else {
         return;
     };
     report.check(
-        name, "original-prefix", bytes.starts_with(&original),
+        name,
+        "original-prefix",
+        bytes.starts_with(&original),
         "incremental save changed the original byte prefix",
     );
     if let Some(second) = report.obtain(name, "repeat-save", editor.save().map_err(describe)) {
-        report.check(name, "repeat-save-determinism", bytes == second, "repeat save differs");
+        report.check(
+            name,
+            "repeat-save-determinism",
+            bytes == second,
+            "repeat save differs",
+        );
     }
     if let Some(second_editor) = report.obtain(name, "second-edit", edit(original.clone(), title)) {
-        if let Some(second) = report.obtain(name, "second-save", second_editor.save().map_err(describe)) {
-            report.check(name, "independent-edit-determinism", bytes == second, "second edit differs");
+        if let Some(second) =
+            report.obtain(name, "second-save", second_editor.save().map_err(describe))
+        {
+            report.check(
+                name,
+                "independent-edit-determinism",
+                bytes == second,
+                "second edit differs",
+            );
         }
     }
     let Some(saved) = report.obtain(
-        name, "save-and-read",
-        persist(&config.output, name, &bytes, &[&config.classic, &config.stream]),
+        name,
+        "save-and-read",
+        persist(
+            &config.output,
+            name,
+            &bytes,
+            &[&config.classic, &config.stream],
+        ),
     ) else {
         return;
     };
     if let Some(newest) = report.obtain(name, "new.startxref", startxref(&saved)) {
         report.check(
-            name, "appended-xref-offset",
+            name,
+            "appended-xref-offset",
             newest >= original.len() as u64,
             "new startxref points inside the original prefix",
         );
@@ -811,36 +1103,90 @@ fn run_incremental(
     }
     report.equal(name, "xref-kind", &after.document.xref().kind(), &kind);
     let sections = before.document.xref().sections().checked_add(1);
-    report.equal(name, "xref-sections", &Some(after.document.xref().sections()), &sections);
-    let prev = after.document.trailer().dict()
+    report.equal(
+        name,
+        "xref-sections",
+        &Some(after.document.xref().sections()),
+        &sections,
+    );
+    let prev = after
+        .document
+        .trailer()
+        .dict()
         .and_then(|dict| dict.get(b"Prev"))
         .and_then(|value| value.as_i64())
         .and_then(|value| u64::try_from(value).ok());
     report.equal(name, "prev", &prev, &Some(previous));
-    report.equal(name, "root-preserved", &after.document.root_ref(), &before.document.root_ref());
+    report.equal(
+        name,
+        "root-preserved",
+        &after.document.root_ref(),
+        &before.document.root_ref(),
+    );
     // A file without /ID gains one on save; only an existing first element must survive.
     match first_id(&before.document) {
-        Some(original) => report.equal(name, "first-id-preserved", &first_id(&after.document), &Some(original)),
-        None => report.check(name, "first-id-added", first_id(&after.document).is_some(), "no /ID after save"),
+        Some(original) => report.equal(
+            name,
+            "first-id-preserved",
+            &first_id(&after.document),
+            &Some(original),
+        ),
+        None => report.check(
+            name,
+            "first-id-added",
+            first_id(&after.document).is_some(),
+            "no /ID after save",
+        ),
     }
-    report.equal(name, "info.title", &after.semantic.info.title.as_deref(), &Some(title));
-    report.equal(name, "info.author-preserved", &after.semantic.info.author, &before.semantic.info.author);
-    report.equal(name, "info.subject-preserved", &after.semantic.info.subject, &before.semantic.info.subject);
-    report.equal(name, "outline-preserved", &after.semantic.outline, &before.semantic.outline);
+    report.equal(
+        name,
+        "info.title",
+        &after.semantic.info.title.as_deref(),
+        &Some(title),
+    );
+    report.equal(
+        name,
+        "info.author-preserved",
+        &after.semantic.info.author,
+        &before.semantic.info.author,
+    );
+    report.equal(
+        name,
+        "info.subject-preserved",
+        &after.semantic.info.subject,
+        &before.semantic.info.subject,
+    );
+    report.equal(
+        name,
+        "outline-preserved",
+        &after.semantic.outline,
+        &before.semantic.outline,
+    );
     report.check(
-        name, "render-preserved", after.rasters == before.rasters,
+        name,
+        "render-preserved",
+        after.rasters == before.rasters,
         "incremental metadata or annotation edit changed rendered pixels",
     );
     if fixture {
-        check_links(report, name, &after, 0, &[
-            uri_link([30.0, 742.0, 130.0, 762.0], EDIT_URI),
-        ]);
+        check_links(
+            report,
+            name,
+            &after,
+            0,
+            &[uri_link([30.0, 742.0, 130.0, 762.0], EDIT_URI)],
+        );
         for page in 1..expected_text.len().min(MAX_PAGES as usize) {
             check_links(report, name, &after, page, &[]);
         }
     }
     let added = before.pages.first().map(|page| page.annots + 1);
-    report.equal(name, "page.0.annotations", &after.pages.first().map(|page| page.annots), &added);
+    report.equal(
+        name,
+        "page.0.annotations",
+        &after.pages.first().map(|page| page.annots),
+        &added,
+    );
 }
 
 fn main() -> ExitCode {
@@ -848,13 +1194,22 @@ fn main() -> ExitCode {
     let Some(config) = report.obtain("setup", "arguments", config()) else {
         return report.finish();
     };
-    if report.obtain(
-        "setup", "output-directory", fs::create_dir_all(&config.output).map_err(describe),
-    ).is_none() {
+    if report
+        .obtain(
+            "setup",
+            "output-directory",
+            fs::create_dir_all(&config.output).map_err(describe),
+        )
+        .is_none()
+    {
         return report.finish();
     }
     let Some(font) = report.obtain(
-        "setup", "house-font", house_font::program().map(Arc::<[u8]>::from).map_err(describe),
+        "setup",
+        "house-font",
+        house_font::program()
+            .map(Arc::<[u8]>::from)
+            .map_err(describe),
     ) else {
         return report.finish();
     };
@@ -877,16 +1232,35 @@ fn main() -> ExitCode {
             object_streams,
             version: if object_streams { (1, 7) } else { (1, 4) },
         };
-        run_generated(&mut report, &config, name, &options, font.clone(), jpeg.clone());
+        run_generated(
+            &mut report,
+            &config,
+            name,
+            &options,
+            font.clone(),
+            jpeg.clone(),
+        );
     }
     if plan.open_inputs {
         run_incremental(
-            &mut report, &config, "edited-classic", &config.classic,
-            "Edited classic café", CLASSIC_TEXT, XrefKind::Table, font.clone(),
+            &mut report,
+            &config,
+            "edited-classic",
+            &config.classic,
+            "Edited classic café",
+            CLASSIC_TEXT,
+            XrefKind::Table,
+            font.clone(),
         );
         run_incremental(
-            &mut report, &config, "edited-xref-stream", &config.stream,
-            "Edited stream café", STREAM_TEXT, XrefKind::Stream, font,
+            &mut report,
+            &config,
+            "edited-xref-stream",
+            &config.stream,
+            "Edited stream café",
+            STREAM_TEXT,
+            XrefKind::Stream,
+            font,
         );
     }
     report.finish()
@@ -902,15 +1276,9 @@ mod house_font {
     const MAX_POINTS: usize = 8;
     const MAX_NAME_BYTES: usize = 64;
 
-    const SQUARE: [[i16; 2]; 4] = [
-        [100, 100], [100, 800], [800, 800], [800, 100],
-    ];
-    const TRIANGLE: [[i16; 2]; 3] = [
-        [100, 100], [450, 800], [800, 100],
-    ];
-    const HOLE: [[i16; 2]; 4] = [
-        [300, 300], [600, 300], [600, 600], [300, 600],
-    ];
+    const SQUARE: [[i16; 2]; 4] = [[100, 100], [100, 800], [800, 800], [800, 100]];
+    const TRIANGLE: [[i16; 2]; 3] = [[100, 100], [450, 800], [800, 100]];
+    const HOLE: [[i16; 2]; 4] = [[300, 300], [600, 300], [600, 600], [300, 600]];
 
     fn invalid(message: &str) -> io::Error {
         io::Error::new(io::ErrorKind::InvalidInput, message)
@@ -918,40 +1286,44 @@ mod house_font {
 
     fn bounded(requested: usize, maximum: usize, kind: &str) -> io::Result<()> {
         if requested > maximum {
-            return Err(invalid(&format!("{kind} requested {requested}, maximum {maximum}")));
+            return Err(invalid(&format!(
+                "{kind} requested {requested}, maximum {maximum}"
+            )));
         }
         Ok(())
     }
 
     fn at(base: usize, offset: usize) -> io::Result<usize> {
-        base.checked_add(offset).ok_or_else(|| invalid("font offset overflow"))
+        base.checked_add(offset)
+            .ok_or_else(|| invalid("font offset overflow"))
     }
 
     fn size16(size: usize) -> io::Result<u16> {
-        u16::try_from(size).map_err(|_| invalid(&format!(
-            "font_u16 requested {size}, maximum {}", u16::MAX,
-        )))
+        u16::try_from(size)
+            .map_err(|_| invalid(&format!("font_u16 requested {size}, maximum {}", u16::MAX,)))
     }
 
     fn size32(size: usize) -> io::Result<u32> {
-        u32::try_from(size).map_err(|_| invalid(&format!(
-            "font_u32 requested {size}, maximum {}", u32::MAX,
-        )))
+        u32::try_from(size)
+            .map_err(|_| invalid(&format!("font_u32 requested {size}, maximum {}", u32::MAX,)))
     }
 
     fn append(out: &mut Vec<u8>, bytes: &[u8]) -> io::Result<()> {
         let length = at(out.len(), bytes.len())?;
         bounded(length, MAX_FONT_BYTES, "font_bytes")?;
-        out.try_reserve(bytes.len()).map_err(|_| invalid(&format!(
-            "font_allocation requested {length}, maximum {MAX_FONT_BYTES}",
-        )))?;
+        out.try_reserve(bytes.len()).map_err(|_| {
+            invalid(&format!(
+                "font_allocation requested {length}, maximum {MAX_FONT_BYTES}",
+            ))
+        })?;
         out.extend_from_slice(bytes);
         Ok(())
     }
 
     fn patch(out: &mut [u8], offset: usize, bytes: &[u8]) -> io::Result<()> {
         let end = at(offset, bytes.len())?;
-        let target = out.get_mut(offset..end)
+        let target = out
+            .get_mut(offset..end)
             .ok_or_else(|| invalid("font patch outside table"))?;
         target.copy_from_slice(bytes);
         Ok(())
@@ -984,7 +1356,12 @@ mod house_font {
     fn align(out: &mut Vec<u8>) -> io::Result<()> {
         let padding = (4 - out.len() % 4) % 4;
         let zeros = [0u8; 3];
-        append(out, zeros.get(..padding).ok_or_else(|| invalid("font alignment"))?)
+        append(
+            out,
+            zeros
+                .get(..padding)
+                .ok_or_else(|| invalid("font alignment"))?,
+        )
     }
 
     fn checksum(bytes: &[u8]) -> u32 {
@@ -1002,9 +1379,9 @@ mod house_font {
 
     fn simple_glyph(out: &mut Vec<u8>, contours: &[&[[i16; 2]]]) -> io::Result<()> {
         bounded(contours.len(), MAX_CONTOURS, "font_contours")?;
-        let points = contours.iter().try_fold(
-            0usize, |count, contour| at(count, contour.len()),
-        )?;
+        let points = contours
+            .iter()
+            .try_fold(0usize, |count, contour| at(count, contour.len()))?;
         bounded(points, MAX_POINTS, "font_points")?;
         if contours.is_empty() || contours.iter().any(|contour| contour.is_empty()) {
             return Err(invalid("empty simple glyph contour"));
@@ -1016,8 +1393,7 @@ mod house_font {
             bounds[2] = bounds[2].max(x);
             bounds[3] = bounds[3].max(y);
         }
-        let count = i16::try_from(contours.len())
-            .map_err(|_| invalid("font contour count"))?;
+        let count = i16::try_from(contours.len()).map_err(|_| invalid("font contour count"))?;
         put_signed(out, count)?;
         for value in bounds {
             put_signed(out, value)?;
@@ -1025,7 +1401,8 @@ mod house_font {
         let mut end = 0usize;
         for contour in contours {
             end = at(end, contour.len())?;
-            let last = end.checked_sub(1)
+            let last = end
+                .checked_sub(1)
                 .ok_or_else(|| invalid("font contour endpoint"))?;
             put16(out, size16(last)?)?;
         }
@@ -1036,9 +1413,12 @@ mod house_font {
         for axis in 0..2 {
             let mut previous = 0i16;
             for point in contours.iter().flat_map(|contour| contour.iter()) {
-                let coordinate = point.get(axis).copied()
+                let coordinate = point
+                    .get(axis)
+                    .copied()
                     .ok_or_else(|| invalid("font axis"))?;
-                let delta = coordinate.checked_sub(previous)
+                let delta = coordinate
+                    .checked_sub(previous)
                     .ok_or_else(|| invalid("font coordinate delta overflow"))?;
                 put_signed(out, delta)?;
                 previous = coordinate;
@@ -1054,9 +1434,7 @@ mod house_font {
         set32(&mut out, 12, 0x5f0f_3cf5)?;
         set16(&mut out, 16, 3)?;
         set16(&mut out, 18, 1000)?;
-        for (offset, value) in [
-            (36, 100), (38, 100), (40, 800), (42, 800), (48, 2), (50, 1),
-        ] {
+        for (offset, value) in [(36, 100), (38, 100), (40, 800), (42, 800), (48, 2), (50, 1)] {
             set_signed(&mut out, offset, value)?;
         }
         set16(&mut out, 46, 8)?;
@@ -1142,16 +1520,25 @@ mod house_font {
         set16(&mut out, 4, 78)?;
         for (index, (id, text)) in STRINGS.into_iter().enumerate() {
             bounded(text.len(), MAX_NAME_BYTES, "font_name_bytes")?;
-            let offset = out.len().checked_sub(78)
+            let offset = out
+                .len()
+                .checked_sub(78)
                 .ok_or_else(|| invalid("font name offset"))?;
-            let length = text.encode_utf16().count().checked_mul(2)
+            let length = text
+                .encode_utf16()
+                .count()
+                .checked_mul(2)
                 .ok_or_else(|| invalid("font name length overflow"))?;
-            let record = index.checked_mul(12).and_then(|value| value.checked_add(6))
+            let record = index
+                .checked_mul(12)
+                .and_then(|value| value.checked_add(6))
                 .ok_or_else(|| invalid("font name record overflow"))?;
             for (field, value) in [3, 1, 0x0409, id, size16(length)?, size16(offset)?]
-                .into_iter().enumerate()
+                .into_iter()
+                .enumerate()
             {
-                let delta = field.checked_mul(2)
+                let delta = field
+                    .checked_mul(2)
                     .ok_or_else(|| invalid("font name field overflow"))?;
                 set16(&mut out, at(record, delta)?, value)?;
             }
@@ -1166,9 +1553,20 @@ mod house_font {
         let mut out = vec![0; 78];
         set_signed(&mut out, 2, 1000)?;
         for (offset, value) in [
-            (4, 400), (6, 5), (10, 650), (12, 600), (16, 75),
-            (18, 650), (20, 600), (24, 350), (26, 50), (28, 300),
-            (62, 64), (64, 65), (66, 79), (74, 800),
+            (4, 400),
+            (6, 5),
+            (10, 650),
+            (12, 600),
+            (16, 75),
+            (18, 650),
+            (20, 600),
+            (24, 350),
+            (26, 50),
+            (28, 300),
+            (62, 64),
+            (64, 65),
+            (66, 79),
+            (74, 800),
         ] {
             set16(&mut out, offset, value)?;
         }
@@ -1212,7 +1610,9 @@ mod house_font {
         for (index, (tag, table)) in tables.into_iter().enumerate() {
             align(&mut out)?;
             let offset = out.len();
-            let record = index.checked_mul(16).and_then(|value| value.checked_add(12))
+            let record = index
+                .checked_mul(16)
+                .and_then(|value| value.checked_add(12))
                 .ok_or_else(|| invalid("font directory overflow"))?;
             patch(&mut out, record, &tag)?;
             set32(&mut out, at(record, 4)?, checksum(&table))?;

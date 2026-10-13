@@ -35,15 +35,25 @@ impl Paint {
         match self {
             Self::Rgb(color) => {
                 let mut out = numbers(&color.values()?)?;
-                append(&mut out, if stroke { b"RG\n" } else { b"rg\n" }, MAX_COMMAND_BYTES)?;
+                append(
+                    &mut out,
+                    if stroke { b"RG\n" } else { b"rg\n" },
+                    MAX_COMMAND_BYTES,
+                )?;
                 Ok(out)
             }
             Self::Gray(level) => {
                 if !level.is_finite() || !(0.0..=1.0).contains(&level) {
-                    return Err(invalid("gray level must be finite and between zero and one"));
+                    return Err(invalid(
+                        "gray level must be finite and between zero and one",
+                    ));
                 }
                 let mut out = numbers(&[level])?;
-                append(&mut out, if stroke { b"G\n" } else { b"g\n" }, MAX_COMMAND_BYTES)?;
+                append(
+                    &mut out,
+                    if stroke { b"G\n" } else { b"g\n" },
+                    MAX_COMMAND_BYTES,
+                )?;
                 Ok(out)
             }
         }
@@ -115,7 +125,10 @@ pub(crate) fn win_ansi(character: char) -> u8 {
 }
 
 impl PageBuilder<'_> {
-    pub(super) fn perform(&mut self, work: impl FnOnce(&mut DocumentBuilder, usize) -> io::Result<()>) {
+    pub(super) fn perform(
+        &mut self,
+        work: impl FnOnce(&mut DocumentBuilder, usize) -> io::Result<()>,
+    ) {
         if self.doc.error.is_some() {
             return;
         }
@@ -132,21 +145,24 @@ impl PageBuilder<'_> {
 
     /// MediaBox width and height in points.
     pub fn size(&self) -> (f32, f32) {
-        self.index.and_then(|index| self.doc.pages.get(index))
+        self.index
+            .and_then(|index| self.doc.pages.get(index))
             .map_or((0.0, 0.0), |page| (page.width, page.height))
     }
 
     /// The area inside the margins, as `[x, y, width, height]`.
     pub fn content_box(&self) -> [f32; 4] {
-        self.index.and_then(|index| self.doc.pages.get(index)).map_or([0.0; 4], |page| {
-            let margins = page.margins;
-            [
-                margins.left,
-                margins.bottom,
-                page.width - margins.left - margins.right,
-                page.height - margins.top - margins.bottom,
-            ]
-        })
+        self.index
+            .and_then(|index| self.doc.pages.get(index))
+            .map_or([0.0; 4], |page| {
+                let margins = page.margins;
+                [
+                    margins.left,
+                    margins.bottom,
+                    page.width - margins.left - margins.right,
+                    page.height - margins.top - margins.bottom,
+                ]
+            })
     }
 
     /// Adds a printable annotation with a self-contained normal appearance.
@@ -159,11 +175,16 @@ impl PageBuilder<'_> {
             let appearance = serialize_value(&Value::Dict(parts.ap_dict.clone()))?.len();
             // Include retained Value storage, not just its serialized bytes.
             let bytes = add(
-                add(mul(add(dictionary, appearance)?, 16)?, parts.ap_content.len())?,
+                add(
+                    mul(add(dictionary, appearance)?, 16)?,
+                    parts.ap_content.len(),
+                )?,
                 1024,
             )?;
             doc.charge(bytes)?;
-            let page = doc.pages.get_mut(index)
+            let page = doc
+                .pages
+                .get_mut(index)
                 .ok_or_else(|| invalid("page handle is invalid"))?;
             push(&mut page.annotations, parts, "annotations", MAX_LINKS)?;
             doc.annotations = count;
@@ -175,10 +196,16 @@ impl PageBuilder<'_> {
     /// document is finished.
     pub fn save(&mut self) {
         self.perform(|doc, index| {
-            let page = doc.pages.get(index).ok_or_else(|| invalid("page handle is invalid"))?;
+            let page = doc
+                .pages
+                .get(index)
+                .ok_or_else(|| invalid("page handle is invalid"))?;
             check("graphics_state_depth", add(page.depth, 1)?, MAX_SAVE_DEPTH)?;
             doc.emit(index, b"q\n")?;
-            let page = doc.pages.get_mut(index).ok_or_else(|| invalid("page handle is invalid"))?;
+            let page = doc
+                .pages
+                .get_mut(index)
+                .ok_or_else(|| invalid("page handle is invalid"))?;
             page.depth = add(page.depth, 1)?;
             Ok(())
         });
@@ -187,12 +214,18 @@ impl PageBuilder<'_> {
     /// Restores the graphics state saved by the matching `save` (`Q`).
     pub fn restore(&mut self) {
         self.perform(|doc, index| {
-            let page = doc.pages.get(index).ok_or_else(|| invalid("page handle is invalid"))?;
+            let page = doc
+                .pages
+                .get(index)
+                .ok_or_else(|| invalid("page handle is invalid"))?;
             if page.depth == 0 {
                 return Err(invalid("restore without a matching save"));
             }
             doc.emit(index, b"Q\n")?;
-            let page = doc.pages.get_mut(index).ok_or_else(|| invalid("page handle is invalid"))?;
+            let page = doc
+                .pages
+                .get_mut(index)
+                .ok_or_else(|| invalid("page handle is invalid"))?;
             page.depth -= 1;
             Ok(())
         });
@@ -298,7 +331,13 @@ impl PageBuilder<'_> {
     }
 
     pub fn stroke_rect(
-        &mut self, x: f32, y: f32, w: f32, h: f32, width: f32, color: impl Into<Paint>,
+        &mut self,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        width: f32,
+        color: impl Into<Paint>,
     ) {
         let paint = color.into();
         self.perform(|doc, index| {
@@ -313,7 +352,15 @@ impl PageBuilder<'_> {
     }
 
     /// Strokes a straight line using the current dash pattern, cap and join.
-    pub fn line(&mut self, x0: f32, y0: f32, x1: f32, y1: f32, width: f32, color: impl Into<Paint>) {
+    pub fn line(
+        &mut self,
+        x0: f32,
+        y0: f32,
+        x1: f32,
+        y1: f32,
+        width: f32,
+        color: impl Into<Paint>,
+    ) {
         let paint = color.into();
         self.perform(|doc, index| {
             let mut out = copied(b"q\n", MAX_COMMAND_BYTES)?;
@@ -337,7 +384,13 @@ impl PageBuilder<'_> {
     }
 
     pub fn text(
-        &mut self, font: FontId, size: f32, x: f32, y: f32, text: &str, color: impl Into<Paint>,
+        &mut self,
+        font: FontId,
+        size: f32,
+        x: f32,
+        y: f32,
+        text: &str,
+        color: impl Into<Paint>,
     ) {
         let paint = color.into();
         self.perform(|doc, index| {
@@ -348,7 +401,8 @@ impl PageBuilder<'_> {
             }
             let position = numbers(&[x, y])?;
             let color = paint.command(false)?;
-            let font_index = usize::try_from(font.0).map_err(|_| invalid("font identifier overflow"))?;
+            let font_index =
+                usize::try_from(font.0).map_err(|_| invalid("font identifier overflow"))?;
             let embedded = matches!(doc.fonts.get(font_index), Some(Font::TrueType(_)));
             let capacity = mul(text.len(), if embedded { 2 } else { 1 })?;
             doc.charge(add(capacity, mul(text.chars().count(), 96)?)?)?;
@@ -368,7 +422,11 @@ impl PageBuilder<'_> {
                 }
                 None => return Err(invalid("unknown font identifier")),
             }
-            let text_value = if embedded { Value::HexStr(encoded) } else { Value::Str(encoded) };
+            let text_value = if embedded {
+                Value::HexStr(encoded)
+            } else {
+                Value::Str(encoded)
+            };
             let mut out = copied(b"q\n", MAX_COMMAND_BYTES)?;
             if embedded {
                 append(&mut out, b"/Span << /ActualText ", MAX_COMMAND_BYTES)?;
@@ -377,7 +435,11 @@ impl PageBuilder<'_> {
                 append(&mut out, b" >> BDC\n", MAX_COMMAND_BYTES)?;
             }
             append(&mut out, &color, MAX_COMMAND_BYTES)?;
-            append(&mut out, format!("BT\n/F{} ", font.0).as_bytes(), MAX_COMMAND_BYTES)?;
+            append(
+                &mut out,
+                format!("BT\n/F{} ", font.0).as_bytes(),
+                MAX_COMMAND_BYTES,
+            )?;
             append(&mut out, &numbers(&[size])?, MAX_COMMAND_BYTES)?;
             append(&mut out, b"Tf\n1 0 0 1 ", MAX_COMMAND_BYTES)?;
             append(&mut out, &position, MAX_COMMAND_BYTES)?;
@@ -396,18 +458,33 @@ impl PageBuilder<'_> {
     pub fn image(&mut self, image: ImageId, x: f32, y: f32, w: f32, h: f32) {
         self.perform(|doc, index| {
             rect(x, y, w, h)?;
-            let image_index = usize::try_from(image.0).map_err(|_| invalid("image identifier overflow"))?;
+            let image_index =
+                usize::try_from(image.0).map_err(|_| invalid("image identifier overflow"))?;
             if doc.images.get(image_index).is_none() {
                 return Err(invalid("unknown image identifier"));
             }
             let mut out = copied(b"q\n", MAX_COMMAND_BYTES)?;
-            append(&mut out, &numbers(&[w, 0.0, 0.0, h, x, y])?, MAX_COMMAND_BYTES)?;
-            append(&mut out, format!("cm\n/I{} Do\nQ\n", image.0).as_bytes(), MAX_COMMAND_BYTES)?;
-            let page = doc.pages.get(index).ok_or_else(|| invalid("page handle is invalid"))?;
+            append(
+                &mut out,
+                &numbers(&[w, 0.0, 0.0, h, x, y])?,
+                MAX_COMMAND_BYTES,
+            )?;
+            append(
+                &mut out,
+                format!("cm\n/I{} Do\nQ\n", image.0).as_bytes(),
+                MAX_COMMAND_BYTES,
+            )?;
+            let page = doc
+                .pages
+                .get(index)
+                .ok_or_else(|| invalid("page handle is invalid"))?;
             if !page.images.contains(&image.0) {
                 doc.charge(64)?;
-                doc.pages.get_mut(index).ok_or_else(|| invalid("page handle is invalid"))?
-                    .images.insert(image.0);
+                doc.pages
+                    .get_mut(index)
+                    .ok_or_else(|| invalid("page handle is invalid"))?
+                    .images
+                    .insert(image.0);
             }
             doc.emit(index, &out)
         });
@@ -429,12 +506,30 @@ impl PageBuilder<'_> {
                     append(&mut bytes, &[byte], 48 << 10)?;
                 }
             }
-            add_link(doc, index, Link { rect: rect(x, y, w, h)?, target: Target::Uri(bytes) })
+            add_link(
+                doc,
+                index,
+                Link {
+                    rect: rect(x, y, w, h)?,
+                    target: Target::Uri(bytes),
+                },
+            )
         });
     }
 
     pub fn link_page(&mut self, x: f32, y: f32, w: f32, h: f32, page: usize, top: f32) {
-        self.link_to(x, y, w, h, Destination::Xyz { page, left: None, top: Some(top), zoom: None });
+        self.link_to(
+            x,
+            y,
+            w,
+            h,
+            Destination::Xyz {
+                page,
+                left: None,
+                top: Some(top),
+                zoom: None,
+            },
+        );
     }
 
     /// Adds an internal link. The destination page may be added later; it is
@@ -443,19 +538,29 @@ impl PageBuilder<'_> {
         self.perform(|doc, index| {
             destination.validate()?;
             add_link(
-                doc, index,
-                Link { rect: rect(x, y, w, h)?, target: Target::Destination(destination) },
+                doc,
+                index,
+                Link {
+                    rect: rect(x, y, w, h)?,
+                    target: Target::Destination(destination),
+                },
             )
         });
     }
 }
 
 pub(super) fn use_font(doc: &mut DocumentBuilder, index: usize, font: FontId) -> io::Result<()> {
-    let page = doc.pages.get(index).ok_or_else(|| invalid("page handle is invalid"))?;
+    let page = doc
+        .pages
+        .get(index)
+        .ok_or_else(|| invalid("page handle is invalid"))?;
     if !page.fonts.contains(&font.0) {
         doc.charge(64)?;
-        doc.pages.get_mut(index).ok_or_else(|| invalid("page handle is invalid"))?
-            .fonts.insert(font.0);
+        doc.pages
+            .get_mut(index)
+            .ok_or_else(|| invalid("page handle is invalid"))?
+            .fonts
+            .insert(font.0);
     }
     Ok(())
 }
@@ -468,7 +573,10 @@ fn add_link(doc: &mut DocumentBuilder, index: usize, link: Link) -> io::Result<(
         Target::Destination(_) => 0,
     };
     doc.charge(add(bytes, 256)?)?;
-    let page = doc.pages.get_mut(index).ok_or_else(|| invalid("page handle is invalid"))?;
+    let page = doc
+        .pages
+        .get_mut(index)
+        .ok_or_else(|| invalid("page handle is invalid"))?;
     push(&mut page.links, link, "links", MAX_LINKS)?;
     doc.links = count;
     Ok(())
@@ -515,9 +623,7 @@ impl PathBuilder<'_> {
         self
     }
 
-    pub fn cubic_to(
-        &mut self, x1: f32, y1: f32, x2: f32, y2: f32, x3: f32, y3: f32,
-    ) -> &mut Self {
+    pub fn cubic_to(&mut self, x1: f32, y1: f32, x2: f32, y2: f32, x3: f32, y3: f32) -> &mut Self {
         self.segment(&[x1, y1, x2, y2, x3, y3], b"c\n", true);
         self
     }
@@ -583,7 +689,11 @@ impl PathBuilder<'_> {
     }
 
     pub fn fill_stroke(
-        &mut self, fill: impl Into<Paint>, width: f32, stroke: impl Into<Paint>, even_odd: bool,
+        &mut self,
+        fill: impl Into<Paint>,
+        width: f32,
+        stroke: impl Into<Paint>,
+        even_odd: bool,
     ) -> &mut Self {
         self.paint(Some(fill.into()), Some((width, stroke.into())), even_odd);
         self
@@ -601,7 +711,11 @@ impl PathBuilder<'_> {
                 return Err(invalid("clip requires a path"));
             }
             let mut command = copied(&self.bytes, MAX_COMMAND_BYTES)?;
-            append(&mut command, if even_odd { b"W* n\n" } else { b"W n\n" }, MAX_COMMAND_BYTES)?;
+            append(
+                &mut command,
+                if even_odd { b"W* n\n" } else { b"W n\n" },
+                MAX_COMMAND_BYTES,
+            )?;
             self.doc.emit(index, &command)?;
             self.bytes.clear();
             self.current = false;

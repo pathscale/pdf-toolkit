@@ -29,7 +29,11 @@ pub struct KdfParams {
 
 impl Default for KdfParams {
     fn default() -> Self {
-        Self { memory_kib: 65536, iterations: 3, parallelism: 1 }
+        Self {
+            memory_kib: 65536,
+            iterations: 3,
+            parallelism: 1,
+        }
     }
 }
 
@@ -40,8 +44,16 @@ impl KdfParams {
             u64::from(self.memory_kib) * 1024,
             limits.max_decoded_bytes.min(MAX_MEMORY_BYTES),
         )?;
-        check(LimitKind::CodecWork, u64::from(self.iterations), MAX_ITERATIONS)?;
-        check(LimitKind::CodecWork, u64::from(self.parallelism), MAX_PARALLELISM)?;
+        check(
+            LimitKind::CodecWork,
+            u64::from(self.iterations),
+            MAX_ITERATIONS,
+        )?;
+        check(
+            LimitKind::CodecWork,
+            u64::from(self.parallelism),
+            MAX_PARALLELISM,
+        )?;
         Params::new(self.memory_kib, self.iterations, self.parallelism, Some(32))
             .map_err(|_| malformed(0, "PSChaCha KDF parameters"))
     }
@@ -68,7 +80,8 @@ impl ChaChaKey {
         let params = costs.checked(limits)?;
         let count = params.block_count();
         let mut memory = Vec::new();
-        memory.try_reserve_exact(count)
+        memory
+            .try_reserve_exact(count)
             .map_err(|_| malformed(0, "PSChaCha KDF allocation"))?;
         memory.resize_with(count, Block::default);
         let mut key = [0u8; 32];
@@ -82,38 +95,30 @@ impl ChaChaKey {
     }
 
     /// Nonce zero is reserved exclusively for Check.
-    pub fn seal(
-        &self,
-        id: ObjectRef,
-        nonce: [u8; 24],
-        plain: &[u8],
-    ) -> Result<Vec<u8>, DocError> {
+    pub fn seal(&self, id: ObjectRef, nonce: [u8; 24], plain: &[u8]) -> Result<Vec<u8>, DocError> {
         if id.number() == 0 || nonce == [0; 24] {
             return Err(malformed(0, "PSChaCha object nonce or ID"));
         }
-        let length = plain.len().checked_add(40)
+        let length = plain
+            .len()
+            .checked_add(40)
             .ok_or_else(|| malformed(0, "PSChaCha length"))?;
         let mut bytes = Vec::new();
-        bytes.try_reserve_exact(length)
+        bytes
+            .try_reserve_exact(length)
             .map_err(|_| malformed(0, "PSChaCha allocation"))?;
         bytes.extend_from_slice(&nonce);
         bytes.extend_from_slice(plain);
         let nonce = XNonce::try_from(&nonce[..]).map_err(|_| malformed(0, "PSChaCha nonce"))?;
-        let tag = self.cipher.encrypt_inout_detached(
-            &nonce,
-            &object_aad(id),
-            (&mut bytes[24..]).into(),
-        ).map_err(|_| malformed(0, "PSChaCha encryption"))?;
+        let tag = self
+            .cipher
+            .encrypt_inout_detached(&nonce, &object_aad(id), (&mut bytes[24..]).into())
+            .map_err(|_| malformed(0, "PSChaCha encryption"))?;
         bytes.extend_from_slice(&tag);
         Ok(bytes)
     }
 
-    pub fn open(
-        &self,
-        id: ObjectRef,
-        bytes: &[u8],
-        maximum: u64,
-    ) -> Result<Vec<u8>, DocError> {
+    pub fn open(&self, id: ObjectRef, bytes: &[u8], maximum: u64) -> Result<Vec<u8>, DocError> {
         if id.number() == 0 || bytes.len() < 40 {
             return Err(malformed(0, "PSChaCha authentication"));
         }
@@ -125,32 +130,30 @@ impl ChaChaKey {
         let length = end - 24;
         check(LimitKind::DecodedBytes, length as u64, maximum)?;
         let mut plain = Vec::new();
-        plain.try_reserve_exact(length)
+        plain
+            .try_reserve_exact(length)
             .map_err(|_| malformed(0, "PSChaCha allocation"))?;
         plain.extend_from_slice(&bytes[24..end]);
         let nonce = XNonce::try_from(nonce).map_err(|_| malformed(0, "PSChaCha authentication"))?;
-        let tag = Tag::try_from(&bytes[end..]).map_err(|_| malformed(0, "PSChaCha authentication"))?;
-        self.cipher.decrypt_inout_detached(
-            &nonce,
-            &object_aad(id),
-            plain.as_mut_slice().into(),
-            &tag,
-        ).map_err(|_| malformed(0, "PSChaCha authentication"))?;
+        let tag =
+            Tag::try_from(&bytes[end..]).map_err(|_| malformed(0, "PSChaCha authentication"))?;
+        self.cipher
+            .decrypt_inout_detached(&nonce, &object_aad(id), plain.as_mut_slice().into(), &tag)
+            .map_err(|_| malformed(0, "PSChaCha authentication"))?;
         Ok(plain)
     }
 
     /// A detached authentication tag over empty plaintext and handler metadata.
-    pub fn password_check(
-        &self,
-        salt: &[u8; 16],
-        costs: KdfParams,
-    ) -> Result<[u8; 16], DocError> {
+    pub fn password_check(&self, salt: &[u8; 16], costs: KdfParams) -> Result<[u8; 16], DocError> {
         let mut empty: [u8; 0] = [];
-        let tag = self.cipher.encrypt_inout_detached(
-            &XNonce::default(),
-            &check_aad(salt, costs),
-            empty.as_mut_slice().into(),
-        ).map_err(|_| malformed(0, "PSChaCha password check"))?;
+        let tag = self
+            .cipher
+            .encrypt_inout_detached(
+                &XNonce::default(),
+                &check_aad(salt, costs),
+                empty.as_mut_slice().into(),
+            )
+            .map_err(|_| malformed(0, "PSChaCha password check"))?;
         let mut result = [0u8; 16];
         result.copy_from_slice(&tag);
         Ok(result)
@@ -163,12 +166,14 @@ impl ChaChaKey {
         token: &[u8; 16],
     ) -> Result<(), DocError> {
         let mut empty: [u8; 0] = [];
-        self.cipher.decrypt_inout_detached(
-            &XNonce::default(),
-            &check_aad(salt, costs),
-            empty.as_mut_slice().into(),
-            &Tag::from(*token),
-        ).map_err(|_| malformed(0, "PSChaCha password authentication"))
+        self.cipher
+            .decrypt_inout_detached(
+                &XNonce::default(),
+                &check_aad(salt, costs),
+                empty.as_mut_slice().into(),
+                &Tag::from(*token),
+            )
+            .map_err(|_| malformed(0, "PSChaCha password authentication"))
     }
 }
 
@@ -196,7 +201,10 @@ pub(crate) struct PrivateCrypt {
 
 impl PrivateCrypt {
     pub(crate) fn recognizes(value: &Value) -> bool {
-        value.get().as_dict().and_then(|dict| dict.get(b"Filter"))
+        value
+            .get()
+            .as_dict()
+            .and_then(|dict| dict.get(b"Filter"))
             .and_then(|value| value.as_name())
             .is_some_and(|name| name.eq_bytes(b"PSChaCha"))
     }
@@ -207,15 +215,23 @@ impl PrivateCrypt {
         limits: &Limits,
     ) -> Result<Self, DocError> {
         let password = password.ok_or(DocError::Encrypted)?;
-        let dict = value.get().as_dict()
+        let dict = value
+            .get()
+            .as_dict()
             .ok_or_else(|| malformed(0, "PSChaCha security dictionary"))?;
         if integer(dict, b"V")? != 1 || integer(dict, b"Length")? != 256 {
-            return Err(DocError::Unsupported { feature: "PSChaCha version" });
+            return Err(DocError::Unsupported {
+                feature: "PSChaCha version",
+            });
         }
-        if !dict.get(b"KDF").and_then(|value| value.as_name())
+        if !dict
+            .get(b"KDF")
+            .and_then(|value| value.as_name())
             .is_some_and(|name| name.eq_bytes(b"Argon2id"))
         {
-            return Err(DocError::Unsupported { feature: "PSChaCha KDF" });
+            return Err(DocError::Unsupported {
+                feature: "PSChaCha KDF",
+            });
         }
         let costs = KdfParams {
             memory_kib: integer(dict, b"M")?,
@@ -226,13 +242,18 @@ impl PrivateCrypt {
         let token = fixed::<16>(dict, b"Check")?;
         let key = ChaChaKey::derive(password, &salt, costs, limits)?;
         key.authenticate_password(&salt, costs, &token)?;
-        Ok(Self { key: Arc::new(key), encrypt_id: value.object().id() })
+        Ok(Self {
+            key: Arc::new(key),
+            encrypt_id: value.object().id(),
+        })
     }
 
     pub(crate) fn excluded(&self, object: &Object) -> bool {
         (self.encrypt_id.is_some() && self.encrypt_id == object.id())
             || (object.is_stream()
-                && object.dict().and_then(|dict| dict.get(b"Type"))
+                && object
+                    .dict()
+                    .and_then(|dict| dict.get(b"Type"))
                     .and_then(|value| value.as_name())
                     .is_some_and(|name| name.eq_bytes(b"XRef")))
     }
@@ -254,16 +275,25 @@ impl PrivateCrypt {
 }
 
 fn integer(dict: DictRef<'_>, key: &[u8]) -> Result<u32, DocError> {
-    dict.get(key).and_then(|value| value.as_i64())
+    dict.get(key)
+        .and_then(|value| value.as_i64())
         .and_then(|number| u32::try_from(number).ok())
         .ok_or_else(|| malformed(0, "PSChaCha security integer"))
 }
 
 fn fixed<const N: usize>(dict: DictRef<'_>, key: &[u8]) -> Result<[u8; N], DocError> {
-    let text = dict.get(key).and_then(|value| value.as_str())
+    let text = dict
+        .get(key)
+        .and_then(|value| value.as_str())
         .ok_or_else(|| malformed(0, "PSChaCha security string"))?;
-    check(LimitKind::ObjectBytes, text.raw().len() as u64, (N * 4 + 2) as u64)?;
+    check(
+        LimitKind::ObjectBytes,
+        text.raw().len() as u64,
+        (N * 4 + 2) as u64,
+    )?;
     let bytes = text.decode();
-    bytes.as_slice().try_into()
+    bytes
+        .as_slice()
+        .try_into()
         .map_err(|_| malformed(0, "PSChaCha security string length"))
 }

@@ -30,8 +30,11 @@ fn box_value(numbers: [f64; 4]) -> Value {
 pub(crate) fn initial(document: &Document) -> Result<(ObjectRef, Vec<PageEntry>), DocError> {
     let root = document.root_ref().ok_or_else(|| malformed("catalog"))?;
     let catalog = document.resolver().get(root)?;
-    let pages_root = catalog.dict().and_then(|dict| dict.get(b"Pages"))
-        .and_then(|value| value.as_ref()).ok_or_else(|| malformed("pages"))?;
+    let pages_root = catalog
+        .dict()
+        .and_then(|dict| dict.get(b"Pages"))
+        .and_then(|value| value.as_ref())
+        .ok_or_else(|| malformed("pages"))?;
     let mut resolver = document.resolver();
     let mut out = Vec::new();
     let mut retained = 0u64;
@@ -54,7 +57,9 @@ pub(crate) fn initial(document: &Document) -> Result<(ObjectRef, Vec<PageEntry>)
             let dict = dictionary(document, id)?;
             for key in ["Resources", "MediaBox", "CropBox", "Rotate"] {
                 if get(&inherited, key).is_none() {
-                    if let Some(found) = get(&dict, key).filter(|value| !matches!(value, Value::Null)) {
+                    if let Some(found) =
+                        get(&dict, key).filter(|value| !matches!(value, Value::Null))
+                    {
                         set(&mut inherited, key, found.clone());
                     }
                 }
@@ -87,10 +92,19 @@ pub(crate) fn initial(document: &Document) -> Result<(ObjectRef, Vec<PageEntry>)
             maximum,
         )?;
         out.try_reserve(1).map_err(|_| {
-            refused(LimitKind::TotalDecodedBytes, maximum.saturating_add(1), maximum)
+            refused(
+                LimitKind::TotalDecodedBytes,
+                maximum.saturating_add(1),
+                maximum,
+            )
         })?;
-        let Value::Dict(inherited) = body else { return Err(malformed("page attributes")) };
-        out.push(PageEntry { id: page.id, inherited });
+        let Value::Dict(inherited) = body else {
+            return Err(malformed("page attributes"));
+        };
+        out.push(PageEntry {
+            id: page.id,
+            inherited,
+        });
     }
     Ok((pages_root, out))
 }
@@ -111,18 +125,30 @@ impl Editor {
     pub fn rotate_page(&mut self, page: u32, quarter_turns: i32) -> Result<(), DocError> {
         self.clean()?;
         let id = self.page_ref(page)?;
-        let entry = self.pages.get(page as usize).ok_or_else(|| malformed("page index"))?;
+        let entry = self
+            .pages
+            .get(page as usize)
+            .ok_or_else(|| malformed("page index"))?;
         let mut dict = self.dict_at(id)?;
         explicit(&mut dict, entry);
         let mut rotation = get(&dict, "Rotate").cloned().unwrap_or(Value::Int(0));
         let mut seen = BTreeSet::new();
         while let Value::Ref(number, generation) = rotation {
             let maximum = u64::from(self.document.limits().max_ref_chain);
-            check(LimitKind::RefChain, (seen.len() as u64).saturating_add(1), maximum)?;
+            check(
+                LimitKind::RefChain,
+                (seen.len() as u64).saturating_add(1),
+                maximum,
+            )?;
             if !seen.insert((number, generation)) {
-                return Err(refused(LimitKind::RefChain, maximum.saturating_add(1), maximum));
+                return Err(refused(
+                    LimitKind::RefChain,
+                    maximum.saturating_add(1),
+                    maximum,
+                ));
             }
-            rotation = self.read_value(ObjectRef::new(number, generation))?
+            rotation = self
+                .read_value(ObjectRef::new(number, generation))?
                 .ok_or_else(|| malformed("page Rotate"))?;
         }
         let degrees = match rotation {
@@ -136,13 +162,18 @@ impl Editor {
         } else {
             (quarter - 0.5) as i64
         };
-        let rotation = (nearest.rem_euclid(4) + i64::from(quarter_turns).rem_euclid(4))
-            .rem_euclid(4) * 90;
+        let rotation =
+            (nearest.rem_euclid(4) + i64::from(quarter_turns).rem_euclid(4)).rem_euclid(4) * 90;
         set(&mut dict, "Rotate", Value::Int(rotation));
         let body = Value::Dict(dict);
         let cost = self.cost(id, &body, None)?;
         let total = self.changed_size(&[(id, cost)])?;
-        self.install(Pending { id, value: body, data: None, cost });
+        self.install(Pending {
+            id,
+            value: body,
+            data: None,
+            cost,
+        });
         self.pending_bytes = total;
         Ok(())
     }
@@ -176,10 +207,16 @@ impl Editor {
             return Ok(Vec::new());
         }
         let limits = self.document.limits();
-        check(LimitKind::Pages, self.pages.len() as u64, u64::from(limits.max_pages))?;
+        check(
+            LimitKind::Pages,
+            self.pages.len() as u64,
+            u64::from(limits.max_pages),
+        )?;
         check(
             LimitKind::Tokens,
-            (self.pages.len() as u64).saturating_mul(3).saturating_add(12),
+            (self.pages.len() as u64)
+                .saturating_mul(3)
+                .saturating_add(12),
             u64::from(limits.max_tokens_per_object),
         )?;
         let mut updates = Vec::new();
@@ -190,27 +227,46 @@ impl Editor {
         for entry in &self.pages {
             let mut dict = self.dict_at(entry.id)?;
             explicit(&mut dict, entry);
-            set(&mut dict, "Parent", Value::Ref(
-                self.pages_root.number(), self.pages_root.generation(),
-            ));
+            set(
+                &mut dict,
+                "Parent",
+                Value::Ref(self.pages_root.number(), self.pages_root.generation()),
+            );
             let body = Value::Dict(dict);
             let cost = self.cost(entry.id, &body, None)?;
             retained = value::add(
-                retained, cost, LimitKind::TotalDecodedBytes, limits.max_total_decoded_bytes,
+                retained,
+                cost,
+                LimitKind::TotalDecodedBytes,
+                limits.max_total_decoded_bytes,
             )?;
             if let Some(old) = self.pending.get(&entry.id.number()) {
-                total = total.checked_sub(old.cost)
+                total = total
+                    .checked_sub(old.cost)
                     .ok_or_else(|| malformed("pending byte accounting"))?;
             }
             total = value::add(total, cost, LimitKind::FileBytes, maximum)?;
-            value::add(self.bytes.len() as u64, total, LimitKind::FileBytes, maximum)?;
+            value::add(
+                self.bytes.len() as u64,
+                total,
+                LimitKind::FileBytes,
+                maximum,
+            )?;
             updates.try_reserve(1).map_err(|_| {
-                refused(LimitKind::TotalDecodedBytes, retained.saturating_add(1), retained)
+                refused(
+                    LimitKind::TotalDecodedBytes,
+                    retained.saturating_add(1),
+                    retained,
+                )
             })?;
-            kids.try_reserve(1).map_err(|_| {
-                refused(LimitKind::ObjectBytes, maximum.saturating_add(1), maximum)
-            })?;
-            updates.push(Pending { id: entry.id, value: body, data: None, cost });
+            kids.try_reserve(1)
+                .map_err(|_| refused(LimitKind::ObjectBytes, maximum.saturating_add(1), maximum))?;
+            updates.push(Pending {
+                id: entry.id,
+                value: body,
+                data: None,
+                cost,
+            });
             kids.push(Value::Ref(entry.id.number(), entry.id.generation()));
         }
         let body = Value::Dict(vec![
@@ -220,12 +276,23 @@ impl Editor {
         ]);
         let cost = self.cost(self.pages_root, &body, None)?;
         if let Some(old) = self.pending.get(&self.pages_root.number()) {
-            total = total.checked_sub(old.cost)
+            total = total
+                .checked_sub(old.cost)
                 .ok_or_else(|| malformed("pending byte accounting"))?;
         }
         total = value::add(total, cost, LimitKind::FileBytes, maximum)?;
-        value::add(self.bytes.len() as u64, total, LimitKind::FileBytes, maximum)?;
-        updates.push(Pending { id: self.pages_root, value: body, data: None, cost });
+        value::add(
+            self.bytes.len() as u64,
+            total,
+            LimitKind::FileBytes,
+            maximum,
+        )?;
+        updates.push(Pending {
+            id: self.pages_root,
+            value: body,
+            data: None,
+            cost,
+        });
         Ok(updates)
     }
 }

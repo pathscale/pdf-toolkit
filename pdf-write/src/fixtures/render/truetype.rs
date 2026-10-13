@@ -7,16 +7,10 @@ const MAX_CONTOURS: usize = 2;
 const MAX_POINTS: usize = 8;
 const MAX_NAME_BYTES: usize = 64;
 
-pub(super) const SQUARE: [[i16; 2]; 4] = [
-    [100, 100], [100, 800], [800, 800], [800, 100],
-];
-pub(super) const TRIANGLE: [[i16; 2]; 3] = [
-    [100, 100], [450, 800], [800, 100],
-];
+pub(super) const SQUARE: [[i16; 2]; 4] = [[100, 100], [100, 800], [800, 800], [800, 100]];
+pub(super) const TRIANGLE: [[i16; 2]; 3] = [[100, 100], [450, 800], [800, 100]];
 // Opposite winding to the outer square makes a hole under non-zero filling.
-pub(super) const HOLE: [[i16; 2]; 4] = [
-    [300, 300], [600, 300], [600, 600], [300, 600],
-];
+pub(super) const HOLE: [[i16; 2]; 4] = [[300, 300], [600, 300], [600, 600], [300, 600]];
 
 fn invalid(message: &str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidInput, message)
@@ -24,13 +18,16 @@ fn invalid(message: &str) -> io::Error {
 
 fn bounded(requested: usize, maximum: usize, kind: &str) -> io::Result<()> {
     if requested > maximum {
-        return Err(invalid(&format!("{kind} requested {requested}, maximum {maximum}")));
+        return Err(invalid(&format!(
+            "{kind} requested {requested}, maximum {maximum}"
+        )));
     }
     Ok(())
 }
 
 fn at(base: usize, offset: usize) -> io::Result<usize> {
-    base.checked_add(offset).ok_or_else(|| invalid("font offset overflow"))
+    base.checked_add(offset)
+        .ok_or_else(|| invalid("font offset overflow"))
 }
 
 fn size16(size: usize) -> io::Result<u16> {
@@ -44,16 +41,17 @@ fn size32(size: usize) -> io::Result<u32> {
 fn append(out: &mut Vec<u8>, bytes: &[u8]) -> io::Result<()> {
     let length = at(out.len(), bytes.len())?;
     bounded(length, MAX_FONT_BYTES, "font_bytes")?;
-    out.try_reserve(bytes.len()).map_err(|_| {
-        io::Error::new(io::ErrorKind::Other, "font allocation failed")
-    })?;
+    out.try_reserve(bytes.len())
+        .map_err(|_| io::Error::new(io::ErrorKind::Other, "font allocation failed"))?;
     out.extend_from_slice(bytes);
     Ok(())
 }
 
 fn patch(out: &mut [u8], offset: usize, bytes: &[u8]) -> io::Result<()> {
     let end = at(offset, bytes.len())?;
-    let target = out.get_mut(offset..end).ok_or_else(|| invalid("font patch outside table"))?;
+    let target = out
+        .get_mut(offset..end)
+        .ok_or_else(|| invalid("font patch outside table"))?;
     target.copy_from_slice(bytes);
     Ok(())
 }
@@ -85,7 +83,12 @@ fn set32(out: &mut [u8], offset: usize, value: u32) -> io::Result<()> {
 fn align(out: &mut Vec<u8>) -> io::Result<()> {
     let padding = (4 - out.len() % 4) % 4;
     let zeros = [0u8; 3];
-    append(out, zeros.get(..padding).ok_or_else(|| invalid("font alignment"))?)
+    append(
+        out,
+        zeros
+            .get(..padding)
+            .ok_or_else(|| invalid("font alignment"))?,
+    )
 }
 
 fn checksum(bytes: &[u8]) -> u32 {
@@ -103,7 +106,9 @@ fn checksum(bytes: &[u8]) -> u32 {
 /// Flags use full signed 16-bit deltas, avoiding compressed-coordinate state.
 fn simple_glyph(out: &mut Vec<u8>, contours: &[&[[i16; 2]]]) -> io::Result<()> {
     bounded(contours.len(), MAX_CONTOURS, "font_contours")?;
-    let points = contours.iter().try_fold(0usize, |count, contour| at(count, contour.len()))?;
+    let points = contours
+        .iter()
+        .try_fold(0usize, |count, contour| at(count, contour.len()))?;
     bounded(points, MAX_POINTS, "font_points")?;
     if contours.is_empty() || contours.iter().any(|contour| contour.is_empty()) {
         return Err(invalid("empty simple glyph contour"));
@@ -117,20 +122,30 @@ fn simple_glyph(out: &mut Vec<u8>, contours: &[&[[i16; 2]]]) -> io::Result<()> {
     }
     let count = i16::try_from(contours.len()).map_err(|_| invalid("font contour count"))?;
     put_signed(out, count)?;
-    for value in bounds { put_signed(out, value)?; }
+    for value in bounds {
+        put_signed(out, value)?;
+    }
     let mut end = 0usize;
     for contour in contours {
         end = at(end, contour.len())?;
-        let last = end.checked_sub(1).ok_or_else(|| invalid("font contour endpoint"))?;
+        let last = end
+            .checked_sub(1)
+            .ok_or_else(|| invalid("font contour endpoint"))?;
         put16(out, size16(last)?)?;
     }
     put16(out, 0)?; // instructionLength
-    for _ in 0..points { append(out, &[1])?; } // on-curve, full x/y deltas
+    for _ in 0..points {
+        append(out, &[1])?;
+    } // on-curve, full x/y deltas
     for axis in 0..2 {
         let mut previous = 0i16;
         for point in contours.iter().flat_map(|contour| contour.iter()) {
-            let coordinate = point.get(axis).copied().ok_or_else(|| invalid("font axis"))?;
-            let delta = coordinate.checked_sub(previous)
+            let coordinate = point
+                .get(axis)
+                .copied()
+                .ok_or_else(|| invalid("font axis"))?;
+            let delta = coordinate
+                .checked_sub(previous)
                 .ok_or_else(|| invalid("font coordinate delta overflow"))?;
             put_signed(out, delta)?;
             previous = coordinate;
@@ -187,15 +202,27 @@ fn hmtx() -> io::Result<Vec<u8>> {
 
 fn cmap() -> io::Result<Vec<u8>> {
     let mut out = Vec::new();
-    for value in [0, 1, 3, 1] { put16(&mut out, value)?; }
+    for value in [0, 1, 3, 1] {
+        put16(&mut out, value)?;
+    }
     put32(&mut out, 12)?;
     // Format 4, four segments, including the mandatory 0xffff sentinel.
-    for value in [4, 48, 0, 8, 8, 2, 0] { put16(&mut out, value)?; }
-    for value in [65, 66, 79, 0xffff] { put16(&mut out, value)?; }
+    for value in [4, 48, 0, 8, 8, 2, 0] {
+        put16(&mut out, value)?;
+    }
+    for value in [65, 66, 79, 0xffff] {
+        put16(&mut out, value)?;
+    }
     put16(&mut out, 0)?;
-    for value in [65, 66, 79, 0xffff] { put16(&mut out, value)?; }
-    for value in [-64, -64, -76, 1] { put_signed(&mut out, value)?; }
-    for _ in 0..4 { put16(&mut out, 0)?; }
+    for value in [65, 66, 79, 0xffff] {
+        put16(&mut out, value)?;
+    }
+    for value in [-64, -64, -76, 1] {
+        put_signed(&mut out, value)?;
+    }
+    for _ in 0..4 {
+        put16(&mut out, 0)?;
+    }
     Ok(out)
 }
 
@@ -222,18 +249,31 @@ fn names() -> io::Result<Vec<u8>> {
     set16(&mut out, 4, 78)?;
     for (index, (id, text)) in STRINGS.into_iter().enumerate() {
         bounded(text.len(), MAX_NAME_BYTES, "font_name_bytes")?;
-        let offset = out.len().checked_sub(78).ok_or_else(|| invalid("font name offset"))?;
-        let length = text.encode_utf16().count().checked_mul(2)
+        let offset = out
+            .len()
+            .checked_sub(78)
+            .ok_or_else(|| invalid("font name offset"))?;
+        let length = text
+            .encode_utf16()
+            .count()
+            .checked_mul(2)
             .ok_or_else(|| invalid("font name length overflow"))?;
-        let record = index.checked_mul(12).and_then(|value| value.checked_add(6))
+        let record = index
+            .checked_mul(12)
+            .and_then(|value| value.checked_add(6))
             .ok_or_else(|| invalid("font name record overflow"))?;
         for (field, value) in [3, 1, 0x0409, id, size16(length)?, size16(offset)?]
-            .into_iter().enumerate()
+            .into_iter()
+            .enumerate()
         {
-            let delta = field.checked_mul(2).ok_or_else(|| invalid("font name field overflow"))?;
+            let delta = field
+                .checked_mul(2)
+                .ok_or_else(|| invalid("font name field overflow"))?;
             set16(&mut out, at(record, delta)?, value)?;
         }
-        for unit in text.encode_utf16() { put16(&mut out, unit)?; }
+        for unit in text.encode_utf16() {
+            put16(&mut out, unit)?;
+        }
     }
     Ok(out)
 }
@@ -242,9 +282,20 @@ fn os2() -> io::Result<Vec<u8>> {
     let mut out = vec![0; 78]; // OS/2 version 0
     set_signed(&mut out, 2, 1000)?;
     for (offset, value) in [
-        (4, 400), (6, 5), (10, 650), (12, 600), (16, 75),
-        (18, 650), (20, 600), (24, 350), (26, 50), (28, 300),
-        (62, 64), (64, 65), (66, 79), (74, 800),
+        (4, 400),
+        (6, 5),
+        (10, 650),
+        (12, 600),
+        (16, 75),
+        (18, 650),
+        (20, 600),
+        (24, 350),
+        (26, 50),
+        (28, 300),
+        (62, 64),
+        (64, 65),
+        (66, 79),
+        (74, 800),
     ] {
         set16(&mut out, offset, value)?;
     }
@@ -290,13 +341,17 @@ pub(super) fn program() -> io::Result<Vec<u8>> {
     for (index, (tag, table)) in tables.into_iter().enumerate() {
         align(&mut out)?;
         let offset = out.len();
-        let record = index.checked_mul(16).and_then(|value| value.checked_add(12))
+        let record = index
+            .checked_mul(16)
+            .and_then(|value| value.checked_add(12))
             .ok_or_else(|| invalid("font directory overflow"))?;
         patch(&mut out, record, &tag)?;
         set32(&mut out, at(record, 4)?, checksum(&table))?;
         set32(&mut out, at(record, 8)?, size32(offset)?)?;
         set32(&mut out, at(record, 12)?, size32(table.len())?)?;
-        if tag == *b"head" { head_offset = Some(offset); }
+        if tag == *b"head" {
+            head_offset = Some(offset);
+        }
         append(&mut out, &table)?;
         align(&mut out)?;
     }

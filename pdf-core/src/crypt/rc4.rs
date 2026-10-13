@@ -22,4 +22,3 @@ pub(super) fn apply(key: &[u8], bytes: &mut [u8]) -> bool {
     }
     true
 }
-

@@ -5,8 +5,8 @@ use std::io;
 use crate::encode::scan;
 
 use super::{
-    fixture_resources, image_dictionary, image_truth, manifest, name, rect,
-    sha256, Encoding, Fixture, House, Value,
+    fixture_resources, image_dictionary, image_truth, manifest, name, rect, sha256, Encoding,
+    Fixture, House, Value,
 };
 
 const WIDTH: u32 = 64;
@@ -20,14 +20,20 @@ fn invalid(message: &str) -> io::Error {
 }
 
 fn ink(x: u32, y: u32) -> io::Result<bool> {
-    let border = (2..62).contains(&x) && (2..46).contains(&y)
-        && (x < 6 || x >= 58 || y < 6 || y >= 42);
-    let dx = i64::from(x).checked_sub(18)
+    let border =
+        (2..62).contains(&x) && (2..46).contains(&y) && (x < 6 || x >= 58 || y < 6 || y >= 42);
+    let dx = i64::from(x)
+        .checked_sub(18)
         .ok_or_else(|| invalid("scan circle x overflow"))?;
-    let dy = i64::from(y).checked_sub(16)
+    let dy = i64::from(y)
+        .checked_sub(16)
         .ok_or_else(|| invalid("scan circle y overflow"))?;
-    let distance = dx.checked_mul(dx)
-        .and_then(|value| dy.checked_mul(dy).and_then(|other| value.checked_add(other)))
+    let distance = dx
+        .checked_mul(dx)
+        .and_then(|value| {
+            dy.checked_mul(dy)
+                .and_then(|other| value.checked_add(other))
+        })
         .ok_or_else(|| invalid("scan circle distance overflow"))?;
     let circle = distance <= 64;
     let p = ((8..10).contains(&x) && (30..40).contains(&y))
@@ -44,7 +50,8 @@ fn ink(x: u32, y: u32) -> io::Result<bool> {
 
 fn bitmap() -> io::Result<(Vec<u8>, Vec<u8>)> {
     let mut packed = Vec::new();
-    packed.try_reserve_exact(BITMAP_BYTES)
+    packed
+        .try_reserve_exact(BITMAP_BYTES)
         .map_err(|_| invalid("scan fixture bitmap allocation failed"))?;
     packed.resize(BITMAP_BYTES, 0u8);
     let mut rgba = Vec::new();
@@ -53,12 +60,14 @@ fn bitmap() -> io::Result<(Vec<u8>, Vec<u8>)> {
     for y in 0..HEIGHT {
         for x in 0..WIDTH {
             let is_black = ink(x, y)?;
-            let position = y.checked_mul(WIDTH)
+            let position = y
+                .checked_mul(WIDTH)
                 .and_then(|value| value.checked_add(x))
                 .and_then(|value| usize::try_from(value).ok())
                 .ok_or_else(|| invalid("scan fixture pixel offset overflow"))?;
             if is_black {
-                let byte = packed.get_mut(position / 8)
+                let byte = packed
+                    .get_mut(position / 8)
                     .ok_or_else(|| invalid("scan fixture pixel outside bitmap"))?;
                 *byte |= 0x80u8 >> (position % 8);
             }
@@ -95,33 +104,61 @@ pub(super) fn codecs() -> io::Result<Fixture> {
             parameters.push(("EncodedByteAlign".to_owned(), Value::Bool(true)));
         }
         // BlackIs1 is omitted to exercise its false default.
-        house.writer.stream(object, image_dictionary(
-            WIDTH, HEIGHT, Some(name("DeviceGray")), Some(1), vec![
-                ("Filter".to_owned(), name("CCITTFaxDecode")),
-                ("DecodeParms".to_owned(), Value::Dict(parameters)),
-                ("Decode".to_owned(), Value::Array(vec![Value::Int(0), Value::Int(1)])),
+        house.writer.stream(
+            object,
+            image_dictionary(
+                WIDTH,
+                HEIGHT,
+                Some(name("DeviceGray")),
+                Some(1),
+                vec![
+                    ("Filter".to_owned(), name("CCITTFaxDecode")),
+                    ("DecodeParms".to_owned(), Value::Dict(parameters)),
+                    (
+                        "Decode".to_owned(),
+                        Value::Array(vec![Value::Int(0), Value::Int(1)]),
+                    ),
+                    ("Interpolate".to_owned(), Value::Bool(false)),
+                ],
+            ),
+            data,
+        )?;
+    }
+    house.writer.stream(
+        jbig2,
+        image_dictionary(
+            WIDTH,
+            HEIGHT,
+            Some(name("DeviceGray")),
+            Some(1),
+            vec![
+                ("Filter".to_owned(), name("JBIG2Decode")),
+                (
+                    "Decode".to_owned(),
+                    Value::Array(vec![Value::Int(0), Value::Int(1)]),
+                ),
                 ("Interpolate".to_owned(), Value::Bool(false)),
             ],
-        ), data)?;
-    }
-    house.writer.stream(jbig2, image_dictionary(
-        WIDTH, HEIGHT, Some(name("DeviceGray")), Some(1), vec![
-            ("Filter".to_owned(), name("JBIG2Decode")),
-            ("Decode".to_owned(), Value::Array(vec![Value::Int(0), Value::Int(1)])),
-            ("Interpolate".to_owned(), Value::Bool(false)),
-        ],
-    ), &jbig2_data)?;
+        ),
+        &jbig2_data,
+    )?;
 
     let plain = b"q 128 0 0 96 24 24 cm /G4 Do Q\n\
                   q 128 0 0 96 176 24 cm /G3 Do Q\n\
                   q 128 0 0 96 328 24 cm /JBIG2 Do Q\n";
-    let page = house.add_page(house.pages, plain, Encoding::Plain, vec![
-        ("Resources".to_owned(), fixture_resources(
-            &[], &[("G4", g4), ("G3", g3), ("JBIG2", jbig2)],
-        )),
-        ("MediaBox".to_owned(), rect(BOUNDS)),
-        ("CropBox".to_owned(), rect(BOUNDS)),
-    ])?;
+    let page = house.add_page(
+        house.pages,
+        plain,
+        Encoding::Plain,
+        vec![
+            (
+                "Resources".to_owned(),
+                fixture_resources(&[], &[("G4", g4), ("G3", g3), ("JBIG2", jbig2)]),
+            ),
+            ("MediaBox".to_owned(), rect(BOUNDS)),
+            ("CropBox".to_owned(), rect(BOUNDS)),
+        ],
+    )?;
     house.write_base(&[page.id], 1)?;
     house.table(Vec::new())?;
 
@@ -148,4 +185,3 @@ pub(super) fn codecs() -> io::Result<Fixture> {
     );
     Ok(house.fixture(expected))
 }
-

@@ -5,12 +5,12 @@ extern crate alloc;
 mod calculator;
 
 pub mod display;
-pub mod paint;
 pub mod glyphs;
+pub mod paint;
 pub mod sfnt;
 pub mod type1;
 
 pub use display::{
-    display_list, Dash, DisplayList, FillRule, GlyphPath, ImageSource, Item,
-    Matrix, Paint, Path, PathEl, RenderOptions, Rgba, Stroke,
+    display_list, Dash, DisplayList, FillRule, GlyphPath, ImageSource, Item, Matrix, Paint, Path,
+    PathEl, RenderOptions, Rgba, Stroke,
 };

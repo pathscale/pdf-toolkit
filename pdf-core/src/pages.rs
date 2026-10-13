@@ -88,9 +88,7 @@ impl<'r, 'd> PageWalk<'r, 'd> {
             let catalog = resolver
                 .get(catalog_id)
                 .map_err(|error| map_missing(error, "catalog"))?;
-            let catalog_dict = catalog
-                .dict()
-                .ok_or_else(|| malformed(0, "catalog"))?;
+            let catalog_dict = catalog.dict().ok_or_else(|| malformed(0, "catalog"))?;
             let pages_id = catalog_dict
                 .get(b"Pages")
                 .and_then(|value| value.as_ref())
@@ -104,8 +102,11 @@ impl<'r, 'd> PageWalk<'r, 'd> {
         })();
         let (root, repair_error) = match root {
             Ok(root) => (Some(root), None),
-            Err(error) if resolver.document().repair_mode()
-                && !crate::repair::is_hard_error(&error) => (None, Some(error)),
+            Err(error)
+                if resolver.document().repair_mode() && !crate::repair::is_hard_error(&error) =>
+            {
+                (None, Some(error))
+            }
             Err(error) => return Err(error),
         };
         let scan = repair_error.is_some();
@@ -123,7 +124,9 @@ impl<'r, 'd> PageWalk<'r, 'd> {
             repair_streams: Vec::new(),
             repair_decoded: 0,
         };
-        if scan { walk.start_repair_scan(); }
+        if scan {
+            walk.start_repair_scan();
+        }
         Ok(walk)
     }
 
@@ -211,9 +214,12 @@ impl<'r, 'd> PageWalk<'r, 'd> {
             self.resolver.document().xref().get(id.number())
         {
             if !self.repair_streams.contains(&stream) {
-                self.repair_decoded = self.repair_decoded.saturating_add(object.buffer().len() as u64);
+                self.repair_decoded = self
+                    .repair_decoded
+                    .saturating_add(object.buffer().len() as u64);
                 check(
-                    LimitKind::TotalDecodedBytes, self.repair_decoded,
+                    LimitKind::TotalDecodedBytes,
+                    self.repair_decoded,
                     self.resolver.document().limits().max_total_decoded_bytes,
                 )?;
                 self.repair_streams.push(stream);
@@ -246,9 +252,14 @@ impl<'r, 'd> PageWalk<'r, 'd> {
         ancestors.push(object.clone());
         seen.push(id);
         loop {
-            let parent = ancestors.last().and_then(|object| object.dict())
-                .and_then(|dict| dict.get(b"Parent")).and_then(|value| value.as_ref());
-            let Some(parent) = parent else { break; };
+            let parent = ancestors
+                .last()
+                .and_then(|object| object.dict())
+                .and_then(|dict| dict.get(b"Parent"))
+                .and_then(|value| value.as_ref());
+            let Some(parent) = parent else {
+                break;
+            };
             if seen.contains(&parent) {
                 self.push_warning(Some(parent), "page_tree_cycle");
                 break;
@@ -274,7 +285,11 @@ impl<'r, 'd> PageWalk<'r, 'd> {
         for ancestor in ancestors.iter().rev() {
             if let Some(dict) = ancestor.dict() {
                 inherited = inherit_attrs(
-                    self.resolver, dict, inherited, ancestor.id().unwrap_or(id), &mut self.warnings,
+                    self.resolver,
+                    dict,
+                    inherited,
+                    ancestor.id().unwrap_or(id),
+                    &mut self.warnings,
                 );
             }
         }
@@ -282,10 +297,13 @@ impl<'r, 'd> PageWalk<'r, 'd> {
     }
 
     fn scan_step(&mut self) -> Option<Result<Page, DocError>> {
-        if self.finished { return None; }
+        if self.finished {
+            return None;
+        }
         let size = self.resolver.document().xref().size();
         if let Err(error) = check(
-            LimitKind::Objects, u64::from(size),
+            LimitKind::Objects,
+            u64::from(size),
             u64::from(self.resolver.document().limits().max_objects),
         ) {
             self.finished = true;
@@ -299,7 +317,11 @@ impl<'r, 'd> PageWalk<'r, 'd> {
                 _ => continue,
             };
             let id = ObjectRef::new(number, generation);
-            if self.visited.binary_search_by(|candidate| compare_refs(*candidate, id)).is_ok() {
+            if self
+                .visited
+                .binary_search_by(|candidate| compare_refs(*candidate, id))
+                .is_ok()
+            {
                 continue;
             }
             let object = match self.repair_get(id) {
@@ -310,7 +332,9 @@ impl<'r, 'd> PageWalk<'r, 'd> {
                 }
                 Err(_) => continue,
             };
-            let Some(dict) = object.dict() else { continue; };
+            let Some(dict) = object.dict() else {
+                continue;
+            };
             if let Some(kind) = dict.get(b"Type") {
                 let kind = match self.resolver.resolve(kind) {
                     Ok(kind) => kind,
@@ -320,11 +344,21 @@ impl<'r, 'd> PageWalk<'r, 'd> {
                     }
                     Err(_) => continue,
                 };
-                if !kind.get().as_name().is_some_and(|name| name.eq_bytes(b"Page")) { continue; }
+                if !kind
+                    .get()
+                    .as_name()
+                    .is_some_and(|name| name.eq_bytes(b"Page"))
+                {
+                    continue;
+                }
             } else {
                 // An orphan with a damaged Type still needs a page-shaped spine.
-                if dict.get(b"Kids").is_some() || dict.get(b"Subtype").is_some()
-                    || dict.get(b"Parent").and_then(|value| value.as_ref()).is_none()
+                if dict.get(b"Kids").is_some()
+                    || dict.get(b"Subtype").is_some()
+                    || dict
+                        .get(b"Parent")
+                        .and_then(|value| value.as_ref())
+                        .is_none()
                     || dict.get(b"Contents").is_none()
                 {
                     continue;
@@ -334,7 +368,8 @@ impl<'r, 'd> PageWalk<'r, 'd> {
             self.insert_visited(id);
             let requested = self.page_count.saturating_add(1);
             if let Err(error) = check(
-                LimitKind::Pages, requested,
+                LimitKind::Pages,
+                requested,
                 u64::from(self.resolver.document().limits().max_pages),
             ) {
                 self.finished = true;
@@ -509,9 +544,13 @@ impl Iterator for PageWalk<'_, '_> {
 
 impl PageWalk<'_, '_> {
     fn step(&mut self) -> Option<Result<Page, DocError>> {
-        if self.repair_scan.is_some() { return self.scan_step(); }
+        if self.repair_scan.is_some() {
+            return self.scan_step();
+        }
         let item = self.tree_step();
-        if !self.resolver.document().repair_mode() { return item; }
+        if !self.resolver.document().repair_mode() {
+            return item;
+        }
         match item {
             Some(Err(error)) if !crate::repair::is_hard_error(&error) => {
                 self.repair_error = Some(error);
@@ -575,8 +614,12 @@ impl PageWalk<'_, '_> {
                 }
                 // Repair can omit an unreadable kid and recover other leaves.
                 // Keep its error if no page can be recovered at all.
-                Err(error @ DocError::Malformed { .. }) if self.resolver.document().repair_mode() => {
-                    if self.repair_error.is_none() { self.repair_error = Some(error); }
+                Err(error @ DocError::Malformed { .. })
+                    if self.resolver.document().repair_mode() =>
+                {
+                    if self.repair_error.is_none() {
+                        self.repair_error = Some(error);
+                    }
                     self.push_warning(Some(pending.id), "page_tree_bad_kid");
                     continue;
                 }
@@ -614,8 +657,10 @@ impl PageWalk<'_, '_> {
                     self.finished = true;
                     return Some(Err(error));
                 }
-                Err(error) if self.resolver.document().repair_mode()
-                    && crate::repair::is_hard_error(&error) => {
+                Err(error)
+                    if self.resolver.document().repair_mode()
+                        && crate::repair::is_hard_error(&error) =>
+                {
                     self.finished = true;
                     return Some(Err(error));
                 }
@@ -646,8 +691,10 @@ impl PageWalk<'_, '_> {
                                     depth: pending.depth,
                                 });
                             }
-                            Err(error) if self.resolver.document().repair_mode()
-                                && crate::repair::is_hard_error(&error) => {
+                            Err(error)
+                                if self.resolver.document().repair_mode()
+                                    && crate::repair::is_hard_error(&error) =>
+                            {
                                 self.finished = true;
                                 return Some(Err(error));
                             }
@@ -697,7 +744,9 @@ impl PageWalk<'_, '_> {
 }
 
 pub fn page_count_hint(resolver: &mut Resolver<'_>) -> Result<u32, DocError> {
-    if !resolver.document().repair_mode() { return page_count_hint_strict(resolver); }
+    if !resolver.document().repair_mode() {
+        return page_count_hint_strict(resolver);
+    }
     let declared = match page_count_hint_strict(resolver) {
         Ok(count) => Some(count),
         Err(error) if crate::repair::is_hard_error(&error) => return Err(error),
@@ -707,7 +756,9 @@ pub fn page_count_hint(resolver: &mut Resolver<'_>) -> Result<u32, DocError> {
         let mut walk = PageWalk::new(resolver)?;
         while let Some(page) = walk.next() {
             if let Err(error) = page {
-                if crate::repair::is_hard_error(&error) || walk.page_count == 0 { return Err(error); }
+                if crate::repair::is_hard_error(&error) || walk.page_count == 0 {
+                    return Err(error);
+                }
             }
         }
         u32::try_from(walk.page_count).unwrap_or(u32::MAX)
@@ -730,9 +781,7 @@ fn page_count_hint_strict(resolver: &mut Resolver<'_>) -> Result<u32, DocError> 
     let catalog = resolver
         .get(catalog_id)
         .map_err(|error| map_missing(error, "catalog"))?;
-    let catalog_dict = catalog
-        .dict()
-        .ok_or_else(|| malformed(0, "catalog"))?;
+    let catalog_dict = catalog.dict().ok_or_else(|| malformed(0, "catalog"))?;
     let pages_id = catalog_dict
         .get(b"Pages")
         .and_then(|value| value.as_ref())
@@ -759,26 +808,38 @@ fn page_count_hint_strict(resolver: &mut Resolver<'_>) -> Result<u32, DocError> 
     }
 }
 
-fn classify_node(
-    resolver: &mut Resolver<'_>,
-    dict: DictRef<'_>,
-) -> Result<NodeKind, DocError> {
+fn classify_node(resolver: &mut Resolver<'_>, dict: DictRef<'_>) -> Result<NodeKind, DocError> {
     if let Some(type_ref) = dict.get(b"Type") {
         let resolved = resolver.resolve(type_ref);
         match &resolved {
-            Ok(value) if value.get().as_name().is_some_and(|name| name.eq_bytes(b"Pages")) => {
+            Ok(value)
+                if value
+                    .get()
+                    .as_name()
+                    .is_some_and(|name| name.eq_bytes(b"Pages")) =>
+            {
                 return Ok(NodeKind::Interior);
             }
-            Ok(value) if value.get().as_name().is_some_and(|name| name.eq_bytes(b"Page")) => {
+            Ok(value)
+                if value
+                    .get()
+                    .as_name()
+                    .is_some_and(|name| name.eq_bytes(b"Page")) =>
+            {
                 return Ok(NodeKind::Leaf);
             }
             _ => {}
         }
         if resolver.document().repair_mode() {
             if let Err(error) = &resolved {
-                if crate::repair::is_hard_error(error) { return Err(error.clone()); }
+                if crate::repair::is_hard_error(error) {
+                    return Err(error.clone());
+                }
             }
-            let parent = dict.get(b"Parent").and_then(|value| value.as_ref()).is_some();
+            let parent = dict
+                .get(b"Parent")
+                .and_then(|value| value.as_ref())
+                .is_some();
             let kind = if dict.get(b"Kids").is_some() {
                 Some(NodeKind::Interior)
             } else if dict.get(b"Contents").is_some() {
@@ -842,7 +903,11 @@ fn inherit_attrs(
             }),
             Err(error) => Some(error),
         };
-        if inherited.media_box_error.as_ref().is_some_and(is_box_placeholder) {
+        if inherited
+            .media_box_error
+            .as_ref()
+            .is_some_and(is_box_placeholder)
+        {
             inherited.media_box_error = None;
         }
     }
@@ -880,13 +945,7 @@ fn return_after_box_ok() -> DocError {
 }
 
 fn is_box_placeholder(error: &DocError) -> bool {
-    matches!(
-        error,
-        DocError::Malformed {
-            what: "unused",
-            ..
-        }
-    )
+    matches!(error, DocError::Malformed { what: "unused", .. })
 }
 
 fn read_resources(resolver: &mut Resolver<'_>, value: ValueRef<'_>) -> Result<Value, DocError> {
@@ -936,10 +995,7 @@ fn read_box(
     Ok(normalize_box(coordinates))
 }
 
-fn read_rotate(
-    resolver: &mut Resolver<'_>,
-    value: ValueRef<'_>,
-) -> Result<(u16, bool), DocError> {
+fn read_rotate(resolver: &mut Resolver<'_>, value: ValueRef<'_>) -> Result<(u16, bool), DocError> {
     let resolved = resolver.resolve(value)?;
     let resolved_ref = resolved.get();
     let Some(degrees) = resolved_ref.as_f64() else {
@@ -952,7 +1008,11 @@ fn read_rotate(
     // no_std has no f64::round; Rotate is bounded so integer math is exact enough.
     let clamped = degrees.clamp(-1.0e9, 1.0e9);
     let quarter = clamped / 90.0;
-    let nearest = if quarter >= 0.0 { (quarter + 0.5) as i64 } else { (quarter - 0.5) as i64 };
+    let nearest = if quarter >= 0.0 {
+        (quarter + 0.5) as i64
+    } else {
+        (quarter - 0.5) as i64
+    };
     let rounded = (nearest as f64) * 90.0 != clamped;
     let rotation = match nearest.rem_euclid(4) {
         1 => 90,

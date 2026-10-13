@@ -9,8 +9,7 @@ use miniz_oxide::inflate::TINFLStatus;
 use super::{addressable_limit, finish, reserve_to, Decoded, FilterError, FilterKind};
 
 pub(super) fn decode(input: &[u8], max_output: u64) -> Result<Decoded, FilterError> {
-    let mut flags =
-        TINFL_FLAG_USING_NON_WRAPPING_OUTPUT_BUF | TINFL_FLAG_IGNORE_ADLER32;
+    let mut flags = TINFL_FLAG_USING_NON_WRAPPING_OUTPUT_BUF | TINFL_FLAG_IGNORE_ADLER32;
     if has_zlib_header(input) {
         flags |= TINFL_FLAG_PARSE_ZLIB_HEADER;
     }
@@ -29,9 +28,7 @@ pub(super) fn decode(input: &[u8], max_output: u64) -> Result<Decoded, FilterErr
         let (status, consumed, produced) =
             decompress(&mut state, remaining, &mut bytes, used, flags);
 
-        if consumed > remaining.len()
-            || produced > bytes.len().saturating_sub(used)
-        {
+        if consumed > remaining.len() || produced > bytes.len().saturating_sub(used) {
             bytes.truncate(used);
             return finish(
                 bytes,
@@ -90,6 +87,5 @@ fn has_zlib_header(input: &[u8]) -> bool {
     let [cmf, flg] = header else {
         return false;
     };
-    (*cmf & 0x0f) == 8
-        && (u16::from(*cmf) * 256 + u16::from(*flg)) % 31 == 0
+    (*cmf & 0x0f) == 8 && (u16::from(*cmf) * 256 + u16::from(*flg)) % 31 == 0
 }

@@ -49,7 +49,9 @@ pub fn open_repair(path: impl AsRef<Path>, max_bytes: u64) -> Result<PdfSource, 
 }
 
 fn open_with_mode(
-    path: impl AsRef<Path>, max_bytes: u64, repair: bool,
+    path: impl AsRef<Path>,
+    max_bytes: u64,
+    repair: bool,
 ) -> Result<PdfSource, FileOpenError> {
     let file = File::open(path).map_err(FileOpenError::Io)?;
     let file_size = file.metadata().map_err(FileOpenError::Io)?.len();

@@ -163,9 +163,7 @@ impl<'a> Scan<'a> {
                     Operand::Number(number)
                 }
                 TokenKind::Name => Operand::Name(token.bytes().get(1..).unwrap_or(&[])),
-                TokenKind::LiteralString | TokenKind::HexString => {
-                    Operand::String(token.bytes())
-                }
+                TokenKind::LiteralString | TokenKind::HexString => Operand::String(token.bytes()),
                 TokenKind::ArrayStart | TokenKind::DictionaryStart => {
                     let start = self.base.saturating_add(token.span().start());
                     self.containers.clear();
@@ -237,9 +235,9 @@ impl<'a> Scan<'a> {
         let requested = self.containers.len().saturating_add(1) as u64;
         let maximum = u64::from(self.limits.max_depth);
         check(LimitKind::Depth, requested, maximum)?;
-        self.containers.try_reserve(1).map_err(|_| {
-            refusal(LimitKind::Depth, maximum.saturating_add(1), maximum)
-        })?;
+        self.containers
+            .try_reserve(1)
+            .map_err(|_| refusal(LimitKind::Depth, maximum.saturating_add(1), maximum))?;
         self.containers.push(kind);
         Ok(())
     }
@@ -266,9 +264,9 @@ impl<'a> Content<'a> {
         cursor: ContentCursor,
     ) -> Result<Self, DocError> {
         let mut operands = Vec::new();
-        operands.try_reserve_exact(MAX_OPERANDS).map_err(|_| {
-            refusal(LimitKind::Tokens, MAX_OPERANDS as u64, token_limit(*limits))
-        })?;
+        operands
+            .try_reserve_exact(MAX_OPERANDS)
+            .map_err(|_| refusal(LimitKind::Tokens, MAX_OPERANDS as u64, token_limit(*limits)))?;
         Ok(Self {
             scan: Scan::new(input, *limits, cursor),
             operands,
@@ -313,16 +311,24 @@ impl<'a> Content<'a> {
                 self.scan.limits.max_decoded_bytes,
             )
         })?;
-        let bytes = self.scan.input.get(data.start..end).ok_or(
-            DocError::Malformed {
+        let bytes = self
+            .scan
+            .input
+            .get(data.start..end)
+            .ok_or(DocError::Malformed {
                 offset: data.start as u64,
                 what: "inline_image_length",
-            },
-        )?;
+            })?;
         let mut marker = end;
         let cap = end.saturating_add(1024).min(self.scan.input.len());
         while marker < cap
-            && self.scan.input.get(marker).copied().map(whitespace).unwrap_or(false)
+            && self
+                .scan
+                .input
+                .get(marker)
+                .copied()
+                .map(whitespace)
+                .unwrap_or(false)
         {
             marker = marker.saturating_add(1);
         }
@@ -331,14 +337,23 @@ impl<'a> Content<'a> {
             what: "inline_image_end",
         })?;
         if self.scan.input.get(marker..after) != Some(b"EI")
-            || !self.scan.input.get(after).copied().map(whitespace).unwrap_or(true)
+            || !self
+                .scan
+                .input
+                .get(after)
+                .copied()
+                .map(whitespace)
+                .unwrap_or(true)
         {
             return Err(DocError::Malformed {
                 offset: marker as u64,
                 what: "inline_image_end",
             });
         }
-        self.inline_data = Some(InlineData { start: data.start, length: Some(length) });
+        self.inline_data = Some(InlineData {
+            start: data.start,
+            length: Some(length),
+        });
         Ok(bytes)
     }
 
@@ -354,14 +369,17 @@ impl<'a> Content<'a> {
         self.operands.clear();
         if let Some(data) = self.inline_data.take() {
             self.skip_inline(data)?;
-            return Ok(Some(Op { name: b"EI", operands: &self.operands }));
+            return Ok(Some(Op {
+                name: b"EI",
+                operands: &self.operands,
+            }));
         }
 
         loop {
-            let Some(item) = self.scan.item(Some((
-                &mut self.operands,
-                &mut self.dropped,
-            )))? else {
+            let Some(item) = self
+                .scan
+                .item(Some((&mut self.operands, &mut self.dropped)))?
+            else {
                 if self.inline_header {
                     return Err(DocError::Malformed {
                         offset: self.scan.position() as u64,
@@ -404,7 +422,10 @@ impl<'a> Content<'a> {
             } else if name == b"BI" {
                 self.inline_header = true;
             }
-            return Ok(Some(Op { name, operands: &self.operands }));
+            return Ok(Some(Op {
+                name,
+                operands: &self.operands,
+            }));
         }
     }
 
@@ -452,11 +473,9 @@ impl<'a> Content<'a> {
         let cap = data.start.saturating_add(bound).min(input.len());
         let bytes = input.get(data.start..cap).unwrap_or(&[]);
         for (relative, window) in bytes.windows(4).enumerate() {
-            if whitespace(window[0])
-                && window.get(1..3) == Some(b"EI")
-                && whitespace(window[3])
-            {
-                self.scan.seek(data.start.saturating_add(relative).saturating_add(3));
+            if whitespace(window[0]) && window.get(1..3) == Some(b"EI") && whitespace(window[3]) {
+                self.scan
+                    .seek(data.start.saturating_add(relative).saturating_add(3));
                 return Ok(());
             }
         }
@@ -486,7 +505,9 @@ impl<'a> Values<'a> {
     }
 
     pub fn resume(bytes: &'a [u8], limits: &Limits, cursor: ContentCursor) -> Self {
-        Self { scan: Scan::new(bytes, *limits, cursor) }
+        Self {
+            scan: Scan::new(bytes, *limits, cursor),
+        }
     }
 
     pub fn cursor(&self) -> ContentCursor {
@@ -511,17 +532,22 @@ impl<'a> Values<'a> {
 
 pub fn container_body(raw: &[u8]) -> &[u8] {
     let delimiter = if raw.starts_with(b"<<") { 2 } else { 1 };
-    raw.get(delimiter..raw.len().saturating_sub(delimiter)).unwrap_or(&[])
+    raw.get(delimiter..raw.len().saturating_sub(delimiter))
+        .unwrap_or(&[])
 }
 
 pub fn inline_number(operands: &[Operand<'_>], short: &[u8], long: &[u8]) -> Option<f64> {
-    operands.windows(2).rev().find_map(|pair| {
-        match (pair.first(), pair.get(1)) {
+    operands
+        .windows(2)
+        .rev()
+        .find_map(|pair| match (pair.first(), pair.get(1)) {
             (Some(Operand::Name(name)), Some(Operand::Number(number)))
-                if name_eq(name, short) || name_eq(name, long) => Some(*number),
+                if name_eq(name, short) || name_eq(name, long) =>
+            {
+                Some(*number)
+            }
             _ => None,
-        }
-    })
+        })
 }
 
 pub fn name_eq(encoded: &[u8], decoded: &[u8]) -> bool {
@@ -572,10 +598,14 @@ pub(crate) fn decode_object_string(
         return Err(DocError::Encrypted);
     }
     let text = value.get().as_str().ok_or(DocError::WrongType {
-        id: value.object().id(), expected: "PDF string",
+        id: value.object().id(),
+        expected: "PDF string",
     })?;
     check(LimitKind::ObjectBytes, text.raw().len() as u64, maximum)?;
-    let owner = value.object().id().unwrap_or(pdf_core::ObjectRef::new(0, 0));
+    let owner = value
+        .object()
+        .id()
+        .unwrap_or(pdf_core::ObjectRef::new(0, 0));
     let bytes = resolver.decode_string(owner, text);
     check(LimitKind::DecodedBytes, bytes.len() as u64, maximum)?;
     Ok(bytes)
@@ -633,7 +663,8 @@ pub fn decode_string<'a>(
                     for _ in 0..2 {
                         match input.get(pos).copied() {
                             Some(next @ b'0'..=b'7') => {
-                                value = value.saturating_mul(8)
+                                value = value
+                                    .saturating_mul(8)
                                     .saturating_add(u16::from(next - b'0'));
                                 pos = pos.saturating_add(1);
                             }
@@ -659,13 +690,16 @@ pub fn decode_string<'a>(
 fn prepare_bytes(buffer: &mut Vec<u8>, length: usize, maximum: u64) -> Result<(), DocError> {
     check(LimitKind::DecodedBytes, length as u64, maximum)?;
     buffer.clear();
-    buffer.try_reserve(length).map_err(|_| {
-        refusal(LimitKind::DecodedBytes, maximum.saturating_add(1), maximum)
-    })
+    buffer
+        .try_reserve(length)
+        .map_err(|_| refusal(LimitKind::DecodedBytes, maximum.saturating_add(1), maximum))
 }
 
 fn token_limit(limits: Limits) -> u64 {
-    limits.max_content_ops.saturating_mul(8).min(usize::MAX as u64)
+    limits
+        .max_content_ops
+        .saturating_mul(8)
+        .min(usize::MAX as u64)
 }
 
 fn lexer_limits(limits: Limits, used: u64, maximum: u64) -> LexerLimits {
@@ -685,7 +719,11 @@ pub(crate) fn check(kind: LimitKind, requested: u64, maximum: u64) -> Result<(),
 }
 
 pub(crate) fn refusal(kind: LimitKind, requested: u64, maximum: u64) -> DocError {
-    DocError::Refused(Refusal { limit: kind, requested, maximum })
+    DocError::Refused(Refusal {
+        limit: kind,
+        requested,
+        maximum,
+    })
 }
 
 fn whitespace(byte: u8) -> bool {
@@ -701,14 +739,13 @@ fn hex(byte: u8) -> Option<u8> {
     }
 }
 
-
 /// PDF numbers are `[+-]?digits[.digits]`. A mantissa below 2^53 with at most
 /// 22 fraction digits divides exactly once, which is the correctly rounded value
 /// `str::parse` gives, so the fast path matches it bit for bit.
 fn parse_number(bytes: &[u8]) -> Option<f64> {
     const POW10: [f64; 23] = [
-        1e0, 1e1, 1e2, 1e3, 1e4, 1e5, 1e6, 1e7, 1e8, 1e9, 1e10, 1e11, 1e12, 1e13, 1e14,
-        1e15, 1e16, 1e17, 1e18, 1e19, 1e20, 1e21, 1e22,
+        1e0, 1e1, 1e2, 1e3, 1e4, 1e5, 1e6, 1e7, 1e8, 1e9, 1e10, 1e11, 1e12, 1e13, 1e14, 1e15, 1e16,
+        1e17, 1e18, 1e19, 1e20, 1e21, 1e22,
     ];
     let (negative, digits) = match bytes.first() {
         Some(b'-') => (true, &bytes[1..]),
@@ -722,7 +759,9 @@ fn parse_number(bytes: &[u8]) -> Option<f64> {
     for &byte in digits {
         match byte {
             b'0'..=b'9' => {
-                mantissa = mantissa.wrapping_mul(10).wrapping_add(u64::from(byte - b'0'));
+                mantissa = mantissa
+                    .wrapping_mul(10)
+                    .wrapping_add(u64::from(byte - b'0'));
                 if mantissa >= (1u64 << 53) {
                     return slow_number(bytes);
                 }
@@ -743,5 +782,7 @@ fn parse_number(bytes: &[u8]) -> Option<f64> {
 }
 
 fn slow_number(bytes: &[u8]) -> Option<f64> {
-    core::str::from_utf8(bytes).ok().and_then(|text| text.parse::<f64>().ok())
+    core::str::from_utf8(bytes)
+        .ok()
+        .and_then(|text| text.parse::<f64>().ok())
 }

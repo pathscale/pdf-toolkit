@@ -4,8 +4,10 @@ use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
 use core::cmp::Ordering;
 
-use pdf_core::{ArrayRef, DictRef, DocError, LimitKind, Limits, ObjectRef, Refusal, Resolver,
-    Value, ValueRef, Warning};
+use pdf_core::{
+    ArrayRef, DictRef, DocError, LimitKind, Limits, ObjectRef, Refusal, Resolver, Value, ValueRef,
+    Warning,
+};
 
 use crate::cmap::{self, CMap};
 use crate::encoding::{BaseEncoding, SimpleEncoding};
@@ -39,11 +41,17 @@ pub struct GlyphText {
 
 impl GlyphText {
     pub const fn new() -> Self {
-        Self { len: 0, chars: ['\0'; 4] }
+        Self {
+            len: 0,
+            chars: ['\0'; 4],
+        }
     }
 
     pub const fn from_char(c: char) -> Self {
-        Self { len: 1, chars: [c, '\0', '\0', '\0'] }
+        Self {
+            len: 1,
+            chars: [c, '\0', '\0', '\0'],
+        }
     }
 
     pub fn push(&mut self, c: char) -> bool {
@@ -102,14 +110,18 @@ pub struct FontCache {
 }
 
 impl Default for FontCache {
-    fn default() -> Self { Self::new(64 << 20) }
+    fn default() -> Self {
+        Self::new(64 << 20)
+    }
 }
 
 impl FontCache {
     pub fn new(maximum_bytes: u64) -> Self {
         Self {
-            entries: Vec::new(), used: 0,
-            maximum: maximum_bytes.min(isize::MAX as u64), document: None,
+            entries: Vec::new(),
+            used: 0,
+            maximum: maximum_bytes.min(isize::MAX as u64),
+            document: None,
         }
     }
 
@@ -120,46 +132,61 @@ impl FontCache {
     }
 
     pub fn bytes(&self) -> u64 {
-        self.used.saturating_add((self.entries.capacity() as u64)
-            .saturating_mul(core::mem::size_of::<FontEntry>() as u64))
+        self.used.saturating_add(
+            (self.entries.capacity() as u64)
+                .saturating_mul(core::mem::size_of::<FontEntry>() as u64),
+        )
     }
 
-    pub fn maximum_bytes(&self) -> u64 { self.maximum }
+    pub fn maximum_bytes(&self) -> u64 {
+        self.maximum
+    }
 
-    pub fn len(&self) -> usize { self.entries.len() }
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
 
-    pub fn is_empty(&self) -> bool { self.entries.is_empty() }
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
 
     /// `value` is an already-resolved font dictionary. Only an indirect
     /// object's root qualifies, never a dictionary nested in its resources.
-    pub fn load(&mut self, resolver: &mut Resolver<'_>, value: &Value)
-        -> Result<Font, DocError>
-    {
+    pub fn load(&mut self, resolver: &mut Resolver<'_>, value: &Value) -> Result<Font, DocError> {
         if !resolver.document().decryptable() {
             return Err(DocError::Encrypted);
         }
         let source = Arc::downgrade(&resolver.document().source().shared());
         let limits = *resolver.document().limits();
-        if !self.document.as_ref().is_some_and(|(old, old_limits)| {
-            Weak::ptr_eq(old, &source) && *old_limits == limits
-        }) {
+        if !self
+            .document
+            .as_ref()
+            .is_some_and(|(old, old_limits)| Weak::ptr_eq(old, &source) && *old_limits == limits)
+        {
             self.clear();
             self.document = Some((source, limits));
         }
         let dict = value.get().as_dict().ok_or(DocError::WrongType {
-            id: value.object().id(), expected: "font dictionary",
+            id: value.object().id(),
+            expected: "font dictionary",
         })?;
-        let id = value.object().id().filter(|_| {
-            value.get().span() == value.object().root().span()
-        });
+        let id = value
+            .object()
+            .id()
+            .filter(|_| value.get().span() == value.object().root().span());
         let key = id.map(|id| (id.number(), id.generation()));
         if let Some(key) = key {
-            if let Ok(index) = self.entries.binary_search_by_key(&key, |entry| {
-                (entry.id.number(), entry.id.generation())
-            }) {
+            if let Ok(index) = self
+                .entries
+                .binary_search_by_key(&key, |entry| (entry.id.number(), entry.id.generation()))
+            {
                 if let Some(entry) = self.entries.get(index) {
                     for what in &entry.font.data.warnings {
-                        resolver.warn(Warning { offset: None, object: id, what: *what });
+                        resolver.warn(Warning {
+                            offset: None,
+                            object: id,
+                            what: *what,
+                        });
                     }
                     return Ok(entry.font.clone());
                 }
@@ -175,27 +202,44 @@ impl FontCache {
     fn retain(&mut self, id: ObjectRef, font: &Font, maximum: u64) {
         let cost = font.data.cache_bytes;
         let entry_bytes = core::mem::size_of::<FontEntry>() as u64;
-        if cost.saturating_add(entry_bytes) > maximum { return; }
-        let slots = self.entries.len().saturating_add(1).max(self.entries.capacity());
-        let requested = self.used.saturating_add(cost)
+        if cost.saturating_add(entry_bytes) > maximum {
+            return;
+        }
+        let slots = self
+            .entries
+            .len()
+            .saturating_add(1)
+            .max(self.entries.capacity());
+        let requested = self
+            .used
+            .saturating_add(cost)
             .saturating_add((slots as u64).saturating_mul(entry_bytes));
         if requested > maximum {
             self.entries = Vec::new();
             self.used = 0;
         }
-        if self.entries.try_reserve_exact(1).is_err() { return; }
+        if self.entries.try_reserve_exact(1).is_err() {
+            return;
+        }
         if self.bytes().saturating_add(cost) > maximum {
             self.entries = Vec::new();
             self.used = 0;
             return;
         }
         let key = (id.number(), id.generation());
-        let index = self.entries.binary_search_by_key(&key, |entry| {
-            (entry.id.number(), entry.id.generation())
-        }).unwrap_or_else(|index| index);
+        let index = self
+            .entries
+            .binary_search_by_key(&key, |entry| (entry.id.number(), entry.id.generation()))
+            .unwrap_or_else(|index| index);
         // binary_search always yields a position at or below len.
         if index <= self.entries.len() {
-            self.entries.insert(index, FontEntry { id, font: font.clone() });
+            self.entries.insert(
+                index,
+                FontEntry {
+                    id,
+                    font: font.clone(),
+                },
+            );
             self.used = self.used.saturating_add(cost);
         }
     }
@@ -204,7 +248,9 @@ impl FontCache {
 // CMap's private vectors contain at most 100,000 mappings and 256 codespaces.
 // Charge generously for all vector capacities without exposing parser internals.
 fn cmap_cache_bytes(length: usize) -> u64 {
-    (length.min(100_000) as u64).saturating_mul(128).saturating_add(8192)
+    (length.min(100_000) as u64)
+        .saturating_mul(128)
+        .saturating_add(8192)
 }
 
 #[derive(Debug)]
@@ -236,9 +282,15 @@ impl FontName {
             Cow::Borrowed(_) => None,
             Cow::Owned(bytes) => Some(Arc::<[u8]>::from(bytes)),
         };
-        let mut name = Self { value: Some(value), decoded, skip: 0 };
+        let mut name = Self {
+            value: Some(value),
+            decoded,
+            skip: 0,
+        };
         let raw = name.raw();
-        if raw.get(..6).is_some_and(|tag| tag.iter().all(u8::is_ascii_uppercase))
+        if raw
+            .get(..6)
+            .is_some_and(|tag| tag.iter().all(u8::is_ascii_uppercase))
             && raw.get(6) == Some(&b'+')
         {
             name.skip = 7;
@@ -250,7 +302,8 @@ impl FontName {
         if let Some(bytes) = &self.decoded {
             bytes.as_ref()
         } else {
-            self.value.as_ref()
+            self.value
+                .as_ref()
                 .and_then(|value| value.get().as_name())
                 .map(|name| name.encoded())
                 .unwrap_or(&[])
@@ -303,7 +356,8 @@ impl Font {
         } else {
             None
         };
-        let metrics_dict = descendant.as_ref()
+        let metrics_dict = descendant
+            .as_ref()
             .and_then(|value| value.get().as_dict())
             .unwrap_or(dict);
 
@@ -319,7 +373,9 @@ impl Font {
         }
         let flags = load_flags(&mut loader, descriptor_dict, name.bytes())?;
         let missing_width = match descriptor_dict {
-            Some(dict) => loader.number(dict, b"MissingWidth", "widths_invalid")?.unwrap_or(0.0),
+            Some(dict) => loader
+                .number(dict, b"MissingWidth", "widths_invalid")?
+                .unwrap_or(0.0),
             None => 0.0,
         };
         let matrix = if kind == FontKind::Type3 {
@@ -349,8 +405,10 @@ impl Font {
         };
         if kind == FontKind::Type0 {
             data.encoding = Some(load_type0_encoding(&mut loader, dict)?);
-            data.default_width = loader.number(metrics_dict, b"DW", "widths_invalid")?
-                .unwrap_or(1000.0) / 1000.0;
+            data.default_width = loader
+                .number(metrics_dict, b"DW", "widths_invalid")?
+                .unwrap_or(1000.0)
+                / 1000.0;
             data.cid_widths = load_cid_widths(&mut loader, metrics_dict)?;
         } else {
             let builtin = match standard14::family(data.name.bytes()) {
@@ -361,14 +419,15 @@ impl Font {
                 _ => Some(BaseEncoding::Standard),
             };
             data.simple = load_simple_encoding(&mut loader, dict, builtin)?;
-            data.simple_widths = load_simple_widths(
-                &mut loader, dict, &data, missing_width,
-            )?;
+            data.simple_widths = load_simple_widths(&mut loader, dict, &data, missing_width)?;
         }
-        let mut cost = (core::mem::size_of::<FontData>() as u64).saturating_add(64)
+        let mut cost = (core::mem::size_of::<FontData>() as u64)
+            .saturating_add(64)
             .saturating_add(loader.cmap_bytes)
-            .saturating_add((data.cid_widths.capacity() as u64)
-                .saturating_mul(core::mem::size_of::<CidWidth>() as u64));
+            .saturating_add(
+                (data.cid_widths.capacity() as u64)
+                    .saturating_mul(core::mem::size_of::<CidWidth>() as u64),
+            );
         if data.encoding.is_some() {
             // Also covers the small allocation made by Identity-H/Identity-V.
             cost = cost.saturating_add(8192);
@@ -379,17 +438,27 @@ impl Font {
         if let Some(value) = &data.name.value {
             let object = value.object();
             // Nodes and dictionary/array vectors are bounded by token count.
-            cost = cost.saturating_add(u64::from(object.token_count()).saturating_mul(256))
+            cost = cost
+                .saturating_add(u64::from(object.token_count()).saturating_mul(256))
                 .saturating_add(256);
-            if !Arc::ptr_eq(object.buffer(), &loader.resolver.document().source().shared()) {
-                cost = cost.saturating_add(object.buffer().len() as u64).saturating_add(32);
+            if !Arc::ptr_eq(
+                object.buffer(),
+                &loader.resolver.document().source().shared(),
+            ) {
+                cost = cost
+                    .saturating_add(object.buffer().len() as u64)
+                    .saturating_add(32);
             }
         }
-        cost = cost.saturating_add((loader.warnings.capacity() as u64)
-            .saturating_mul(core::mem::size_of::<&'static str>() as u64));
+        cost = cost.saturating_add(
+            (loader.warnings.capacity() as u64)
+                .saturating_mul(core::mem::size_of::<&'static str>() as u64),
+        );
         data.cache_bytes = cost;
         data.warnings = loader.warnings;
-        Ok(Font { data: Arc::new(data) })
+        Ok(Font {
+            data: Arc::new(data),
+        })
     }
 
     pub fn kind(&self) -> FontKind {
@@ -405,7 +474,11 @@ impl Font {
     }
 
     pub fn is_vertical(&self) -> bool {
-        self.data.encoding.as_ref().map(CMap::is_vertical).unwrap_or(false)
+        self.data
+            .encoding
+            .as_ref()
+            .map(CMap::is_vertical)
+            .unwrap_or(false)
     }
 
     pub fn font_matrix(&self) -> [f64; 6] {
@@ -422,7 +495,10 @@ impl Font {
             };
             remaining = remaining.get(usize::from(byte_len)..).unwrap_or(&[]);
             let text = if valid {
-                self.data.to_unicode.as_ref().and_then(|map| map.unicode(code))
+                self.data
+                    .to_unicode
+                    .as_ref()
+                    .and_then(|map| map.unicode(code))
                     .or_else(|| {
                         if self.data.kind == FontKind::Type0 {
                             None
@@ -437,22 +513,27 @@ impl Font {
 
             let width = if let Some(encoding) = &self.data.encoding {
                 let cid = if valid { encoding.cid(code) } else { 0 };
-                self.data.cid_widths.binary_search_by(|range| {
-                    if range.end < cid {
-                        Ordering::Less
-                    } else if range.start > cid {
-                        Ordering::Greater
-                    } else {
-                        Ordering::Equal
-                    }
-                }).ok()
+                self.data
+                    .cid_widths
+                    .binary_search_by(|range| {
+                        if range.end < cid {
+                            Ordering::Less
+                        } else if range.start > cid {
+                            Ordering::Greater
+                        } else {
+                            Ordering::Equal
+                        }
+                    })
+                    .ok()
                     .and_then(|index| self.data.cid_widths.get(index))
                     .map(|range| range.width)
                     .unwrap_or(self.data.default_width)
             } else {
-                usize::try_from(code).ok()
+                usize::try_from(code)
+                    .ok()
                     .and_then(|index| self.data.simple_widths.get(index))
-                    .copied().unwrap_or(0.0)
+                    .copied()
+                    .unwrap_or(0.0)
             };
             Some(Glyph {
                 code,
@@ -478,7 +559,11 @@ impl Loader<'_, '_> {
     fn warn(&mut self, what: &'static str) {
         if !self.warnings.contains(&what) {
             self.warnings.push(what);
-            self.resolver.warn(Warning { offset: None, object: self.id, what });
+            self.resolver.warn(Warning {
+                offset: None,
+                object: self.id,
+                what,
+            });
         }
     }
 
@@ -504,7 +589,10 @@ impl Loader<'_, '_> {
         what: &'static str,
     ) -> Result<Option<Value>, DocError> {
         let result = self.resolver.resolve_dict_key(dict, key);
-        Ok(self.recover(result, what)?.flatten().filter(|value| !value.get().is_null()))
+        Ok(self
+            .recover(result, what)?
+            .flatten()
+            .filter(|value| !value.get().is_null()))
     }
 
     fn resolve(
@@ -533,7 +621,9 @@ impl Loader<'_, '_> {
         key: &[u8],
         what: &'static str,
     ) -> Result<Option<f64>, DocError> {
-        let Some(value) = self.key(dict, key, what)? else { return Ok(None) };
+        let Some(value) = self.key(dict, key, what)? else {
+            return Ok(None);
+        };
         let number = value.get().as_f64().filter(|number| number.is_finite());
         if number.is_none() {
             self.warn(what);
@@ -546,7 +636,9 @@ impl Loader<'_, '_> {
         value: ValueRef<'_>,
         what: &'static str,
     ) -> Result<Option<f64>, DocError> {
-        let Some(value) = self.resolve(value, what)? else { return Ok(None) };
+        let Some(value) = self.resolve(value, what)? else {
+            return Ok(None);
+        };
         let number = value.get().as_f64().filter(|number| number.is_finite());
         if number.is_none() {
             self.warn(what);
@@ -559,8 +651,13 @@ impl Loader<'_, '_> {
         value: ValueRef<'_>,
         what: &'static str,
     ) -> Result<Option<u32>, DocError> {
-        let Some(value) = self.resolve(value, what)? else { return Ok(None) };
-        let number = value.get().as_i64().and_then(|number| u32::try_from(number).ok());
+        let Some(value) = self.resolve(value, what)? else {
+            return Ok(None);
+        };
+        let number = value
+            .get()
+            .as_i64()
+            .and_then(|number| u32::try_from(number).ok());
         if number.is_none() {
             self.warn(what);
         }
@@ -573,7 +670,9 @@ impl Loader<'_, '_> {
             return Ok(None);
         }
         let result = self.resolver.decode_stream(value.object());
-        let Some(decoded) = self.recover(result, what)? else { return Ok(None) };
+        let Some(decoded) = self.recover(result, what)? else {
+            return Ok(None);
+        };
         if decoded.image.is_some() {
             self.warn(what);
             return Ok(None);
@@ -581,7 +680,9 @@ impl Loader<'_, '_> {
         if decoded.truncated {
             self.warn(what);
         }
-        self.cmap_bytes = self.cmap_bytes.saturating_add(cmap_cache_bytes(decoded.bytes.len()));
+        self.cmap_bytes = self
+            .cmap_bytes
+            .saturating_add(cmap_cache_bytes(decoded.bytes.len()));
         let (map, warning) = cmap::parse(&decoded.bytes, 100_000);
         if let Some(warning) = warning {
             self.warn(warning);
@@ -606,9 +707,10 @@ impl Loader<'_, '_> {
     }
 }
 
-fn load_descendant(loader: &mut Loader<'_, '_>, dict: DictRef<'_>)
-    -> Result<Option<Value>, DocError>
-{
+fn load_descendant(
+    loader: &mut Loader<'_, '_>,
+    dict: DictRef<'_>,
+) -> Result<Option<Value>, DocError> {
     let Some(descendants) = loader.key(dict, b"DescendantFonts", "font_descendant_missing")? else {
         loader.warn("font_descendant_missing");
         return Ok(None);
@@ -629,7 +731,9 @@ fn load_descendant(loader: &mut Loader<'_, '_>, dict: DictRef<'_>)
         return Ok(None);
     };
     let subtype = loader.key(dict, b"Subtype", "font_descendant_unknown")?;
-    if !subtype.as_ref().and_then(|value| value.get().as_name())
+    if !subtype
+        .as_ref()
+        .and_then(|value| value.get().as_name())
         .is_some_and(|name| name.eq_bytes(b"CIDFontType0") || name.eq_bytes(b"CIDFontType2"))
     {
         loader.warn("font_descendant_unknown");
@@ -645,7 +749,11 @@ fn load_flags(
     let mut bits = 0u32;
     if let Some(descriptor) = descriptor {
         if let Some(value) = loader.key(descriptor, b"Flags", "font_flags_invalid")? {
-            if let Some(flags) = value.get().as_i64().and_then(|flags| u32::try_from(flags).ok()) {
+            if let Some(flags) = value
+                .get()
+                .as_i64()
+                .and_then(|flags| u32::try_from(flags).ok())
+            {
                 bits = flags;
             } else {
                 loader.warn("font_flags_invalid");
@@ -663,14 +771,11 @@ fn load_flags(
             || standard14::contains(name, b"oblique"),
         serif: bits & 2 != 0 || family == Some(Family::Times),
         fixed_pitch: bits & 1 != 0 || family == Some(Family::Courier),
-        symbolic: bits & 4 != 0
-            || matches!(family, Some(Family::Symbol | Family::ZapfDingbats)),
+        symbolic: bits & 4 != 0 || matches!(family, Some(Family::Symbol | Family::ZapfDingbats)),
     })
 }
 
-fn load_matrix(loader: &mut Loader<'_, '_>, dict: DictRef<'_>)
-    -> Result<[f64; 6], DocError>
-{
+fn load_matrix(loader: &mut Loader<'_, '_>, dict: DictRef<'_>) -> Result<[f64; 6], DocError> {
     let Some(value) = loader.key(dict, b"FontMatrix", "font_matrix_invalid")? else {
         loader.warn("font_matrix_missing");
         return Ok(DEFAULT_MATRIX);
@@ -693,9 +798,7 @@ fn load_matrix(loader: &mut Loader<'_, '_>, dict: DictRef<'_>)
     Ok(matrix)
 }
 
-fn load_type0_encoding(loader: &mut Loader<'_, '_>, dict: DictRef<'_>)
-    -> Result<CMap, DocError>
-{
+fn load_type0_encoding(loader: &mut Loader<'_, '_>, dict: DictRef<'_>) -> Result<CMap, DocError> {
     let Some(value) = loader.key(dict, b"Encoding", "encoding_unknown")? else {
         loader.warn("encoding_unknown");
         return Ok(CMap::identity(true, false));
@@ -710,7 +813,8 @@ fn load_type0_encoding(loader: &mut Loader<'_, '_>, dict: DictRef<'_>)
         loader.warn("predefined_cmap_unsupported");
         return Ok(CMap::identity(true, name.decoded().ends_with(b"-V")));
     }
-    Ok(loader.cmap(&value, "encoding_failed")?
+    Ok(loader
+        .cmap(&value, "encoding_failed")?
         .unwrap_or_else(|| CMap::identity(true, false)))
 }
 
@@ -739,7 +843,9 @@ fn load_simple_encoding(
     };
     let mut base = builtin;
     if let Some(value) = loader.key(dict, b"BaseEncoding", "encoding_unknown")? {
-        let named = value.get().as_name()
+        let named = value
+            .get()
+            .as_name()
             .and_then(|name| BaseEncoding::from_name(name.decoded().as_ref()));
         if named.is_none() {
             loader.warn("encoding_unknown");
@@ -796,7 +902,11 @@ fn load_simple_widths(
         loader.warn("widths_missing");
     }
     let first = match loader.key(dict, b"FirstChar", "widths_invalid")? {
-        Some(value) => match value.get().as_i64().and_then(|number| u8::try_from(number).ok()) {
+        Some(value) => match value
+            .get()
+            .as_i64()
+            .and_then(|number| u8::try_from(number).ok())
+        {
             Some(first) => usize::from(first),
             None => {
                 loader.warn("widths_invalid");
@@ -817,7 +927,8 @@ fn load_simple_widths(
     let family = standard14::family(data.name.bytes());
     let mut result = [0.0; 256];
     for (code, slot) in result.iter_mut().enumerate() {
-        let item = code.checked_sub(first)
+        let item = code
+            .checked_sub(first)
             .and_then(|index| array.and_then(|array| array.get(index)));
         let explicit = match item {
             Some(item) => loader.number_value(item, "widths_invalid")?,
@@ -834,7 +945,9 @@ fn load_simple_widths(
             if missing_width != 0.0 {
                 missing_width
             } else if data.kind != FontKind::Type3 {
-                let character = data.simple.unicode(code as u32)
+                let character = data
+                    .simple
+                    .unicode(code as u32)
                     .and_then(|text| text.as_slice().first().copied())
                     .unwrap_or('\u{fffd}');
                 match standard14::width(data.name.bytes(), character) {
@@ -865,9 +978,10 @@ fn load_simple_widths(
     Ok(result)
 }
 
-fn load_cid_widths(loader: &mut Loader<'_, '_>, dict: DictRef<'_>)
-    -> Result<Vec<CidWidth>, DocError>
-{
+fn load_cid_widths(
+    loader: &mut Loader<'_, '_>,
+    dict: DictRef<'_>,
+) -> Result<Vec<CidWidth>, DocError> {
     let Some(value) = loader.key(dict, b"W", "widths_invalid")? else {
         return Ok(Vec::new());
     };
@@ -879,20 +993,30 @@ fn load_cid_widths(loader: &mut Loader<'_, '_>, dict: DictRef<'_>)
     let mut widths = Vec::new();
     let mut position = 0usize;
     while position < array.len() {
-        let Some(start_value) = array.get(position) else { break };
-        let Some(start) = loader.uint_value(start_value, "widths_invalid")? else { break };
+        let Some(start_value) = array.get(position) else {
+            break;
+        };
+        let Some(start) = loader.uint_value(start_value, "widths_invalid")? else {
+            break;
+        };
         position = position.saturating_add(1);
         let Some(next) = array.get(position) else {
             loader.warn("widths_invalid");
             break;
         };
-        let Some(next) = loader.resolve(next, "widths_invalid")? else { break };
+        let Some(next) = loader.resolve(next, "widths_invalid")? else {
+            break;
+        };
         position = position.saturating_add(1);
         if let Some(list) = next.get().as_array() {
             loader.charge_widths(list.len())?;
             append_width_list(loader, &mut widths, start, list)?;
         } else {
-            let Some(end) = next.get().as_i64().and_then(|number| u32::try_from(number).ok()) else {
+            let Some(end) = next
+                .get()
+                .as_i64()
+                .and_then(|number| u32::try_from(number).ok())
+            else {
                 loader.warn("widths_invalid");
                 break;
             };
@@ -905,7 +1029,11 @@ fn load_cid_widths(loader: &mut Loader<'_, '_>, dict: DictRef<'_>)
             if end < start {
                 loader.warn("widths_invalid");
             } else if let Some(width) = width {
-                widths.push(CidWidth { start, end, width: width / 1000.0 });
+                widths.push(CidWidth {
+                    start,
+                    end,
+                    width: width / 1000.0,
+                });
             }
         }
     }
@@ -935,14 +1063,20 @@ fn append_width_list(
     list: ArrayRef<'_>,
 ) -> Result<(), DocError> {
     for (offset, value) in list.iter().enumerate() {
-        let Some(code) = u32::try_from(offset).ok().and_then(|offset| start.checked_add(offset)) else {
+        let Some(code) = u32::try_from(offset)
+            .ok()
+            .and_then(|offset| start.checked_add(offset))
+        else {
             loader.warn("widths_invalid");
             break;
         };
         if let Some(width) = loader.number_value(value, "widths_invalid")? {
-            widths.push(CidWidth { start: code, end: code, width: width / 1000.0 });
+            widths.push(CidWidth {
+                start: code,
+                end: code,
+                width: width / 1000.0,
+            });
         }
     }
     Ok(())
 }
-

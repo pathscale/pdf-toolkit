@@ -8,13 +8,19 @@ use super::emit::{dict, name, reference, Output};
 use crate::Value;
 
 pub(super) fn slice(bytes: &[u8], at: usize, length: usize) -> io::Result<&[u8]> {
-    bytes.get(at..add(at, length)?).ok_or_else(|| invalid("font or image data is truncated"))
+    bytes
+        .get(at..add(at, length)?)
+        .ok_or_else(|| invalid("font or image data is truncated"))
 }
 
 pub(super) fn read16(bytes: &[u8], at: usize) -> io::Result<u16> {
     let bytes = slice(bytes, at, 2)?;
-    let a = *bytes.first().ok_or_else(|| invalid("missing integer byte"))?;
-    let b = *bytes.get(1).ok_or_else(|| invalid("missing integer byte"))?;
+    let a = *bytes
+        .first()
+        .ok_or_else(|| invalid("missing integer byte"))?;
+    let b = *bytes
+        .get(1)
+        .ok_or_else(|| invalid("missing integer byte"))?;
     Ok(u16::from_be_bytes([a, b]))
 }
 
@@ -31,7 +37,8 @@ pub(super) fn read32(bytes: &[u8], at: usize) -> io::Result<u32> {
 
 pub(super) fn patch(out: &mut [u8], at: usize, bytes: &[u8]) -> io::Result<()> {
     out.get_mut(at..add(at, bytes.len())?)
-        .ok_or_else(|| invalid("font patch outside table"))?.copy_from_slice(bytes);
+        .ok_or_else(|| invalid("font patch outside table"))?
+        .copy_from_slice(bytes);
     Ok(())
 }
 
@@ -83,8 +90,13 @@ pub(super) struct TrueType {
 
 impl TrueType {
     pub fn table(&self, tag: &[u8; 4]) -> io::Result<&[u8]> {
-        let range = self.tables.get(tag).ok_or_else(|| invalid("required TrueType table is missing"))?;
-        self.data.get(range.clone()).ok_or_else(|| invalid("TrueType table outside font"))
+        let range = self
+            .tables
+            .get(tag)
+            .ok_or_else(|| invalid("required TrueType table is missing"))?;
+        self.data
+            .get(range.clone())
+            .ok_or_else(|| invalid("TrueType table outside font"))
     }
 
     pub fn glyph_bytes(&self, glyph: u16) -> io::Result<&[u8]> {
@@ -92,9 +104,17 @@ impl TrueType {
             return Err(invalid("glyph identifier exceeds font glyph count"));
         }
         let index = usize::from(glyph);
-        let start = *self.offsets.get(index).ok_or_else(|| invalid("missing loca entry"))?;
-        let end = *self.offsets.get(add(index, 1)?).ok_or_else(|| invalid("missing loca entry"))?;
-        self.table(b"glyf")?.get(start..end).ok_or_else(|| invalid("glyph outside glyf table"))
+        let start = *self
+            .offsets
+            .get(index)
+            .ok_or_else(|| invalid("missing loca entry"))?;
+        let end = *self
+            .offsets
+            .get(add(index, 1)?)
+            .ok_or_else(|| invalid("missing loca entry"))?;
+        self.table(b"glyf")?
+            .get(start..end)
+            .ok_or_else(|| invalid("glyph outside glyf table"))
     }
 
     pub fn new(data: Arc<[u8]>) -> io::Result<Self> {
@@ -124,18 +144,29 @@ impl TrueType {
                 return Err(invalid("duplicate TrueType table"));
             }
         }
-        let mut ranges: Vec<_> = tables.values().filter(|range| !range.is_empty()).cloned().collect();
+        let mut ranges: Vec<_> = tables
+            .values()
+            .filter(|range| !range.is_empty())
+            .cloned()
+            .collect();
         ranges.sort_by_key(|range| range.start);
         for pair in ranges.windows(2) {
-            let first = pair.first().ok_or_else(|| invalid("missing font table range"))?;
-            let second = pair.get(1).ok_or_else(|| invalid("missing font table range"))?;
+            let first = pair
+                .first()
+                .ok_or_else(|| invalid("missing font table range"))?;
+            let second = pair
+                .get(1)
+                .ok_or_else(|| invalid("missing font table range"))?;
             if first.end > second.start {
                 return Err(invalid("overlapping TrueType tables"));
             }
         }
         let get = |tag: &[u8; 4]| -> io::Result<&[u8]> {
-            let range = tables.get(tag).ok_or_else(|| invalid("required TrueType table is missing"))?;
-            data.get(range.clone()).ok_or_else(|| invalid("TrueType table outside font"))
+            let range = tables
+                .get(tag)
+                .ok_or_else(|| invalid("required TrueType table is missing"))?;
+            data.get(range.clone())
+                .ok_or_else(|| invalid("TrueType table outside font"))
         };
         let head = get(b"head")?;
         slice(head, 0, 54)?;
@@ -171,7 +202,9 @@ impl TrueType {
         )?;
         slice(get(b"hmtx")?, 0, metric_bytes)?;
         if let Some(range) = tables.get(b"OS/2") {
-            let os2 = data.get(range.clone()).ok_or_else(|| invalid("OS/2 outside font"))?;
+            let os2 = data
+                .get(range.clone())
+                .ok_or_else(|| invalid("OS/2 outside font"))?;
             slice(os2, 0, 78)?;
             if read16(os2, 8)? & (0x0002 | 0x0100 | 0x0200) != 0 {
                 return Err(invalid("font embedding or subsetting is restricted"));
@@ -197,16 +230,30 @@ impl TrueType {
             push(&mut offsets, offset, "loca_entries", 65536)?;
             previous = offset;
         }
-        let cmap_range = tables.get(b"cmap").ok_or_else(|| invalid("TrueType cmap is missing"))?;
+        let cmap_range = tables
+            .get(b"cmap")
+            .ok_or_else(|| invalid("TrueType cmap is missing"))?;
         let cmap = parse_cmap(get(b"cmap")?, cmap_range.start)?;
-        let base_name = font_name(tables.get(b"name").and_then(|range| data.get(range.clone())));
+        let base_name = font_name(
+            tables
+                .get(b"name")
+                .and_then(|range| data.get(range.clone())),
+        );
         let kern = match tables.get(b"kern") {
             Some(range) => parse_kern(&data, range.clone())?,
             None => None,
         };
         Ok(Self {
-            data, tables, offsets, glyph_count, units, metrics,
-            used: BTreeMap::new(), cmap, kern, base_name,
+            data,
+            tables,
+            offsets,
+            glyph_count,
+            units,
+            metrics,
+            used: BTreeMap::new(),
+            cmap,
+            kern,
+            base_name,
         })
     }
 
@@ -225,7 +272,11 @@ impl TrueType {
                             Some(offset) => {
                                 let at = add(offset, mul(usize::from(code - segment.start), 2)?)?;
                                 let glyph = read16(&self.data, at)?;
-                                if glyph == 0 { 0 } else { glyph.wrapping_add(segment.delta) }
+                                if glyph == 0 {
+                                    0
+                                } else {
+                                    glyph.wrapping_add(segment.delta)
+                                }
                             }
                         },
                         None => 0,
@@ -236,22 +287,27 @@ impl TrueType {
                 let index = groups.partition_point(|group| group.end < code);
                 match groups.get(index).filter(|group| group.start <= code) {
                     Some(group) => {
-                        let glyph = group.glyph.checked_add(code - group.start)
+                        let glyph = group
+                            .glyph
+                            .checked_add(code - group.start)
                             .ok_or_else(|| invalid("cmap glyph overflow"))?;
                         u16::try_from(glyph).map_err(|_| invalid("cmap glyph exceeds u16"))?
                     }
                     None => 0,
                 }
             }
-            Cmap::Six { start, glyphs } => {
-                code.checked_sub(u32::from(*start))
-                    .and_then(|index| usize::try_from(index).ok())
-                    .and_then(|index| glyphs.get(index)).copied().unwrap_or(0)
-            }
-            Cmap::Zero(glyphs) => {
-                usize::try_from(code).ok().and_then(|index| glyphs.get(index))
-                    .copied().map(u16::from).unwrap_or(0)
-            }
+            Cmap::Six { start, glyphs } => code
+                .checked_sub(u32::from(*start))
+                .and_then(|index| usize::try_from(index).ok())
+                .and_then(|index| glyphs.get(index))
+                .copied()
+                .unwrap_or(0),
+            Cmap::Zero(glyphs) => usize::try_from(code)
+                .ok()
+                .and_then(|index| glyphs.get(index))
+                .copied()
+                .map(u16::from)
+                .unwrap_or(0),
         };
         if glyph >= self.glyph_count {
             return Err(invalid("cmap refers to a nonexistent glyph"));
@@ -269,14 +325,19 @@ impl TrueType {
         let bearing_at = if glyph < self.metrics {
             add(mul(usize::from(glyph), 4)?, 2)?
         } else {
-            add(mul(usize::from(self.metrics), 4)?, mul(usize::from(glyph - self.metrics), 2)?)?
+            add(
+                mul(usize::from(self.metrics), 4)?,
+                mul(usize::from(glyph - self.metrics), 2)?,
+            )?
         };
         Ok((advance, signed16(bytes, bearing_at)?))
     }
 
     /// Pair adjustment in font units from the `kern` table, zero when absent.
     pub fn kerning(&self, left: u16, right: u16) -> io::Result<i16> {
-        let Some((start, count)) = self.kern else { return Ok(0) };
+        let Some((start, count)) = self.kern else {
+            return Ok(0);
+        };
         let key = (u32::from(left) << 16) | u32::from(right);
         let (mut low, mut high) = (0usize, count);
         while low < high {
@@ -315,15 +376,17 @@ impl TrueType {
         out.stream(
             file_id,
             vec![("Length1".to_owned(), Value::Int(program.len() as i64))],
-            &program, out.compress,
+            &program,
+            out.compress,
         )?;
         let head = self.table(b"head")?;
         let hhea = self.table(b"hhea")?;
-        let post = self.tables.get(b"post").and_then(|range| self.data.get(range.clone()));
+        let post = self
+            .tables
+            .get(b"post")
+            .and_then(|range| self.data.get(range.clone()));
         let italic = match post {
-            Some(bytes) if bytes.len() >= 32 => {
-                f64::from(read32(bytes, 4)? as i32) / 65536.0
-            }
+            Some(bytes) if bytes.len() >= 32 => f64::from(read32(bytes, 4)? as i32) / 65536.0,
             _ => 0.0,
         };
         let fixed = match post {
@@ -332,7 +395,11 @@ impl TrueType {
         };
         let ascent = self.scale(i32::from(signed16(hhea, 4)?));
         let descent = self.scale(i32::from(signed16(hhea, 6)?));
-        let cap_height = match self.tables.get(b"OS/2").and_then(|range| self.data.get(range.clone())) {
+        let cap_height = match self
+            .tables
+            .get(b"OS/2")
+            .and_then(|range| self.data.get(range.clone()))
+        {
             Some(bytes) if bytes.len() >= 90 && read16(bytes, 0)? >= 2 => {
                 self.scale(i32::from(signed16(bytes, 88)?))
             }
@@ -343,42 +410,70 @@ impl TrueType {
             bbox.push(Value::Real(self.scale(i32::from(signed16(head, at)?))));
         }
         let flags = 32 | if fixed { 1 } else { 0 } | if italic != 0.0 { 64 } else { 0 };
-        out.object(descriptor_id, dict(vec![
-            ("Type", name("FontDescriptor")), ("FontName", name(&base_name)),
-            ("Flags", Value::Int(flags)), ("FontBBox", Value::Array(bbox)),
-            ("ItalicAngle", Value::Real(italic)), ("Ascent", Value::Real(ascent)),
-            ("Descent", Value::Real(descent)), ("CapHeight", Value::Real(cap_height)),
-            ("StemV", Value::Int(80)), ("FontFile2", reference(file_id)),
-        ]))?;
+        out.object(
+            descriptor_id,
+            dict(vec![
+                ("Type", name("FontDescriptor")),
+                ("FontName", name(&base_name)),
+                ("Flags", Value::Int(flags)),
+                ("FontBBox", Value::Array(bbox)),
+                ("ItalicAngle", Value::Real(italic)),
+                ("Ascent", Value::Real(ascent)),
+                ("Descent", Value::Real(descent)),
+                ("CapHeight", Value::Real(cap_height)),
+                ("StemV", Value::Int(80)),
+                ("FontFile2", reference(file_id)),
+            ]),
+        )?;
         let mut widths = Vec::new();
         for glyph in self.used.keys() {
-            push(&mut widths, Value::Int(i64::from(*glyph)), "font_width_values", 131070)?;
+            push(
+                &mut widths,
+                Value::Int(i64::from(*glyph)),
+                "font_width_values",
+                131070,
+            )?;
             let width = self.scale(i32::from(self.metric(*glyph)?.0));
             push(
-                &mut widths, Value::Array(vec![Value::Real(width)]),
-                "font_width_values", 131070,
+                &mut widths,
+                Value::Array(vec![Value::Real(width)]),
+                "font_width_values",
+                131070,
             )?;
         }
-        out.object(cid_id, dict(vec![
-            ("Type", name("Font")), ("Subtype", name("CIDFontType2")),
-            ("BaseFont", name(&base_name)),
-            ("CIDSystemInfo", dict(vec![
-                ("Registry", Value::Str(b"Adobe".to_vec())),
-                ("Ordering", Value::Str(b"Identity".to_vec())),
-                ("Supplement", Value::Int(0)),
-            ])),
-            ("FontDescriptor", reference(descriptor_id)),
-            ("CIDToGIDMap", name("Identity")), ("DW", Value::Int(1000)),
-            ("W", Value::Array(widths)),
-        ]))?;
+        out.object(
+            cid_id,
+            dict(vec![
+                ("Type", name("Font")),
+                ("Subtype", name("CIDFontType2")),
+                ("BaseFont", name(&base_name)),
+                (
+                    "CIDSystemInfo",
+                    dict(vec![
+                        ("Registry", Value::Str(b"Adobe".to_vec())),
+                        ("Ordering", Value::Str(b"Identity".to_vec())),
+                        ("Supplement", Value::Int(0)),
+                    ]),
+                ),
+                ("FontDescriptor", reference(descriptor_id)),
+                ("CIDToGIDMap", name("Identity")),
+                ("DW", Value::Int(1000)),
+                ("W", Value::Array(widths)),
+            ]),
+        )?;
         let cmap = self.to_unicode()?;
         out.stream(unicode_id, Vec::new(), &cmap, out.compress)?;
-        out.object(type0_id, dict(vec![
-            ("Type", name("Font")), ("Subtype", name("Type0")),
-            ("BaseFont", name(&base_name)), ("Encoding", name("Identity-H")),
-            ("DescendantFonts", Value::Array(vec![reference(cid_id)])),
-            ("ToUnicode", reference(unicode_id)),
-        ]))?;
+        out.object(
+            type0_id,
+            dict(vec![
+                ("Type", name("Font")),
+                ("Subtype", name("Type0")),
+                ("BaseFont", name(&base_name)),
+                ("Encoding", name("Identity-H")),
+                ("DescendantFonts", Value::Array(vec![reference(cid_id)])),
+                ("ToUnicode", reference(unicode_id)),
+            ]),
+        )?;
         Ok(type0_id)
     }
 
@@ -392,9 +487,17 @@ impl TrueType {
         )?;
         let entries: Vec<_> = self.used.iter().collect();
         for chunk in entries.chunks(100) {
-            append(&mut out, format!("{} beginbfchar\n", chunk.len()).as_bytes(), MAX_VALUE_BYTES)?;
+            append(
+                &mut out,
+                format!("{} beginbfchar\n", chunk.len()).as_bytes(),
+                MAX_VALUE_BYTES,
+            )?;
             for (glyph, character) in chunk {
-                append(&mut out, format!("<{glyph:04X}> <").as_bytes(), MAX_VALUE_BYTES)?;
+                append(
+                    &mut out,
+                    format!("<{glyph:04X}> <").as_bytes(),
+                    MAX_VALUE_BYTES,
+                )?;
                 let mut units = [0u16; 2];
                 for unit in character.encode_utf16(&mut units).iter() {
                     append(&mut out, format!("{unit:04X}").as_bytes(), MAX_VALUE_BYTES)?;
@@ -460,7 +563,8 @@ fn parse_cmap(bytes: &[u8], base: usize) -> io::Result<Cmap> {
                     let adjustment = read16(table, add(add(16, mul(count, 4)?)?, delta)?)?;
                     let word = add(add(16, mul(count, 6)?)?, delta)?;
                     let range = usize::from(read16(table, word)?);
-                    if start > end || previous.is_some_and(|value| start <= value) || range % 2 != 0 {
+                    if start > end || previous.is_some_and(|value| start <= value) || range % 2 != 0
+                    {
                         return Err(invalid("cmap segments are invalid"));
                     }
                     let address = if range == 0 {
@@ -475,14 +579,22 @@ fn parse_cmap(bytes: &[u8], base: usize) -> io::Result<Cmap> {
                     };
                     push(
                         &mut segments,
-                        Segment { start, end, delta: adjustment, offset: address },
-                        "cmap_segments", 8191,
+                        Segment {
+                            start,
+                            end,
+                            delta: adjustment,
+                            offset: address,
+                        },
+                        "cmap_segments",
+                        8191,
                     )?;
                     previous = Some(end);
                 }
                 if !segments.last().is_some_and(|segment| {
-                    segment.start == 0xffff && segment.end == 0xffff
-                        && segment.delta == 1 && segment.offset.is_none()
+                    segment.start == 0xffff
+                        && segment.end == 0xffff
+                        && segment.delta == 1
+                        && segment.offset.is_none()
                 }) {
                     return Err(invalid("cmap sentinel is missing"));
                 }
@@ -503,13 +615,22 @@ fn parse_cmap(bytes: &[u8], base: usize) -> io::Result<Cmap> {
                     let start = read32(table, at)?;
                     let end = read32(table, add(at, 4)?)?;
                     let glyph = read32(table, add(at, 8)?)?;
-                    if start > end || end > 0x10ffff || previous.is_some_and(|value| start <= value) {
+                    if start > end || end > 0x10ffff || previous.is_some_and(|value| start <= value)
+                    {
                         return Err(invalid("cmap groups are invalid"));
                     }
-                    if glyph.checked_add(end - start).is_none_or(|last| last > 65535) {
+                    if glyph
+                        .checked_add(end - start)
+                        .is_none_or(|last| last > 65535)
+                    {
                         return Err(invalid("cmap group glyphs exceed u16"));
                     }
-                    push(&mut groups, Group { start, end, glyph }, "cmap_groups", 65536)?;
+                    push(
+                        &mut groups,
+                        Group { start, end, glyph },
+                        "cmap_groups",
+                        65536,
+                    )?;
                     previous = Some(end);
                 }
                 return Ok(Cmap::Twelve(groups));
@@ -524,8 +645,10 @@ fn parse_cmap(bytes: &[u8], base: usize) -> io::Result<Cmap> {
                 let mut glyphs = Vec::new();
                 for index in 0..count {
                     push(
-                        &mut glyphs, read16(table, add(10, mul(index, 2)?)?)?,
-                        "cmap_glyphs", 65536,
+                        &mut glyphs,
+                        read16(table, add(10, mul(index, 2)?)?)?,
+                        "cmap_glyphs",
+                        65536,
                     )?;
                 }
                 return Ok(Cmap::Six { start, glyphs });
@@ -618,4 +741,3 @@ fn font_name(bytes: Option<&[u8]>) -> String {
         _ => "EmbeddedFont".to_owned(),
     }
 }
-

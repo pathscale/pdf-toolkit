@@ -8,7 +8,9 @@ use pdf_core::{
 
 use crate::content::{check, refusal};
 use crate::font::FontCache;
-use crate::interp::{display_dimensions, display_transform, page_text_cached, PageText, PositionedGlyph};
+use crate::interp::{
+    display_dimensions, display_transform, page_text_cached, PageText, PositionedGlyph,
+};
 use crate::layout::{direction, layout, BlockKind, Line, PageLayout, SPACE_GAP};
 use crate::links;
 
@@ -125,17 +127,21 @@ impl SemanticReader {
         let mut page_ids = Vec::new();
         for page in PageWalk::new(&mut resolver)? {
             let page = page?;
-            budget.charge((page.contents.len() as u64)
-                .saturating_mul(core::mem::size_of::<ObjectRef>() as u64))?;
+            budget.charge(
+                (page.contents.len() as u64)
+                    .saturating_mul(core::mem::size_of::<ObjectRef>() as u64),
+            )?;
             budget.push(&mut page_ids, page.id)?;
             budget.push(&mut pages, page)?;
         }
-        let count = u32::try_from(pages.len()).map_err(|_| {
-            refusal(LimitKind::Pages, pages.len() as u64, u64::from(u32::MAX))
-        })?;
+        let count = u32::try_from(pages.len())
+            .map_err(|_| refusal(LimitKind::Pages, pages.len() as u64, u64::from(u32::MAX)))?;
         let mut page_lookup = Vec::new();
         for page in &pages {
-            budget.push(&mut page_lookup, (page.id.number(), page.id.generation(), page.index))?;
+            budget.push(
+                &mut page_lookup,
+                (page.id.number(), page.id.generation(), page.index),
+            )?;
         }
         page_lookup.sort_unstable();
         let mut info = DocInfo {
@@ -169,8 +175,14 @@ impl SemanticReader {
         }
         drop(resolver);
         Ok(Self {
-            document, font_cache: FontCache::default(),
-            pages, page_ids, page_lookup, info, next: 0, warnings,
+            document,
+            font_cache: FontCache::default(),
+            pages,
+            page_ids,
+            page_lookup,
+            info,
+            next: 0,
+            warnings,
         })
     }
 
@@ -180,7 +192,12 @@ impl SemanticReader {
 
     pub fn outline(&mut self) -> Vec<OutlineItem> {
         let mut resolver = self.document.resolver();
-        let result = links::outline_with_pages(&mut resolver, &self.page_ids, &self.pages, &self.page_lookup);
+        let result = links::outline_with_pages(
+            &mut resolver,
+            &self.page_ids,
+            &self.pages,
+            &self.page_lookup,
+        );
         let items = match result {
             Ok(items) => items,
             Err(error) => {
@@ -194,8 +211,14 @@ impl SemanticReader {
             // The Vec-returning API reports refusals through warnings.
             self.warnings.clear();
             let mut budget = Budget::new(self.document.limits().max_total_decoded_bytes);
-            let _ = budget.push(&mut self.warnings,
-                Warning { offset: None, object: None, what: error.code() });
+            let _ = budget.push(
+                &mut self.warnings,
+                Warning {
+                    offset: None,
+                    object: None,
+                    what: error.code(),
+                },
+            );
             return Vec::new();
         }
         items
@@ -216,7 +239,11 @@ impl SemanticReader {
         };
         let mut resolver = self.document.resolver();
         let result = build_page(
-            &mut resolver, page, &self.page_ids, &self.pages, &self.page_lookup,
+            &mut resolver,
+            page,
+            &self.page_ids,
+            &self.pages,
+            &self.page_lookup,
             &mut self.font_cache,
         );
         let warnings = resolver.take_warnings();
@@ -241,8 +268,9 @@ impl SemanticReader {
 
     fn keep_warnings(&mut self, warnings: Vec<Warning>) -> Result<(), DocError> {
         let mut budget = Budget::new(self.document.limits().max_total_decoded_bytes);
-        budget.charge((self.warnings.len() as u64)
-            .saturating_mul(core::mem::size_of::<Warning>() as u64))?;
+        budget.charge(
+            (self.warnings.len() as u64).saturating_mul(core::mem::size_of::<Warning>() as u64),
+        )?;
         for warning in warnings {
             budget.push(&mut self.warnings, warning)?;
         }
@@ -264,10 +292,18 @@ pub fn semantic_document_with(
     let mut reader = SemanticReader::open_with(source, limits, mode)?;
     let info = reader.info().clone();
     let mut resolver = reader.document.resolver();
-    let outline = links::outline_with_pages(&mut resolver, &reader.page_ids, &reader.pages, &reader.page_lookup)?;
+    let outline = links::outline_with_pages(
+        &mut resolver,
+        &reader.page_ids,
+        &reader.pages,
+        &reader.page_lookup,
+    )?;
     drop(resolver);
     let mut budget = Budget::new(limits.max_total_decoded_bytes);
-    for text in [&info.title, &info.author, &info.subject, &info.keywords].into_iter().flatten() {
+    for text in [&info.title, &info.author, &info.subject, &info.keywords]
+        .into_iter()
+        .flatten()
+    {
         budget.charge(text.len() as u64)?;
     }
     for item in &outline {
@@ -282,7 +318,11 @@ pub fn semantic_document_with(
         // Whole-document output has no warnings field.
         reader.take_warnings();
     }
-    Ok(SemanticDoc { info, outline, pages })
+    Ok(SemanticDoc {
+        info,
+        outline,
+        pages,
+    })
 }
 
 fn info_string(
@@ -291,7 +331,9 @@ fn info_string(
     key: &[u8],
     budget: &mut Budget,
 ) -> Result<Option<String>, DocError> {
-    let Some(value) = links::read_key(resolver, dict, key)? else { return Ok(None) };
+    let Some(value) = links::read_key(resolver, dict, key)? else {
+        return Ok(None);
+    };
     let limits = *resolver.document().limits();
     let result = links::text_string(resolver, &value, limits);
     match links::recover(resolver, result, value.object().id(), "info_string_invalid")? {
@@ -315,7 +357,12 @@ fn build_page(
     let layout = layout(&text);
     let mut budget = Budget::new(resolver.document().limits().max_total_decoded_bytes);
     let links = links::page_links_with_pages(
-        resolver, page, page_ids, pages, page_lookup, display_transform(page),
+        resolver,
+        page,
+        page_ids,
+        pages,
+        page_lookup,
+        display_transform(page),
     )?;
     for link in &links {
         budget.charge(core::mem::size_of::<Link>() as u64)?;
@@ -330,11 +377,14 @@ fn build_page(
     let mut styles = Vec::new();
     for font in &text.fonts {
         let name = font.name.as_bytes();
-        budget.push(&mut styles, Style {
-            bold: font.flags.bold || hints(name, &[b"bold", b"black", b"heavy", b"semibold"]),
-            italic: font.flags.italic || hints(name, &[b"italic", b"oblique"]),
-            monospace: font.flags.fixed_pitch || hints(name, &[b"courier", b"mono", b"code"]),
-        })?;
+        budget.push(
+            &mut styles,
+            Style {
+                bold: font.flags.bold || hints(name, &[b"bold", b"black", b"heavy", b"semibold"]),
+                italic: font.flags.italic || hints(name, &[b"italic", b"oblique"]),
+                monospace: font.flags.fixed_pitch || hints(name, &[b"courier", b"mono", b"code"]),
+            },
+        )?;
     }
     let mut blocks = Vec::new();
     for block in &layout.blocks {
@@ -345,23 +395,39 @@ fn build_page(
             BlockKind::Caption => SemanticKind::Caption,
         };
         let mut spans: Vec<Span> = Vec::new();
-        let lines = layout.lines.get(block.lines.start as usize..block.lines.end as usize)
+        let lines = layout
+            .lines
+            .get(block.lines.start as usize..block.lines.end as usize)
             .unwrap_or(&[]);
         for line in lines {
-            let line_spans = line_spans(line, &layout, &text, &styles, &links, &lookup, &mut budget)?;
+            let line_spans =
+                line_spans(line, &layout, &text, &styles, &links, &lookup, &mut budget)?;
             if line_spans.is_empty() {
                 continue;
             }
             if !spans.is_empty() {
-                let lowercase = line_spans.first().and_then(|span| span.text.chars().next())
+                let lowercase = line_spans
+                    .first()
+                    .and_then(|span| span.text.chars().next())
                     .is_some_and(char::is_lowercase);
                 let hyphen = spans.last().is_some_and(|span| span.text.ends_with('-'));
                 if kind == SemanticKind::Paragraph && hyphen && lowercase {
-                    if let Some(last) = spans.last_mut() { last.text.pop(); }
-                    if spans.last().is_some_and(|span| span.text.is_empty()) { spans.pop(); }
+                    if let Some(last) = spans.last_mut() {
+                        last.text.pop();
+                    }
+                    if spans.last().is_some_and(|span| span.text.is_empty()) {
+                        spans.pop();
+                    }
                 } else {
-                    separator(&mut spans, if kind == SemanticKind::Paragraph { ' ' } else { '\n' },
-                        &mut budget)?;
+                    separator(
+                        &mut spans,
+                        if kind == SemanticKind::Paragraph {
+                            ' '
+                        } else {
+                            '\n'
+                        },
+                        &mut budget,
+                    )?;
                 }
             }
             for span in line_spans {
@@ -372,30 +438,49 @@ fn build_page(
                 }
             }
         }
-        budget.push(&mut blocks, SemanticBlock { kind, bbox: block.bbox, spans })?;
+        budget.push(
+            &mut blocks,
+            SemanticBlock {
+                kind,
+                bbox: block.bbox,
+                spans,
+            },
+        )?;
     }
     let mut images = Vec::new();
     for image in text.images {
-        budget.push(&mut images, ImageRef {
-            bbox: image.bbox,
-            object: image.object,
-            width: image.width,
-            height: image.height,
-            inline: image.inline,
-        })?;
+        budget.push(
+            &mut images,
+            ImageRef {
+                bbox: image.bbox,
+                object: image.object,
+                width: image.width,
+                height: image.height,
+                inline: image.inline,
+            },
+        )?;
     }
     Ok(SemanticPage {
-        index: page.index, width: text.width, height: text.height,
-        blocks, images, links, refusal: None,
+        index: page.index,
+        width: text.width,
+        height: text.height,
+        blocks,
+        images,
+        links,
+        refusal: None,
     })
 }
 
 fn hints(name: &[u8], hints: &[&[u8]]) -> bool {
-    hints.iter().any(|hint| name.windows(hint.len()).any(|part| part.eq_ignore_ascii_case(hint)))
+    hints.iter().any(|hint| {
+        name.windows(hint.len())
+            .any(|part| part.eq_ignore_ascii_case(hint))
+    })
 }
 
 fn compatible(left: &Span, right: &Span) -> bool {
-    left.style == right.style && left.link == right.link
+    left.style == right.style
+        && left.link == right.link
         && (left.size - right.size).abs() <= 0.05 * left.size.min(right.size)
 }
 
@@ -408,11 +493,17 @@ fn glyph_link(glyph: &PositionedGlyph, links: &[Link], lookup: &[(f32, usize)]) 
     let size = glyph.size.abs().max(0.01);
     let x = glyph.x + dx * (glyph.width * 0.5) + dy * (size * 0.5);
     let y = glyph.y + dy * (glyph.width * 0.5) - dx * (size * 0.5);
-    if !x.is_finite() || !y.is_finite() { return None; }
+    if !x.is_finite() || !y.is_finite() {
+        return None;
+    }
     let mut found: Option<usize> = None;
     for (top, index) in lookup {
-        if *top > y { break; }
-        let Some(link) = links.get(*index) else { continue };
+        if *top > y {
+            break;
+        }
+        let Some(link) = links.get(*index) else {
+            continue;
+        };
         let [x0, y0, x1, y1] = link.bbox;
         if x >= x0 && x <= x1 && y >= y0 && y <= y1 {
             found = Some(found.map(|last| last.min(*index)).unwrap_or(*index));
@@ -430,7 +521,9 @@ fn line_spans(
     lookup: &[(f32, usize)],
     budget: &mut Budget,
 ) -> Result<Vec<Span>, DocError> {
-    let ids = layout.order.get(line.glyphs.start as usize..line.glyphs.end as usize)
+    let ids = layout
+        .order
+        .get(line.glyphs.start as usize..line.glyphs.end as usize)
         .unwrap_or(&[]);
     let mut spans = Vec::new();
     let mut previous: Option<(f32, f32, f32)> = None;
@@ -440,12 +533,18 @@ fn line_spans(
         let size = glyph.size.abs().max(0.01);
         if let Some((last_along, width, last_size)) = previous {
             if along - last_along - width > SPACE_GAP * size.max(last_size) {
-                if spans.last().is_some_and(|span: &Span| !span.text.ends_with(' ')) {
+                if spans
+                    .last()
+                    .is_some_and(|span: &Span| !span.text.ends_with(' '))
+                {
                     separator(&mut spans, ' ', budget)?;
                 }
             }
         }
-        let style = styles.get(usize::from(glyph.font)).copied().unwrap_or_default();
+        let style = styles
+            .get(usize::from(glyph.font))
+            .copied()
+            .unwrap_or_default();
         let link = glyph_link(glyph, links, lookup);
         let chars = glyph.text.as_slice();
         if chars.is_empty() && !glyph.mapped {
@@ -465,18 +564,36 @@ fn line_spans(
     }
     loop {
         let Some(last) = spans.last_mut() else { break };
-        while last.text.ends_with(' ') { last.text.pop(); }
-        if last.text.is_empty() { spans.pop(); } else { break; }
+        while last.text.ends_with(' ') {
+            last.text.pop();
+        }
+        if last.text.is_empty() {
+            spans.pop();
+        } else {
+            break;
+        }
     }
     Ok(spans)
 }
 
 fn emit(
-    spans: &mut Vec<Span>, character: char, style: Style, size: f32,
-    link: Option<u32>, budget: &mut Budget,
+    spans: &mut Vec<Span>,
+    character: char,
+    style: Style,
+    size: f32,
+    link: Option<u32>,
+    budget: &mut Budget,
 ) -> Result<(), DocError> {
-    let candidate = Span { text: String::new(), style, size, link };
-    if !spans.last().is_some_and(|last| compatible(last, &candidate)) {
+    let candidate = Span {
+        text: String::new(),
+        style,
+        size,
+        link,
+    };
+    if !spans
+        .last()
+        .is_some_and(|last| compatible(last, &candidate))
+    {
         budget.push(spans, candidate)?;
     }
     if let Some(last) = spans.last_mut() {
@@ -495,20 +612,25 @@ fn separator(spans: &mut [Span], character: char, budget: &mut Budget) -> Result
 }
 
 fn target_bytes(target: Option<&LinkTarget>) -> u64 {
-    match target { Some(LinkTarget::Uri(uri)) => uri.len() as u64, _ => 0 }
+    match target {
+        Some(LinkTarget::Uri(uri)) => uri.len() as u64,
+        _ => 0,
+    }
 }
 
 fn page_bytes(page: &SemanticPage) -> u64 {
-    let mut bytes = (page.images.len() as u64)
-        .saturating_mul(core::mem::size_of::<ImageRef>() as u64);
+    let mut bytes =
+        (page.images.len() as u64).saturating_mul(core::mem::size_of::<ImageRef>() as u64);
     for link in &page.links {
-        bytes = bytes.saturating_add(core::mem::size_of::<Link>() as u64)
+        bytes = bytes
+            .saturating_add(core::mem::size_of::<Link>() as u64)
             .saturating_add(target_bytes(Some(&link.target)));
     }
     for block in &page.blocks {
         bytes = bytes.saturating_add(core::mem::size_of::<SemanticBlock>() as u64);
         for span in &block.spans {
-            bytes = bytes.saturating_add(core::mem::size_of::<Span>() as u64)
+            bytes = bytes
+                .saturating_add(core::mem::size_of::<Span>() as u64)
                 .saturating_add(span.text.len() as u64);
         }
     }
@@ -522,7 +644,9 @@ pub(crate) struct Budget {
 }
 
 impl Budget {
-    pub(crate) fn new(maximum: u64) -> Self { Self { used: 0, maximum } }
+    pub(crate) fn new(maximum: u64) -> Self {
+        Self { used: 0, maximum }
+    }
 
     pub(crate) fn charge(&mut self, bytes: u64) -> Result<(), DocError> {
         let requested = self.used.saturating_add(bytes);
@@ -534,7 +658,11 @@ impl Budget {
     pub(crate) fn push<T>(&mut self, out: &mut Vec<T>, value: T) -> Result<(), DocError> {
         self.charge(core::mem::size_of::<T>() as u64)?;
         out.try_reserve(1).map_err(|_| {
-            refusal(LimitKind::TotalDecodedBytes, self.maximum.saturating_add(1), self.maximum)
+            refusal(
+                LimitKind::TotalDecodedBytes,
+                self.maximum.saturating_add(1),
+                self.maximum,
+            )
         })?;
         out.push(value);
         Ok(())
@@ -543,10 +671,13 @@ impl Budget {
     pub(crate) fn append(&mut self, out: &mut String, text: &str) -> Result<(), DocError> {
         self.charge(text.len() as u64)?;
         out.try_reserve(text.len()).map_err(|_| {
-            refusal(LimitKind::TotalDecodedBytes, self.maximum.saturating_add(1), self.maximum)
+            refusal(
+                LimitKind::TotalDecodedBytes,
+                self.maximum.saturating_add(1),
+                self.maximum,
+            )
         })?;
         out.push_str(text);
         Ok(())
     }
 }
-

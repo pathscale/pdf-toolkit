@@ -43,12 +43,7 @@ impl Default for CcittParams {
 /// EOFB is optional because the dimensions delimit this payload. Incomplete
 /// rows, unsupported extension codes and dimension refusals return None.
 /// Output polarity is normalized to 1 = black for either sample convention.
-pub fn decode_g4(
-    data: &[u8],
-    width: u32,
-    height: u32,
-    black_is_1: bool,
-) -> Option<Vec<u8>> {
+pub fn decode_g4(data: &[u8], width: u32, height: u32, black_is_1: bool) -> Option<Vec<u8>> {
     if width == 0 || height == 0 {
         return None;
     }
@@ -114,8 +109,7 @@ pub fn decode(
         return Err(output_limit(max_pixels));
     }
 
-    let width = usize::try_from(params.columns)
-        .map_err(|_| output_limit(max_pixels))?;
+    let width = usize::try_from(params.columns).map_err(|_| output_limit(max_pixels))?;
     let row_bytes = columns
         .checked_add(7)
         .map(|bits| bits / 8)
@@ -133,8 +127,8 @@ pub fn decode(
     // damaged row whose recovery consumes framing or scans to another EOL.
     // This bounds reservation for short inputs without allocating per row.
     let input_bits = data.len().saturating_mul(8) as u64;
-    let storage_rows = usize::try_from(row_limit.min(input_bits))
-        .map_err(|_| output_limit(max_pixels))?;
+    let storage_rows =
+        usize::try_from(row_limit.min(input_bits)).map_err(|_| output_limit(max_pixels))?;
     let output_bytes = row_bytes
         .checked_mul(storage_rows)
         .ok_or_else(|| output_limit(max_pixels))?;
@@ -162,8 +156,7 @@ pub fn decode(
                 return finish(output, truncated || short, reader.offset());
             }
             Boundary::Exhausted => {
-                let missing = params.end_of_block
-                    || (dimension_delimited && row_index < row_limit);
+                let missing = params.end_of_block || (dimension_delimited && row_index < row_limit);
                 return finish(output, truncated || missing, reader.offset());
             }
             Boundary::Row(one_dimensional) => Some(one_dimensional),
@@ -180,13 +173,7 @@ pub fn decode(
 
         current.fill(white);
         let complete = match one_dimensional {
-            Some(true) => decode_1d(
-                &mut reader,
-                &mut current,
-                width,
-                params.black_is_1,
-            )
-            .is_some(),
+            Some(true) => decode_1d(&mut reader, &mut current, width, params.black_is_1).is_some(),
             Some(false) => decode_2d(
                 &mut reader,
                 &reference,
@@ -214,12 +201,7 @@ pub fn decode(
             current.copy_from_slice(&reference);
         }
 
-        append_row(
-            &mut output,
-            &current,
-            params.black_is_1,
-            max_pixels,
-        )?;
+        append_row(&mut output, &current, params.black_is_1, max_pixels)?;
         core::mem::swap(&mut current, &mut reference);
     }
 
@@ -230,11 +212,7 @@ fn output_limit(limit: u64) -> FilterError {
     FilterError::OutputLimit { limit }
 }
 
-fn reserve(
-    bytes: &mut Vec<u8>,
-    size: usize,
-    limit: u64,
-) -> Result<(), FilterError> {
+fn reserve(bytes: &mut Vec<u8>, size: usize, limit: u64) -> Result<(), FilterError> {
     if size > isize::MAX as usize {
         return Err(output_limit(limit));
     }
@@ -243,11 +221,7 @@ fn reserve(
         .map_err(|_| output_limit(limit))
 }
 
-fn row_storage(
-    size: usize,
-    white: u8,
-    limit: u64,
-) -> Result<Vec<u8>, FilterError> {
+fn row_storage(size: usize, white: u8, limit: u64) -> Result<Vec<u8>, FilterError> {
     let mut row = Vec::new();
     reserve(&mut row, size, limit)?;
     row.resize(size, white);
@@ -273,11 +247,7 @@ fn append_row(
     Ok(())
 }
 
-fn finish(
-    bytes: Vec<u8>,
-    truncated: bool,
-    offset: usize,
-) -> Result<(Vec<u8>, bool), FilterError> {
+fn finish(bytes: Vec<u8>, truncated: bool, offset: usize) -> Result<(Vec<u8>, bool), FilterError> {
     if truncated && bytes.is_empty() {
         Err(FilterError::Corrupt {
             filter: FilterKind::CcittFax,
@@ -366,7 +336,11 @@ fn decode_1d(
         black = !black;
     }
 
-    if x == width { Some(()) } else { None }
+    if x == width {
+        Some(())
+    } else {
+        None
+    }
 }
 
 fn decode_2d(
@@ -434,15 +408,14 @@ fn decode_2d(
         initial = false;
     }
 
-    if x == width { Some(()) } else { None }
+    if x == width {
+        Some(())
+    } else {
+        None
+    }
 }
 
-fn paint_black(
-    row: &mut [u8],
-    start: usize,
-    end: usize,
-    black_is_1: bool,
-) -> Option<()> {
+fn paint_black(row: &mut [u8], start: usize, end: usize, black_is_1: bool) -> Option<()> {
     if start > end {
         return None;
     }
@@ -489,12 +462,7 @@ impl<'a> Reference<'a> {
         })
     }
 
-    fn pair(
-        &mut self,
-        x: usize,
-        black: bool,
-        initial: bool,
-    ) -> Option<(usize, usize)> {
+    fn pair(&mut self, x: usize, black: bool, initial: bool) -> Option<(usize, usize)> {
         if x >= self.width {
             return None;
         }
@@ -503,20 +471,11 @@ impl<'a> Reference<'a> {
             if first > x || (initial && first == x) {
                 let choice = usize::from(self.after == black);
                 let next = choice.checked_add(1)?;
-                return Some((
-                    *self.positions.get(choice)?,
-                    *self.positions.get(next)?,
-                ));
+                return Some((*self.positions.get(choice)?, *self.positions.get(next)?));
             }
 
             let [_, second, third] = self.positions;
-            let next = change(
-                self.row,
-                third,
-                self.width,
-                self.after,
-                self.black_is_1,
-            )?;
+            let next = change(self.row, third, self.width, self.after, self.black_is_1)?;
             self.positions = [second, third, next];
             self.after = !self.after;
         }
@@ -524,13 +483,7 @@ impl<'a> Reference<'a> {
     }
 }
 
-fn change(
-    row: &[u8],
-    start: usize,
-    width: usize,
-    black: bool,
-    black_is_1: bool,
-) -> Option<usize> {
+fn change(row: &[u8], start: usize, width: usize, black: bool, black_is_1: bool) -> Option<usize> {
     if start > width {
         return None;
     }
@@ -550,11 +503,7 @@ fn change(
     Some(width)
 }
 
-fn run(
-    reader: &mut BitReader<'_>,
-    black: bool,
-    maximum: usize,
-) -> Option<usize> {
+fn run(reader: &mut BitReader<'_>, black: bool, maximum: usize) -> Option<usize> {
     let table = if black { &BLACK_TABLE } else { &WHITE_TABLE };
     let mut length = 0usize;
 
@@ -615,7 +564,10 @@ const MODE_CODES: &[(u8, u8, Mode)] = &[
 ];
 
 const fn mode_table() -> [ModeEntry; 128] {
-    let mut table = [ModeEntry { mode: Mode::Invalid, bits: 0 }; 128];
+    let mut table = [ModeEntry {
+        mode: Mode::Invalid,
+        bits: 0,
+    }; 128];
     let mut code_index = 0;
     while code_index < MODE_CODES.len() {
         let (code, bits, mode) = MODE_CODES[code_index];

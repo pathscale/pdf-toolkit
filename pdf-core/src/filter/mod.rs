@@ -68,7 +68,10 @@ impl FilterKind {
     }
 
     pub const fn is_image_codec(self) -> bool {
-        matches!(self, Self::Dct | Self::Jpx | Self::Jxl | Self::Jbig2 | Self::CcittFax)
+        matches!(
+            self,
+            Self::Dct | Self::Jpx | Self::Jxl | Self::Jbig2 | Self::CcittFax
+        )
     }
 }
 
@@ -160,7 +163,8 @@ pub fn decode_image_report(
     if params.width == 0 || params.height == 0 {
         return Err(FilterError::BadParams { filter: kind });
     }
-    let pixels = u64::from(params.width).checked_mul(u64::from(params.height))
+    let pixels = u64::from(params.width)
+        .checked_mul(u64::from(params.height))
         .ok_or(FilterError::Refused(Refusal {
             limit: LimitKind::ImagePixels,
             requested: u64::MAX,
@@ -184,11 +188,7 @@ pub fn decode_image_report(
         }))?;
     let decoded = match kind {
         FilterKind::Jbig2 => {
-            let report = jbig2::decode_jbig2_report(
-                data,
-                params.globals.as_deref(),
-                max_pixels,
-            )?;
+            let report = jbig2::decode_jbig2_report(data, params.globals.as_deref(), max_pixels)?;
             if report.bitmap.width != params.width || report.bitmap.height != params.height {
                 return Err(FilterError::BadParams { filter: kind });
             }
@@ -200,7 +200,11 @@ pub fn decode_image_report(
             }
         }
         FilterKind::CcittFax => {
-            let rows = if params.rows == 0 { params.height } else { params.rows };
+            let rows = if params.rows == 0 {
+                params.height
+            } else {
+                params.rows
+            };
             if params.columns != params.width || rows != params.height {
                 return Err(FilterError::BadParams { filter: kind });
             }
@@ -232,7 +236,10 @@ pub fn decode_image_report(
         _ => return Err(FilterError::Unsupported { filter: kind }),
     };
     if decoded.bytes.len() != expected {
-        return Err(FilterError::Corrupt { filter: kind, offset: data.len() as u64 });
+        return Err(FilterError::Corrupt {
+            filter: kind,
+            offset: data.len() as u64,
+        });
     }
     Ok(decoded)
 }
@@ -293,7 +300,11 @@ impl fmt::Display for FilterError {
                 write!(formatter, "invalid parameters for {}", filter.name())
             }
             Self::Corrupt { filter, offset } => {
-                write!(formatter, "corrupt {} input at byte {offset}", filter.name())
+                write!(
+                    formatter,
+                    "corrupt {} input at byte {offset}",
+                    filter.name()
+                )
             }
         }
     }
@@ -306,11 +317,7 @@ impl std::error::Error for FilterError {}
 ///
 /// Each filter's output, including predictor input, is bounded by `max_output`.
 /// Corrupt or incomplete input preserves recovered bytes when possible.
-pub fn decode(
-    input: &[u8],
-    steps: &[FilterStep],
-    max_output: u64,
-) -> Result<Decoded, FilterError> {
+pub fn decode(input: &[u8], steps: &[FilterStep], max_output: u64) -> Result<Decoded, FilterError> {
     let mut data = Cow::Borrowed(input);
     let mut truncated = false;
     let mut image = None;
@@ -333,24 +340,18 @@ pub fn decode(
         }
 
         let layout = match step.kind {
-            FilterKind::Flate | FilterKind::Lzw => {
-                predictor::Layout::new(step.params, step.kind)?
-            }
+            FilterKind::Flate | FilterKind::Lzw => predictor::Layout::new(step.params, step.kind)?,
             _ => None,
         };
 
         let mut decoded = match step.kind {
             FilterKind::Flate => flate::decode(data.as_ref(), max_output)?,
-            FilterKind::Lzw => {
-                lzw::decode(data.as_ref(), step.params.early_change, max_output)?
-            }
+            FilterKind::Lzw => lzw::decode(data.as_ref(), step.params.early_change, max_output)?,
             FilterKind::Ascii85 => ascii85::decode(data.as_ref(), max_output)?,
             FilterKind::AsciiHex => asciihex::decode(data.as_ref(), max_output)?,
             FilterKind::RunLength => runlength::decode(data.as_ref(), max_output)?,
             _ => {
-                return Err(FilterError::Unsupported {
-                    filter: step.kind,
-                });
+                return Err(FilterError::Unsupported { filter: step.kind });
             }
         };
 
@@ -399,11 +400,7 @@ fn check_size(size: usize, max_output: u64) -> Result<(), FilterError> {
 ///
 /// The public API has no allocation-failure variant, so an allocation that
 /// cannot be satisfied is reported through the same named output refusal.
-fn reserve_to(
-    bytes: &mut Vec<u8>,
-    size: usize,
-    max_output: u64,
-) -> Result<(), FilterError> {
+fn reserve_to(bytes: &mut Vec<u8>, size: usize, max_output: u64) -> Result<(), FilterError> {
     check_size(size, max_output)?;
     if size <= bytes.capacity() {
         return Ok(());
@@ -490,4 +487,3 @@ fn finish(
 fn is_whitespace(byte: u8) -> bool {
     matches!(byte, 0 | 9 | 10 | 12 | 13 | 32)
 }
-

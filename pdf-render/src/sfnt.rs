@@ -26,7 +26,10 @@ pub(crate) struct Bytes {
 impl Bytes {
     pub(crate) fn shared(data: Arc<[u8]>) -> Self {
         let length = data.len();
-        Self { data, range: 0..length }
+        Self {
+            data,
+            range: 0..length,
+        }
     }
 
     pub(crate) fn owned(data: Vec<u8>) -> Self {
@@ -62,7 +65,9 @@ impl Program {
         maximum_elements: u64,
     ) -> Result<Option<Self>, DocError> {
         check(LimitKind::DecodedBytes, bytes.len() as u64, maximum_bytes)?;
-        let Ok(font) = FontRef::new(bytes.bytes()) else { return Ok(None) };
+        let Ok(font) = FontRef::new(bytes.bytes()) else {
+            return Ok(None);
+        };
         check(
             LimitKind::Tokens,
             font.table_directory().table_records().len() as u64,
@@ -95,7 +100,9 @@ impl Program {
                 }
             }
             Some((format, glyph_count))
-        })() else { return Ok(None) };
+        })() else {
+            return Ok(None);
+        };
         Ok(Some(Self {
             bytes,
             format,
@@ -120,9 +127,10 @@ impl Program {
         let font = self.font().ok_or_else(failed)?;
         // Select a conventional outline source explicitly. VARC is not
         // traversed when a font also supplies ordinary glyf outlines.
-        let collection = OutlineGlyphCollection::with_format(&font, self.format)
-            .ok_or_else(failed)?;
-        let glyph = collection.get(GlyphId::new(u32::from(gid)))
+        let collection =
+            OutlineGlyphCollection::with_format(&font, self.format).ok_or_else(failed)?;
+        let glyph = collection
+            .get(GlyphId::new(u32::from(gid)))
             .ok_or_else(failed)?;
         let memory_size = glyph.draw_memory_size(Hinting::None);
         check(
@@ -132,34 +140,31 @@ impl Program {
         )?;
         let mut memory = zeroed(memory_size, self.maximum_bytes)?;
         let maximum_path_bytes = self.maximum_bytes.saturating_sub(memory_size as u64);
-        let mut counter = PathPen::new(
-            self.maximum_elements,
-            maximum_path_bytes,
-            None,
-        );
-        glyph.draw(
-            DrawSettings::unhinted(Size::new(1000.0), LocationRef::default())
-                .with_memory(Some(memory.as_mut_slice())),
-            &mut counter,
-        ).map_err(|_| failed())?;
+        let mut counter = PathPen::new(self.maximum_elements, maximum_path_bytes, None);
+        glyph
+            .draw(
+                DrawSettings::unhinted(Size::new(1000.0), LocationRef::default())
+                    .with_memory(Some(memory.as_mut_slice())),
+                &mut counter,
+            )
+            .map_err(|_| failed())?;
         if let Some(error) = counter.error.take() {
             return Err(error);
         }
 
         let count = counter.count;
         let mut elements = Vec::new();
-        elements.try_reserve_exact(count)
+        elements
+            .try_reserve_exact(count)
             .map_err(|_| allocation_failure(maximum_path_bytes))?;
-        let mut pen = PathPen::new(
-            self.maximum_elements,
-            maximum_path_bytes,
-            Some(elements),
-        );
-        glyph.draw(
-            DrawSettings::unhinted(Size::new(1000.0), LocationRef::default())
-                .with_memory(Some(memory.as_mut_slice())),
-            &mut pen,
-        ).map_err(|_| failed())?;
+        let mut pen = PathPen::new(self.maximum_elements, maximum_path_bytes, Some(elements));
+        glyph
+            .draw(
+                DrawSettings::unhinted(Size::new(1000.0), LocationRef::default())
+                    .with_memory(Some(memory.as_mut_slice())),
+                &mut pen,
+            )
+            .map_err(|_| failed())?;
         if let Some(error) = pen.error.take() {
             return Err(error);
         }
@@ -170,17 +175,15 @@ impl Program {
     }
 }
 
-pub(crate) fn cmap_index(
-    font: &FontRef<'_>,
-    platform: PlatformId,
-    encoding: u16,
-) -> Option<u16> {
+pub(crate) fn cmap_index(font: &FontRef<'_>, platform: PlatformId, encoding: u16) -> Option<u16> {
     let cmap = font.cmap().ok()?;
     for (index, record) in cmap.encoding_records().iter().enumerate() {
         if record.platform_id() != platform || record.encoding_id() != encoding {
             continue;
         }
-        let Ok(subtable) = record.subtable(cmap.offset_data()) else { continue };
+        let Ok(subtable) = record.subtable(cmap.offset_data()) else {
+            continue;
+        };
         if matches!(
             subtable,
             CmapSubtable::Format0(_)
@@ -196,11 +199,7 @@ pub(crate) fn cmap_index(
     None
 }
 
-pub(crate) fn map(
-    font: &FontRef<'_>,
-    index: Option<u16>,
-    codepoint: u32,
-) -> Option<u16> {
+pub(crate) fn map(font: &FontRef<'_>, index: Option<u16>, codepoint: u32) -> Option<u16> {
     let cmap = font.cmap().ok()?;
     let subtable = cmap.subtable(index?).ok()?;
     let gid = subtable.map_codepoint(codepoint)?;
@@ -212,10 +211,7 @@ pub(crate) fn map(
 
 /// Wraps a single CFF1 font set in the tables required by skrifa.
 /// Source CFF bytes are copied only because the SFNT container must be contiguous.
-pub(crate) fn wrap_cff(
-    source: &Bytes,
-    maximum_bytes: u64,
-) -> Result<Option<Bytes>, DocError> {
+pub(crate) fn wrap_cff(source: &Bytes, maximum_bytes: u64) -> Result<Option<Bytes>, DocError> {
     check(LimitKind::DecodedBytes, source.len() as u64, maximum_bytes)?;
     let data = source.bytes();
     let Ok(table) = skrifa::raw::tables::cff::Cff::read(FontData::new(data)) else {
@@ -224,14 +220,20 @@ pub(crate) fn wrap_cff(
     if table.names().count() != 1 || table.top_dicts().count() != 1 {
         return Ok(None);
     }
-    let Ok(cff) = CffFontRef::new_cff(data, 0, None) else { return Ok(None) };
-    let Some(glyph_count) = u16::try_from(cff.num_glyphs()).ok()
+    let Ok(cff) = CffFontRef::new_cff(data, 0, None) else {
+        return Ok(None);
+    };
+    let Some(glyph_count) = u16::try_from(cff.num_glyphs())
+        .ok()
         .filter(|count| *count != 0)
-    else { return Ok(None) };
+    else {
+        return Ok(None);
+    };
     let Some(upem) = u16::try_from(cff.upem()).ok().filter(|upem| *upem != 0) else {
         return Ok(None);
     };
-    let metrics_size = usize::from(glyph_count).checked_mul(4)
+    let metrics_size = usize::from(glyph_count)
+        .checked_mul(4)
         .ok_or_else(|| overflow(maximum_bytes))?;
     let tables = [
         (b"CFF ", source.len()),
@@ -246,7 +248,8 @@ pub(crate) fn wrap_cff(
     let mut total = SFNT_HEADER_BYTES;
     for ((_, length), offset) in tables.iter().zip(offsets.iter_mut()) {
         *offset = total;
-        total = total.checked_add(*length)
+        total = total
+            .checked_add(*length)
             .and_then(|size| size.checked_add(3))
             .map(|size| size & !3usize)
             .ok_or_else(|| overflow(maximum_bytes))?;
@@ -263,8 +266,16 @@ pub(crate) fn wrap_cff(
         for (index, ((tag, length), offset)) in tables.iter().zip(offsets.iter()).enumerate() {
             let record = index.checked_mul(16)?.checked_add(12)?;
             put(&mut output, record, tag.as_slice())?;
-            put32(&mut output, record.checked_add(8)?, u32::try_from(*offset).ok()?)?;
-            put32(&mut output, record.checked_add(12)?, u32::try_from(*length).ok()?)?;
+            put32(
+                &mut output,
+                record.checked_add(8)?,
+                u32::try_from(*offset).ok()?,
+            )?;
+            put32(
+                &mut output,
+                record.checked_add(12)?,
+                u32::try_from(*length).ok()?,
+            )?;
         }
         let [cff, _, head, hhea, hmtx, maxp, post] = offsets;
         put(&mut output, cff, data)?;
@@ -316,11 +327,7 @@ struct PathPen {
 }
 
 impl PathPen {
-    fn new(
-        maximum_elements: u64,
-        maximum_bytes: u64,
-        elements: Option<Vec<PathEl>>,
-    ) -> Self {
+    fn new(maximum_elements: u64, maximum_bytes: u64, elements: Option<Vec<PathEl>>) -> Self {
         Self {
             elements,
             count: 0,
@@ -344,11 +351,7 @@ impl PathPen {
             self.error = Some(overflow(self.maximum_bytes));
             return;
         };
-        if let Err(error) = check(
-            LimitKind::ContentOps,
-            count as u64,
-            self.maximum_elements,
-        ) {
+        if let Err(error) = check(LimitKind::ContentOps, count as u64, self.maximum_elements) {
             self.error = Some(error);
             return;
         }
@@ -357,11 +360,7 @@ impl PathPen {
             self.error = Some(overflow(self.maximum_bytes));
             return;
         };
-        if let Err(error) = check(
-            LimitKind::DecodedBytes,
-            size as u64,
-            self.maximum_bytes,
-        ) {
+        if let Err(error) = check(LimitKind::DecodedBytes, size as u64, self.maximum_bytes) {
             self.error = Some(error);
             return;
         }
@@ -406,7 +405,9 @@ impl OutlinePen for PathPen {
     }
 
     fn quad_to(&mut self, cx: f32, cy: f32, x: f32, y: f32) {
-        let Some((from_x, from_y)) = self.require_current() else { return };
+        let Some((from_x, from_y)) = self.require_current() else {
+            return;
+        };
         // Weighted sums avoid overflowing a control-point difference.
         let x0 = from_x / 3.0 + cx * (2.0 / 3.0);
         let y0 = from_y / 3.0 + cy * (2.0 / 3.0);
@@ -448,14 +449,18 @@ pub(crate) fn validate_path(
         path.els.len() as u64,
         maximum_elements,
     )?;
-    let bytes = path.els.len().checked_mul(core::mem::size_of::<PathEl>())
+    let bytes = path
+        .els
+        .len()
+        .checked_mul(core::mem::size_of::<PathEl>())
         .ok_or_else(|| overflow(maximum_bytes))?;
     check(LimitKind::DecodedBytes, bytes as u64, maximum_bytes)?;
     for element in &path.els {
         let finite = match *element {
             PathEl::MoveTo(x, y) | PathEl::LineTo(x, y) => x.is_finite() && y.is_finite(),
-            PathEl::CubicTo(x0, y0, x1, y1, x, y) =>
-                [x0, y0, x1, y1, x, y].iter().all(|value| value.is_finite()),
+            PathEl::CubicTo(x0, y0, x1, y1, x, y) => {
+                [x0, y0, x1, y1, x, y].iter().all(|value| value.is_finite())
+            }
             PathEl::Close => true,
         };
         if !finite {
@@ -472,18 +477,20 @@ fn zeroed(size: usize, maximum: u64) -> Result<Vec<u8>, DocError> {
         maximum.min(isize::MAX as u64),
     )?;
     let mut bytes = Vec::new();
-    bytes.try_reserve_exact(size).map_err(|_| allocation_failure(maximum))?;
+    bytes
+        .try_reserve_exact(size)
+        .map_err(|_| allocation_failure(maximum))?;
     bytes.resize(size, 0);
     Ok(bytes)
 }
 
-pub(crate) fn check(
-    limit: LimitKind,
-    requested: u64,
-    maximum: u64,
-) -> Result<(), DocError> {
+pub(crate) fn check(limit: LimitKind, requested: u64, maximum: u64) -> Result<(), DocError> {
     if requested > maximum {
-        Err(DocError::Refused(Refusal { limit, requested, maximum }))
+        Err(DocError::Refused(Refusal {
+            limit,
+            requested,
+            maximum,
+        }))
     } else {
         Ok(())
     }
@@ -506,5 +513,8 @@ fn allocation_failure(maximum: u64) -> DocError {
 }
 
 fn failed() -> DocError {
-    DocError::Malformed { offset: 0, what: "font_program_failed" }
+    DocError::Malformed {
+        offset: 0,
+        what: "font_program_failed",
+    }
 }

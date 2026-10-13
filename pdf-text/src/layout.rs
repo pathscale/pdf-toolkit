@@ -108,18 +108,30 @@ struct PendingLine {
 }
 
 fn magnitude(value: f32) -> f32 {
-    if value < 0.0 { -value } else { value }
+    if value < 0.0 {
+        -value
+    } else {
+        value
+    }
 }
 
 // This unsigned key has exactly the order of f32::total_cmp, including
 // signed zero and every NaN bit pattern.
 fn float_key(value: f32) -> u32 {
     let bits = value.to_bits();
-    if bits & 0x8000_0000 != 0 { !bits } else { bits ^ 0x8000_0000 }
+    if bits & 0x8000_0000 != 0 {
+        !bits
+    } else {
+        bits ^ 0x8000_0000
+    }
 }
 
 fn key_float(key: u32) -> f32 {
-    let bits = if key & 0x8000_0000 != 0 { key ^ 0x8000_0000 } else { !key };
+    let bits = if key & 0x8000_0000 != 0 {
+        key ^ 0x8000_0000
+    } else {
+        !key
+    };
     f32::from_bits(bits)
 }
 
@@ -132,12 +144,13 @@ fn content_key(item: &Item) -> u64 {
 }
 
 fn sort_content(items: &mut [Item]) {
-    if items.windows(2).any(|pair| {
-        match (pair.first(), pair.get(1)) {
+    if items
+        .windows(2)
+        .any(|pair| match (pair.first(), pair.get(1)) {
             (Some(left), Some(right)) => content_key(left) > content_key(right),
             _ => false,
-        }
-    }) {
+        })
+    {
         // IDs are unique within a page, so the packed keys have no ties.
         items.sort_unstable_by_key(content_key);
     }
@@ -181,10 +194,14 @@ pub(crate) fn direction(angle: i16) -> (f32, f32) {
     };
     let x = f64::from(degrees) * core::f64::consts::PI / 180.0;
     let x2 = x * x;
-    let sin = x * (1.0 - x2 * (1.0 / 6.0 - x2 * (1.0 / 120.0
-        - x2 * (1.0 / 5040.0 - x2 * (1.0 / 362880.0 - x2 / 39916800.0)))));
-    let cos = 1.0 - x2 * (0.5 - x2 * (1.0 / 24.0
-        - x2 * (1.0 / 720.0 - x2 * (1.0 / 40320.0 - x2 / 3628800.0))));
+    let sin = x
+        * (1.0
+            - x2 * (1.0 / 6.0
+                - x2 * (1.0 / 120.0
+                    - x2 * (1.0 / 5040.0 - x2 * (1.0 / 362880.0 - x2 / 39916800.0)))));
+    let cos = 1.0
+        - x2 * (0.5
+            - x2 * (1.0 / 24.0 - x2 * (1.0 / 720.0 - x2 * (1.0 / 40320.0 - x2 / 3628800.0))));
     (cos as f32, sin as f32)
 }
 
@@ -216,10 +233,7 @@ fn positioned(
     ];
     let along = dx * glyph.x + dy * glyph.y;
     let across = -dy * glyph.x + dx * glyph.y;
-    if !bbox.iter().all(|value| value.is_finite())
-        || !along.is_finite()
-        || !across.is_finite()
-    {
+    if !bbox.iter().all(|value| value.is_finite()) || !along.is_finite() || !across.is_finite() {
         return None;
     }
     Some(Item {
@@ -235,7 +249,6 @@ fn positioned(
     })
 }
 
-
 /// Drops overprinted glyphs (fake bold, shadows): the same text at the same angle
 /// in the same small cell as an earlier glyph.
 ///
@@ -248,7 +261,9 @@ fn positioned(
 fn unique_items(mut items: Vec<Item>, text: &PageText) -> Vec<Item> {
     let mut keys: Vec<u128> = Vec::with_capacity(items.len());
     for (index, item) in items.iter().enumerate() {
-        let Some(glyph) = text.glyphs.get(item.id as usize) else { continue };
+        let Some(glyph) = text.glyphs.get(item.id as usize) else {
+            continue;
+        };
         if item.width == 0.0 {
             continue;
         }
@@ -289,7 +304,11 @@ fn unique_items(mut items: Vec<Item>, text: &PageText) -> Vec<Item> {
 }
 
 fn round_to_i64(value: f32) -> i64 {
-    if value >= 0.0 { (value + 0.5) as i64 } else { (value - 0.5) as i64 }
+    if value >= 0.0 {
+        (value + 0.5) as i64
+    } else {
+        (value - 0.5) as i64
+    }
 }
 
 fn finish_line(
@@ -311,7 +330,9 @@ fn finish_line(
     let mut space_allowed = false;
     for item in items {
         uniform_size &= item.size == first.size;
-        let Some(glyph) = text.glyphs.get(item.id as usize) else { continue };
+        let Some(glyph) = text.glyphs.get(item.id as usize) else {
+            continue;
+        };
         if let Some(last) = previous {
             let gap = item.along - last.along - last.width;
             if gap > SPACE_GAP * item.size.max(last.size) && space_allowed {
@@ -351,7 +372,12 @@ fn finish_line(
         median(sizes)
     };
     out.push(PendingLine {
-        line: Line { bbox, text: value, size, glyphs: 0..0 },
+        line: Line {
+            bbox,
+            text: value,
+            size,
+            glyphs: 0..0,
+        },
         ids: start..ids.len(),
         angle,
         bold: bold > items.len() / 2,
@@ -378,17 +404,19 @@ fn finish_band(
     }
     if !content_sorted {
         items.sort_unstable_by_key(content_key);
-        jumps = items.windows(2).any(|pair| {
-            match (pair.first(), pair.get(1)) {
-                (Some(left), Some(right)) =>
-                    right.along < left.along - 0.1 * left.size.min(right.size),
+        jumps = items
+            .windows(2)
+            .any(|pair| match (pair.first(), pair.get(1)) {
+                (Some(left), Some(right)) => {
+                    right.along < left.along - 0.1 * left.size.min(right.size)
+                }
                 _ => false,
-            }
-        });
+            });
     }
     if jumps {
         items.sort_unstable_by(|left, right| {
-            left.along.total_cmp(&right.along)
+            left.along
+                .total_cmp(&right.along)
                 .then_with(|| left.across.total_cmp(&right.across))
                 .then_with(|| left.seq.cmp(&right.seq))
                 .then_with(|| left.id.cmp(&right.id))
@@ -397,9 +425,7 @@ fn finish_band(
     let mut start = 0;
     for (index, pair) in items.windows(2).enumerate() {
         if let [last, item] = pair {
-            if item.along - last.along - last.width
-                >= COLUMN_GUTTER * item.size.max(last.size)
-            {
+            if item.along - last.along - last.width >= COLUMN_GUTTER * item.size.max(last.size) {
                 let end = index + 1;
                 finish_line(&items[start..end], text, out, ids, sizes);
                 start = end;
@@ -416,16 +442,22 @@ fn candidate_lines(
 ) -> (Vec<PendingLine>, Vec<u32>) {
     let mut runs: Vec<Run> = Vec::new();
     for (index, item) in items.iter().enumerate() {
-        let adjacent = runs.last().map(|run| {
-            run.angle == item.angle
-                && magnitude(run.across - item.across)
-                    < BASELINE_TOLERANCE * run.size.min(item.size)
-                && items.get(run.items.end - 1).map(|last| {
-                    let gap = item.along - last.along - last.width;
-                    gap >= -0.3 * last.size.min(item.size)
-                        && gap <= COLUMN_GUTTER * last.size.max(item.size)
-                }).unwrap_or(false)
-        }).unwrap_or(false);
+        let adjacent = runs
+            .last()
+            .map(|run| {
+                run.angle == item.angle
+                    && magnitude(run.across - item.across)
+                        < BASELINE_TOLERANCE * run.size.min(item.size)
+                    && items
+                        .get(run.items.end - 1)
+                        .map(|last| {
+                            let gap = item.along - last.along - last.width;
+                            gap >= -0.3 * last.size.min(item.size)
+                                && gap <= COLUMN_GUTTER * last.size.max(item.size)
+                        })
+                        .unwrap_or(false)
+            })
+            .unwrap_or(false);
         if adjacent {
             if let Some(run) = runs.last_mut() {
                 run.items.end = index + 1;
@@ -442,7 +474,8 @@ fn candidate_lines(
         }
     }
     runs.sort_unstable_by(|left, right| {
-        left.angle.cmp(&right.angle)
+        left.angle
+            .cmp(&right.angle)
             .then_with(|| left.across_key.cmp(&right.across_key))
             .then_with(|| left.seq.cmp(&right.seq))
     });
@@ -452,11 +485,12 @@ fn candidate_lines(
     sizes.clear();
     let mut anchor: Option<(i16, f32, f32)> = None;
     for run in runs {
-        let same = anchor.map(|(angle, across, size)| {
-            angle == run.angle
-                && magnitude(across - run.across)
-                    < BASELINE_TOLERANCE * size.min(run.size)
-        }).unwrap_or(false);
+        let same = anchor
+            .map(|(angle, across, size)| {
+                angle == run.angle
+                    && magnitude(across - run.across) < BASELINE_TOLERANCE * size.min(run.size)
+            })
+            .unwrap_or(false);
         if !same {
             finish_band(&mut band, text, &mut out, &mut ids, sizes);
             band.clear();
@@ -483,11 +517,17 @@ enum CutTask {
 }
 
 fn axis_order(ids: &[usize], lines: &[PendingLine], axis: usize) -> LineOrder {
-    let mut order: LineOrder = ids.iter().filter_map(|id| {
-        lines.get(*id).map(|line| {
-            (coordinate_key(line.line.bbox[axis], line.line.bbox[axis + 2]), *id)
+    let mut order: LineOrder = ids
+        .iter()
+        .filter_map(|id| {
+            lines.get(*id).map(|line| {
+                (
+                    coordinate_key(line.line.bbox[axis], line.line.bbox[axis + 2]),
+                    *id,
+                )
+            })
         })
-    }).collect();
+        .collect();
     // Equal endpoint keys describe bit-identical intervals. Their ID order
     // cannot affect a gutter, and the ID makes the complete sort key unique.
     order.sort_unstable();
@@ -540,8 +580,7 @@ fn xy_order(ids: Vec<usize>, lines: &[PendingLine], body_size: f32) -> CutResult
                     gutter(&x_order, COLUMN_GUTTER * body_size)
                         .filter(|cut| is_column_cut(&x_order, lines, *cut))
                         .map(|cut| (0usize, cut))
-                        .or_else(|| gutter(&y_order, 0.5 * body_size)
-                            .map(|cut| (1usize, cut)))
+                        .or_else(|| gutter(&y_order, 0.5 * body_size).map(|cut| (1usize, cut)))
                 } else {
                     None
                 };
@@ -573,12 +612,13 @@ fn xy_order(ids: Vec<usize>, lines: &[PendingLine], body_size: f32) -> CutResult
                             *key = coordinate_key(line.line.bbox[1], line.line.bbox[0]);
                         }
                     }
-                    if y_order.windows(2).any(|pair| {
-                        match (pair.first(), pair.get(1)) {
+                    if y_order
+                        .windows(2)
+                        .any(|pair| match (pair.first(), pair.get(1)) {
                             (Some(left), Some(right)) => left > right,
                             _ => false,
-                        }
-                    }) {
+                        })
+                    {
                         y_order.sort_unstable();
                     }
                     let columns = if y_order.is_empty() { 0 } else { 1 };
@@ -605,16 +645,23 @@ fn xy_order(ids: Vec<usize>, lines: &[PendingLine], body_size: f32) -> CutResult
             }
         }
     }
-    results.pop().unwrap_or(CutResult { order: Vec::new(), columns: 0 })
+    results.pop().unwrap_or(CutResult {
+        order: Vec::new(),
+        columns: 0,
+    })
 }
 
 fn line_kind(text: &str, size: f32, body_size: f32) -> BlockKind {
     let token = text.split_whitespace().next().unwrap_or("");
-    let numbered = token.strip_suffix('.').or_else(|| token.strip_suffix(')'))
+    let numbered = token
+        .strip_suffix('.')
+        .or_else(|| token.strip_suffix(')'))
         .map(|digits| !digits.is_empty() && digits.bytes().all(|byte| byte.is_ascii_digit()))
         .unwrap_or(false);
-    if matches!(token, "\u{2022}" | "\u{25cf}" | "\u{25e6}" | "\u{25aa}" | "-" | "*")
-        || numbered
+    if matches!(
+        token,
+        "\u{2022}" | "\u{25cf}" | "\u{25e6}" | "\u{25aa}" | "-" | "*"
+    ) || numbered
     {
         BlockKind::ListItem
     } else if size < 0.9 * body_size
@@ -640,15 +687,19 @@ fn build_blocks(page: &mut PageLayout, metadata: &[(i16, bool, u8)]) {
         let (angle, bold, column) = metadata.get(index).copied().unwrap_or((0, false, 0));
         let kind = line_kind(&line.text, line.size, page.body_size);
         let words = line.text.split_whitespace().count();
-        let merge = drafts.last().map(|last| {
-            angle == 0 && last.angle == 0 && last.bold == bold
-                && last.block.column == column && last.block.kind == kind
-                && kind != BlockKind::ListItem
-                && magnitude(last.size - line.size)
-                    <= SIZE_CHANGE * last.size.min(line.size)
-                && line.bbox[1] - last.block.bbox[3]
-                    <= 1.2 * line.size.max(last.size)
-        }).unwrap_or(false);
+        let merge = drafts
+            .last()
+            .map(|last| {
+                angle == 0
+                    && last.angle == 0
+                    && last.bold == bold
+                    && last.block.column == column
+                    && last.block.kind == kind
+                    && kind != BlockKind::ListItem
+                    && magnitude(last.size - line.size) <= SIZE_CHANGE * last.size.min(line.size)
+                    && line.bbox[1] - last.block.bbox[3] <= 1.2 * line.size.max(last.size)
+            })
+            .unwrap_or(false);
         if merge {
             if let Some(last) = drafts.last_mut() {
                 last.block.bbox = union(last.block.bbox, line.bbox);
@@ -671,23 +722,34 @@ fn build_blocks(page: &mut PageLayout, metadata: &[(i16, bool, u8)]) {
             });
         }
     }
-    let headings: Vec<bool> = drafts.iter().enumerate().map(|(index, draft)| {
-        let followed_by_body = drafts.get(index.saturating_add(1)).map(|next| {
-            next.angle == 0 && !next.bold && next.size <= 1.15 * page.body_size
-        }).unwrap_or(false);
-        draft.angle == 0 && draft.block.kind == BlockKind::Paragraph
-            && (draft.size >= 1.25 * page.body_size
-                || (draft.bold && draft.words > 0 && draft.words < 12 && followed_by_body))
-    }).collect();
-    let mut sizes: Vec<f32> = drafts.iter().zip(&headings)
+    let headings: Vec<bool> = drafts
+        .iter()
+        .enumerate()
+        .map(|(index, draft)| {
+            let followed_by_body = drafts
+                .get(index.saturating_add(1))
+                .map(|next| next.angle == 0 && !next.bold && next.size <= 1.15 * page.body_size)
+                .unwrap_or(false);
+            draft.angle == 0
+                && draft.block.kind == BlockKind::Paragraph
+                && (draft.size >= 1.25 * page.body_size
+                    || (draft.bold && draft.words > 0 && draft.words < 12 && followed_by_body))
+        })
+        .collect();
+    let mut sizes: Vec<f32> = drafts
+        .iter()
+        .zip(&headings)
         .filter_map(|(draft, heading)| if *heading { Some(draft.size) } else { None })
         .collect();
     sizes.sort_unstable_by(|a, b| b.total_cmp(a));
     let mut ranks: Vec<f32> = Vec::new();
     for size in sizes {
-        if ranks.len() < 3 && ranks.last().map(|last| {
-            magnitude(size - *last) > SIZE_CHANGE * *last
-        }).unwrap_or(true) {
+        if ranks.len() < 3
+            && ranks
+                .last()
+                .map(|last| magnitude(size - *last) > SIZE_CHANGE * *last)
+                .unwrap_or(true)
+        {
             ranks.push(size);
         }
     }
@@ -712,7 +774,11 @@ pub fn layout(text: &PageText) -> PageLayout {
     let mut angle = 0i16;
     let mut axes = (1.0, 0.0);
     let mut font = 0u16;
-    let mut bold = text.fonts.first().map(|font| font.flags.bold).unwrap_or(false);
+    let mut bold = text
+        .fonts
+        .first()
+        .map(|font| font.flags.bold)
+        .unwrap_or(false);
     for (index, glyph) in text.glyphs.iter().take(u32::MAX as usize).enumerate() {
         if glyph.angle != raw_angle {
             raw_angle = glyph.angle;
@@ -721,8 +787,11 @@ pub fn layout(text: &PageText) -> PageLayout {
         }
         if glyph.font != font {
             font = glyph.font;
-            bold = text.fonts.get(usize::from(font))
-                .map(|font| font.flags.bold).unwrap_or(false);
+            bold = text
+                .fonts
+                .get(usize::from(font))
+                .map(|font| font.flags.bold)
+                .unwrap_or(false);
         }
         if let Some(item) = positioned(index as u32, glyph, angle, axes, bold) {
             items.push(item);
@@ -751,8 +820,7 @@ pub fn layout(text: &PageText) -> PageLayout {
             // Angles are normalized to 0..360 by positioned. Compute each
             // frame once, preserving total_cmp even if the midpoint overflows.
             let (across, along) = frame_key(line);
-            let key = ((line.angle as u128) << 64)
-                | u128::from(coordinate_key(across, along));
+            let key = ((line.angle as u128) << 64) | u128::from(coordinate_key(across, along));
             rotated.push((key, index));
         }
     }
@@ -762,7 +830,8 @@ pub fn layout(text: &PageText) -> PageLayout {
     if !rotated.is_empty() {
         flow.columns = flow.columns.max(1);
     }
-    flow.order.extend(rotated.into_iter().map(|(_, id)| (id, 0)));
+    flow.order
+        .extend(rotated.into_iter().map(|(_, id)| (id, 0)));
     let mut page = PageLayout {
         lines: Vec::with_capacity(pending.len()),
         blocks: Vec::new(),
@@ -772,9 +841,12 @@ pub fn layout(text: &PageText) -> PageLayout {
     };
     let mut metadata = Vec::with_capacity(pending.len());
     for (id, column) in flow.order {
-        let Some(source) = pending.get_mut(id) else { continue };
+        let Some(source) = pending.get_mut(id) else {
+            continue;
+        };
         let start = count(page.order.len());
-        page.order.extend_from_slice(&ids[source.ids.start..source.ids.end]);
+        page.order
+            .extend_from_slice(&ids[source.ids.start..source.ids.end]);
         let end = count(page.order.len());
         page.lines.push(Line {
             bbox: source.line.bbox,

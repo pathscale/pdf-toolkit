@@ -314,10 +314,7 @@ fn section(
 fn required<'a>(lexer: &mut Lexer<'a>, base: usize) -> Result<Token<'a>, DocError> {
     match lexer.next() {
         Some(Ok(token)) => Ok(token),
-        _ => Err(malformed(
-            base.saturating_add(lexer.offset()),
-            "xref",
-        )),
+        _ => Err(malformed(base.saturating_add(lexer.offset()), "xref")),
     }
 }
 
@@ -343,12 +340,9 @@ fn table(
             trailer = parse_value(buf, start..buf.len(), None, limits)?;
             break;
         }
-        let start =
-            unsigned(first.bytes()).ok_or_else(|| malformed(offset, "xref subsection"))?;
-        let count =
-            unsigned(required(&mut lexer, offset)?.bytes()).ok_or_else(|| {
-                malformed(offset, "xref subsection")
-            })?;
+        let start = unsigned(first.bytes()).ok_or_else(|| malformed(offset, "xref subsection"))?;
+        let count = unsigned(required(&mut lexer, offset)?.bytes())
+            .ok_or_else(|| malformed(offset, "xref subsection"))?;
         check(LimitKind::Objects, count, u64::from(limits.max_objects))?;
         let end = start
             .checked_add(count)
@@ -358,10 +352,8 @@ fn table(
         check(LimitKind::Objects, end, allowance)?;
         let first_pair = pairs.len();
         for number in start..end {
-            let field =
-                unsigned(required(&mut lexer, offset)?.bytes()).ok_or_else(|| {
-                    malformed(offset, "xref entry")
-                })?;
+            let field = unsigned(required(&mut lexer, offset)?.bytes())
+                .ok_or_else(|| malformed(offset, "xref entry"))?;
             let generation = unsigned(required(&mut lexer, offset)?.bytes())
                 .and_then(|n| u16::try_from(n).ok())
                 .ok_or_else(|| malformed(offset, "xref generation"))?;
@@ -376,8 +368,7 @@ fn table(
                 },
                 _ => return Err(malformed(offset, "xref entry")),
             };
-            let number =
-                u32::try_from(number).map_err(|_| malformed(offset, "xref number"))?;
+            let number = u32::try_from(number).map_err(|_| malformed(offset, "xref number"))?;
             pairs.push((number, entry));
         }
         if first_subsection && start == 1 && count >= 2 {
@@ -385,15 +376,16 @@ fn table(
                 .get(first_pair)
                 .map(|pair| pair.1 == XrefEntry::Free)
                 .unwrap_or(false);
-            let points_to_one = pairs
-                .get(first_pair.saturating_add(1))
-                .and_then(|pair| match pair.1 {
-                    XrefEntry::InUse { offset, .. } => usize::try_from(offset)
-                        .ok()
-                        .and_then(|offset| header_at(buf, offset)),
-                    _ => None,
-                })
-                == Some(ObjectRef::new(1, 0));
+            let points_to_one =
+                pairs
+                    .get(first_pair.saturating_add(1))
+                    .and_then(|pair| match pair.1 {
+                        XrefEntry::InUse { offset, .. } => usize::try_from(offset)
+                            .ok()
+                            .and_then(|offset| header_at(buf, offset)),
+                        _ => None,
+                    })
+                    == Some(ObjectRef::new(1, 0));
             if first_free && points_to_one {
                 for (number, _) in pairs.iter_mut().skip(first_pair) {
                     *number = number.saturating_sub(1);
@@ -412,9 +404,7 @@ fn table(
             u64::from(limits.max_objects),
         )?;
     }
-    let dict = trailer
-        .dict()
-        .ok_or_else(|| malformed(offset, "trailer"))?;
+    let dict = trailer.dict().ok_or_else(|| malformed(offset, "trailer"))?;
     let size = size(dict, limits, offset)?;
     let mut entries = alloc::vec![None; size];
     for (number, entry) in pairs {
@@ -529,8 +519,8 @@ fn stream(
     let raw = trailer
         .stream_raw()
         .ok_or_else(|| malformed(offset, "xref stream data"))?;
-    let decoded = crate::filter::decode(raw, &steps, limits.max_decoded_bytes)
-        .map_err(DocError::from)?;
+    let decoded =
+        crate::filter::decode(raw, &steps, limits.max_decoded_bytes).map_err(DocError::from)?;
     if decoded.image.is_some() || decoded.truncated || decoded.bytes.len() < needed {
         return Err(malformed(offset, "xref stream data"));
     }
@@ -612,4 +602,3 @@ fn integer(dict: DictRef<'_>, key: &[u8]) -> Result<Option<u64>, DocError> {
         .map(Some)
         .ok_or_else(|| malformed(value.span().start, "xref integer"))
 }
-

@@ -2,9 +2,7 @@
 
 use std::io;
 
-use super::{
-    manifest, name, page_truth, reference, ContentTruth, Fixture, House, LETTER,
-};
+use super::{manifest, name, page_truth, reference, ContentTruth, Fixture, House, LETTER};
 use crate::{Value, Writer};
 
 const PASSWORD: &[u8] = b"house-chacha-password";
@@ -18,7 +16,12 @@ pub(super) fn build() -> io::Result<Fixture> {
     let catalog = writer.alloc()?;
     let pages = writer.alloc()?;
     let font = writer.alloc()?;
-    let mut house = House { writer, catalog, pages, font };
+    let mut house = House {
+        writer,
+        catalog,
+        pages,
+        font,
+    };
     let page = house.add_page(
         pages,
         PLAIN,
@@ -36,9 +39,13 @@ pub(super) fn build() -> io::Result<Fixture> {
     )?;
     house.write_base(&[page.id], 1)?;
     let info = house.writer.alloc()?;
-    house.writer.object(info, &Value::Dict(vec![(
-        "Title".to_owned(), Value::Str(TITLE.as_bytes().to_vec()),
-    )]))?;
+    house.writer.object(
+        info,
+        &Value::Dict(vec![(
+            "Title".to_owned(),
+            Value::Str(TITLE.as_bytes().to_vec()),
+        )]),
+    )?;
     house.table(vec![("Info".to_owned(), reference(info))])?;
 
     let mut expected = manifest("1.7", "table", 1, 1, 0, true);
@@ -49,7 +56,12 @@ pub(super) fn build() -> io::Result<Fixture> {
          open.corrupt_ciphertext=malformed\n",
     );
     page_truth(
-        &mut expected, 0, LETTER, LETTER, 0, ContentTruth::Decoded(PLAIN),
+        &mut expected,
+        0,
+        LETTER,
+        LETTER,
+        0,
+        ContentTruth::Decoded(PLAIN),
     );
     expected.push_str(&format!(
         "page.0.content_refusal=none\npage.0.text_norm={TEXT_NORM}\ninfo.title={TITLE}\n",

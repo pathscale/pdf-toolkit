@@ -22,12 +22,7 @@ pub(super) fn decode(
     loop {
         let offset = reader.offset();
         let Some(code) = reader.read(width) else {
-            return finish(
-                output.into_vec(),
-                true,
-                FilterKind::Lzw,
-                input.len(),
-            );
+            return finish(output.into_vec(), true, FilterKind::Lzw, input.len());
         };
 
         if code == CLEAR {
@@ -132,11 +127,7 @@ impl Table {
         Some(())
     }
 
-    fn word<'a>(
-        &self,
-        code: u16,
-        scratch: &'a mut [u8; TABLE_SIZE],
-    ) -> Option<&'a [u8]> {
+    fn word<'a>(&self, code: u16, scratch: &'a mut [u8; TABLE_SIZE]) -> Option<&'a [u8]> {
         let size = usize::from(*self.length.get(usize::from(code))?);
         if size == 0 {
             return None;

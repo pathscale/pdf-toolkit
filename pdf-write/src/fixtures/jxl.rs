@@ -237,8 +237,7 @@ fn soft_mask_ramp(width: u32, height: u32) -> io::Result<Vec<u8>> {
                 .checked_mul(255)
                 .map(|value| value / span)
                 .ok_or_else(|| invalid("JXL fixture mask sample overflow"))?;
-            let sample =
-                u8::try_from(sample).map_err(|_| invalid("JXL fixture mask sample"))?;
+            let sample = u8::try_from(sample).map_err(|_| invalid("JXL fixture mask sample"))?;
             samples.push(sample);
         }
     }
@@ -390,4 +389,3 @@ pub(super) fn cases() -> io::Result<Fixture> {
     }
     Ok(house.fixture(expected))
 }
-

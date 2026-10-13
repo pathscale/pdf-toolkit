@@ -197,10 +197,7 @@ impl<'input> Lexer<'input> {
     }
 
     fn scan_token(&mut self, start: usize) -> Result<(TokenKind, usize), LexError> {
-        let byte = byte_at(self.input, start).ok_or(LexError::InvalidSpan {
-            start,
-            end: start,
-        })?;
+        let byte = byte_at(self.input, start).ok_or(LexError::InvalidSpan { start, end: start })?;
 
         match byte {
             b'/' => self.scan_name(start),
@@ -266,8 +263,8 @@ impl<'input> Lexer<'input> {
 
     fn scan_regular(&mut self, start: usize) -> Result<(TokenKind, usize), LexError> {
         const POW10: [f64; 23] = [
-            1e0, 1e1, 1e2, 1e3, 1e4, 1e5, 1e6, 1e7, 1e8, 1e9, 1e10, 1e11, 1e12, 1e13, 1e14,
-            1e15, 1e16, 1e17, 1e18, 1e19, 1e20, 1e21, 1e22,
+            1e0, 1e1, 1e2, 1e3, 1e4, 1e5, 1e6, 1e7, 1e8, 1e9, 1e10, 1e11, 1e12, 1e13, 1e14, 1e15,
+            1e16, 1e17, 1e18, 1e19, 1e20, 1e21, 1e22,
         ];
         let mut end = start;
         let mut is_number = true;
@@ -291,7 +288,9 @@ impl<'input> Lexer<'input> {
                     b'+' if end == start => {}
                     b'-' if end == start => negative = true,
                     b'0'..=b'9' => {
-                        mantissa = mantissa.wrapping_mul(10).wrapping_add(u64::from(byte - b'0'));
+                        mantissa = mantissa
+                            .wrapping_mul(10)
+                            .wrapping_add(u64::from(byte - b'0'));
                         if mantissa >= (1u64 << 53) {
                             needs_slow = true;
                         }
@@ -368,10 +367,12 @@ impl<'input> Lexer<'input> {
                     }
                 }
                 b'(' => {
-                    depth = depth.checked_add(1).ok_or(LexError::LiteralNestingTooDeep {
-                        offset: end,
-                        limit: self.limits.max_literal_nesting,
-                    })?;
+                    depth = depth
+                        .checked_add(1)
+                        .ok_or(LexError::LiteralNestingTooDeep {
+                            offset: end,
+                            limit: self.limits.max_literal_nesting,
+                        })?;
                     if depth > self.limits.max_literal_nesting {
                         return Err(LexError::LiteralNestingTooDeep {
                             offset: end,
@@ -405,9 +406,7 @@ impl<'input> Lexer<'input> {
             let run = self.input.get(end..window_end).unwrap_or(&[]);
             let stop = run
                 .iter()
-                .position(|byte| {
-                    !matches!(*byte, b'0'..=b'9' | b'a'..=b'f' | b'A'..=b'F')
-                })
+                .position(|byte| !matches!(*byte, b'0'..=b'9' | b'a'..=b'f' | b'A'..=b'F'))
                 .unwrap_or(run.len());
             end = end.saturating_add(stop);
 
@@ -500,9 +499,9 @@ fn has_pair(input: &[u8], offset: usize, byte: u8) -> bool {
 }
 
 fn next_offset(offset: usize, error_offset: usize) -> Result<usize, LexError> {
-    offset
-        .checked_add(1)
-        .ok_or(LexError::OffsetOverflow { offset: error_offset })
+    offset.checked_add(1).ok_or(LexError::OffsetOverflow {
+        offset: error_offset,
+    })
 }
 
 fn check_token_length(start: usize, end: usize, limits: LexerLimits) -> Result<(), LexError> {
@@ -520,10 +519,12 @@ fn is_pdf_whitespace(byte: u8) -> bool {
 }
 
 fn is_delimiter(byte: u8) -> bool {
-    matches!(byte, b'(' | b')' | b'<' | b'>' | b'[' | b']' | b'{' | b'}' | b'/' | b'%')
+    matches!(
+        byte,
+        b'(' | b')' | b'<' | b'>' | b'[' | b']' | b'{' | b'}' | b'/' | b'%'
+    )
 }
 
 fn is_hex_digit(byte: u8) -> bool {
     byte.is_ascii_hexdigit()
 }
-

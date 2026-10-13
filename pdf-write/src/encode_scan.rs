@@ -19,7 +19,8 @@ fn allocation() -> io::Error {
 }
 
 fn add(left: usize, right: usize) -> io::Result<usize> {
-    left.checked_add(right).ok_or_else(|| invalid("scan size overflow"))
+    left.checked_add(right)
+        .ok_or_else(|| invalid("scan size overflow"))
 }
 
 fn append(out: &mut Vec<u8>, bytes: &[u8]) -> io::Result<()> {
@@ -46,7 +47,8 @@ impl<'a> Bitmap<'a> {
         if width == 0 || height == 0 {
             return Err(invalid("scan dimensions must be nonzero"));
         }
-        let requested = u64::from(width).checked_mul(u64::from(height))
+        let requested = u64::from(width)
+            .checked_mul(u64::from(height))
             .ok_or_else(|| invalid("scan pixel count overflow"))?;
         if requested > MAX_SCAN_PIXELS {
             return Err(invalid(&format!(
@@ -56,12 +58,20 @@ impl<'a> Bitmap<'a> {
         let width = usize::try_from(width).map_err(|_| invalid("scan width exceeds usize"))?;
         let height = usize::try_from(height).map_err(|_| invalid("scan height exceeds usize"))?;
         let stride = add(width, 7)? / 8;
-        let length = stride.checked_mul(height)
+        let length = stride
+            .checked_mul(height)
             .ok_or_else(|| invalid("scan bitmap length overflow"))?;
         if data.len() != length {
-            return Err(invalid("scan input must contain exactly the byte-padded rows"));
+            return Err(invalid(
+                "scan input must contain exactly the byte-padded rows",
+            ));
         }
-        Ok(Self { data, width, height, stride })
+        Ok(Self {
+            data,
+            width,
+            height,
+            stride,
+        })
     }
 
     fn pixel(&self, x: i64, y: i64) -> io::Result<u8> {
@@ -71,17 +81,23 @@ impl<'a> Bitmap<'a> {
         if x >= self.width || y >= self.height {
             return Ok(0);
         }
-        let offset = y.checked_mul(self.stride)
+        let offset = y
+            .checked_mul(self.stride)
             .and_then(|value| value.checked_add(x / 8))
             .ok_or_else(|| invalid("scan pixel offset overflow"))?;
-        let byte = self.data.get(offset).copied()
+        let byte = self
+            .data
+            .get(offset)
+            .copied()
             .ok_or_else(|| invalid("scan pixel outside bitmap"))?;
         Ok(u8::from(byte & (0x80u8 >> (x % 8)) != 0))
     }
 }
 
 fn black(row: &[u8], x: usize) -> io::Result<bool> {
-    let byte = row.get(x / 8).copied()
+    let byte = row
+        .get(x / 8)
+        .copied()
         .ok_or_else(|| invalid("fax pixel outside row"))?;
     Ok(byte & (0x80u8 >> (x % 8)) != 0)
 }
@@ -94,14 +110,22 @@ struct Bits {
 
 impl Bits {
     fn new() -> Self {
-        Self { out: Vec::new(), byte: 0, used: 0 }
+        Self {
+            out: Vec::new(),
+            byte: 0,
+            used: 0,
+        }
     }
 
     fn bit(&mut self, value: bool) -> io::Result<()> {
-        self.byte = self.byte.checked_mul(2)
+        self.byte = self
+            .byte
+            .checked_mul(2)
             .and_then(|byte| byte.checked_add(u8::from(value)))
             .ok_or_else(|| invalid("fax bit accumulator overflow"))?;
-        self.used = self.used.checked_add(1)
+        self.used = self
+            .used
+            .checked_add(1)
             .ok_or_else(|| invalid("fax bit count overflow"))?;
         if self.used == 8 {
             append(&mut self.out, &[self.byte])?;
@@ -131,8 +155,11 @@ impl Bits {
 
     fn eol(&mut self, byte_align: bool) -> io::Result<()> {
         if byte_align {
-            let remainder = self.used.checked_add(12)
-                .ok_or_else(|| invalid("fax EOL alignment overflow"))? % 8;
+            let remainder = self
+                .used
+                .checked_add(12)
+                .ok_or_else(|| invalid("fax EOL alignment overflow"))?
+                % 8;
             let fill = 8u8.saturating_sub(remainder) % 8;
             for _ in 0..fill {
                 self.bit(false)?;
@@ -149,73 +176,200 @@ impl Bits {
 
 // T.4 terminating codes, indexed by the run length 0 through 63.
 const WHITE_TERMINATING: [&str; 64] = [
-    "00110101", "000111", "0111", "1000", "1011", "1100", "1110", "1111",
-    "10011", "10100", "00111", "01000", "001000", "000011", "110100", "110101",
-    "101010", "101011", "0100111", "0001100", "0001000", "0010111", "0000011", "0000100",
-    "0101000", "0101011", "0010011", "0100100", "0011000", "00000010", "00000011", "00011010",
-    "00011011", "00010010", "00010011", "00010100", "00010101", "00010110", "00010111", "00101000",
-    "00101001", "00101010", "00101011", "00101100", "00101101", "00000100", "00000101", "00001010",
-    "00001011", "01010010", "01010011", "01010100", "01010101", "00100100", "00100101", "01011000",
-    "01011001", "01011010", "01011011", "01001010", "01001011", "00110010", "00110011", "00110100",
+    "00110101", "000111", "0111", "1000", "1011", "1100", "1110", "1111", "10011", "10100",
+    "00111", "01000", "001000", "000011", "110100", "110101", "101010", "101011", "0100111",
+    "0001100", "0001000", "0010111", "0000011", "0000100", "0101000", "0101011", "0010011",
+    "0100100", "0011000", "00000010", "00000011", "00011010", "00011011", "00010010", "00010011",
+    "00010100", "00010101", "00010110", "00010111", "00101000", "00101001", "00101010", "00101011",
+    "00101100", "00101101", "00000100", "00000101", "00001010", "00001011", "01010010", "01010011",
+    "01010100", "01010101", "00100100", "00100101", "01011000", "01011001", "01011010", "01011011",
+    "01001010", "01001011", "00110010", "00110011", "00110100",
 ];
 
 const BLACK_TERMINATING: [&str; 64] = [
-    "0000110111", "010", "11", "10", "011", "0011", "0010", "00011",
-    "000101", "000100", "0000100", "0000101", "0000111", "00000100", "00000111", "000011000",
-    "0000010111", "0000011000", "0000001000", "00001100111", "00001101000", "00001101100", "00000110111", "00000101000",
-    "00000010111", "00000011000", "000011001010", "000011001011", "000011001100", "000011001101", "000001101000", "000001101001",
-    "000001101010", "000001101011", "000011010010", "000011010011", "000011010100", "000011010101", "000011010110", "000011010111",
-    "000001101100", "000001101101", "000011011010", "000011011011", "000001010100", "000001010101", "000001010110", "000001010111",
-    "000001100100", "000001100101", "000001010010", "000001010011", "000000100100", "000000110111", "000000111000", "000000100111",
-    "000000101000", "000001011000", "000001011001", "000000101011", "000000101100", "000001011010", "000001100110", "000001100111",
+    "0000110111",
+    "010",
+    "11",
+    "10",
+    "011",
+    "0011",
+    "0010",
+    "00011",
+    "000101",
+    "000100",
+    "0000100",
+    "0000101",
+    "0000111",
+    "00000100",
+    "00000111",
+    "000011000",
+    "0000010111",
+    "0000011000",
+    "0000001000",
+    "00001100111",
+    "00001101000",
+    "00001101100",
+    "00000110111",
+    "00000101000",
+    "00000010111",
+    "00000011000",
+    "000011001010",
+    "000011001011",
+    "000011001100",
+    "000011001101",
+    "000001101000",
+    "000001101001",
+    "000001101010",
+    "000001101011",
+    "000011010010",
+    "000011010011",
+    "000011010100",
+    "000011010101",
+    "000011010110",
+    "000011010111",
+    "000001101100",
+    "000001101101",
+    "000011011010",
+    "000011011011",
+    "000001010100",
+    "000001010101",
+    "000001010110",
+    "000001010111",
+    "000001100100",
+    "000001100101",
+    "000001010010",
+    "000001010011",
+    "000000100100",
+    "000000110111",
+    "000000111000",
+    "000000100111",
+    "000000101000",
+    "000001011000",
+    "000001011001",
+    "000000101011",
+    "000000101100",
+    "000001011010",
+    "000001100110",
+    "000001100111",
 ];
 
 // Entries correspond to 64, 128, ... 1728 pixels.
 const WHITE_MAKEUP: [&str; 27] = [
-    "11011", "10010", "010111", "0110111", "00110110", "00110111",
-    "01100100", "01100101", "01101000", "01100111", "011001100", "011001101",
-    "011010010", "011010011", "011010100", "011010101", "011010110", "011010111",
-    "011011000", "011011001", "011011010", "011011011", "010011000", "010011001",
-    "010011010", "011000", "010011011",
+    "11011",
+    "10010",
+    "010111",
+    "0110111",
+    "00110110",
+    "00110111",
+    "01100100",
+    "01100101",
+    "01101000",
+    "01100111",
+    "011001100",
+    "011001101",
+    "011010010",
+    "011010011",
+    "011010100",
+    "011010101",
+    "011010110",
+    "011010111",
+    "011011000",
+    "011011001",
+    "011011010",
+    "011011011",
+    "010011000",
+    "010011001",
+    "010011010",
+    "011000",
+    "010011011",
 ];
 
 const BLACK_MAKEUP: [&str; 27] = [
-    "0000001111", "000011001000", "000011001001", "000001011011",
-    "000000110011", "000000110100", "000000110101", "0000001101100",
-    "0000001101101", "0000001001010", "0000001001011", "0000001001100",
-    "0000001001101", "0000001110010", "0000001110011", "0000001110100",
-    "0000001110101", "0000001110110", "0000001110111", "0000001010010",
-    "0000001010011", "0000001010100", "0000001010101", "0000001011010",
-    "0000001011011", "0000001100100", "0000001100101",
+    "0000001111",
+    "000011001000",
+    "000011001001",
+    "000001011011",
+    "000000110011",
+    "000000110100",
+    "000000110101",
+    "0000001101100",
+    "0000001101101",
+    "0000001001010",
+    "0000001001011",
+    "0000001001100",
+    "0000001001101",
+    "0000001110010",
+    "0000001110011",
+    "0000001110100",
+    "0000001110101",
+    "0000001110110",
+    "0000001110111",
+    "0000001010010",
+    "0000001010011",
+    "0000001010100",
+    "0000001010101",
+    "0000001011010",
+    "0000001011011",
+    "0000001100100",
+    "0000001100101",
 ];
 
 // Shared extended makeup codes, 1792, 1856, ... 2560 pixels.
 const EXTENDED_MAKEUP: [&str; 13] = [
-    "00000001000", "00000001100", "00000001101", "000000010010",
-    "000000010011", "000000010100", "000000010101", "000000010110",
-    "000000010111", "000000011100", "000000011101", "000000011110",
+    "00000001000",
+    "00000001100",
+    "00000001101",
+    "000000010010",
+    "000000010011",
+    "000000010100",
+    "000000010101",
+    "000000010110",
+    "000000010111",
+    "000000011100",
+    "000000011101",
+    "000000011110",
     "000000011111",
 ];
 
 fn run(bits: &mut Bits, mut length: usize, is_black: bool) -> io::Result<()> {
-    let makeup = if is_black { &BLACK_MAKEUP } else { &WHITE_MAKEUP };
-    let terminating = if is_black { &BLACK_TERMINATING } else { &WHITE_TERMINATING };
+    let makeup = if is_black {
+        &BLACK_MAKEUP
+    } else {
+        &WHITE_MAKEUP
+    };
+    let terminating = if is_black {
+        &BLACK_TERMINATING
+    } else {
+        &WHITE_TERMINATING
+    };
     while length >= 64 {
         let units = (length / 64).min(40);
         let code = if units >= 28 {
-            EXTENDED_MAKEUP.get(units.checked_sub(28)
-                .ok_or_else(|| invalid("fax extended makeup index"))?)
+            EXTENDED_MAKEUP.get(
+                units
+                    .checked_sub(28)
+                    .ok_or_else(|| invalid("fax extended makeup index"))?,
+            )
         } else {
-            makeup.get(units.checked_sub(1)
-                .ok_or_else(|| invalid("fax makeup index"))?)
-        }.copied().ok_or_else(|| invalid("fax makeup code missing"))?;
+            makeup.get(
+                units
+                    .checked_sub(1)
+                    .ok_or_else(|| invalid("fax makeup index"))?,
+            )
+        }
+        .copied()
+        .ok_or_else(|| invalid("fax makeup code missing"))?;
         bits.code(code)?;
-        let consumed = units.checked_mul(64)
+        let consumed = units
+            .checked_mul(64)
             .ok_or_else(|| invalid("fax makeup length overflow"))?;
-        length = length.checked_sub(consumed)
+        length = length
+            .checked_sub(consumed)
             .ok_or_else(|| invalid("fax makeup exceeds run"))?;
     }
-    let code = terminating.get(length).copied()
+    let code = terminating
+        .get(length)
+        .copied()
         .ok_or_else(|| invalid("fax terminating code missing"))?;
     bits.code(code)
 }
@@ -246,7 +400,8 @@ pub fn ccitt_g3(
             while end < bitmap.width && black(row, end)? == is_black {
                 end = add(end, 1)?;
             }
-            let length = end.checked_sub(start)
+            let length = end
+                .checked_sub(start)
                 .ok_or_else(|| invalid("fax run moves backwards"))?;
             run(&mut bits, length, is_black)?;
             start = end;
@@ -284,7 +439,10 @@ fn changes(row: &[u8], width: usize, out: &mut Vec<usize>) -> io::Result<()> {
 }
 
 fn position(changes: &[usize], index: usize) -> io::Result<usize> {
-    changes.get(index).copied().ok_or_else(|| invalid("fax transition missing"))
+    changes
+        .get(index)
+        .copied()
+        .ok_or_else(|| invalid("fax transition missing"))
 }
 
 fn vertical(delta: i64) -> io::Result<&'static str> {
@@ -302,12 +460,7 @@ fn vertical(delta: i64) -> io::Result<&'static str> {
 
 /// T.6 Group 4 coding for PDF K=-1, without row alignment.
 /// The initial reference row is white; EOFB is optional when Rows delimits data.
-pub fn ccitt_g4(
-    data: &[u8],
-    width: u32,
-    height: u32,
-    eofb: bool,
-) -> io::Result<Vec<u8>> {
+pub fn ccitt_g4(data: &[u8], width: u32, height: u32, eofb: bool) -> io::Result<Vec<u8>> {
     let bitmap = Bitmap::new(data, width, height)?;
     let mut current = change_storage(bitmap.width)?;
     let mut reference = change_storage(bitmap.width)?;
@@ -346,7 +499,8 @@ pub fn ccitt_g4(
             } else {
                 let a = i64::try_from(a1).map_err(|_| invalid("fax transition exceeds i64"))?;
                 let b = i64::try_from(b1).map_err(|_| invalid("fax transition exceeds i64"))?;
-                let delta = a.checked_sub(b)
+                let delta = a
+                    .checked_sub(b)
                     .ok_or_else(|| invalid("fax displacement overflow"))?;
                 if (-3..=3).contains(&delta) {
                     if a1 < a0 {
@@ -362,10 +516,18 @@ pub fn ccitt_g4(
                         return Err(invalid("fax horizontal does not advance"));
                     }
                     bits.code("001")?;
-                    run(&mut bits, a1.checked_sub(a0)
-                        .ok_or_else(|| invalid("fax first run moves backwards"))?, is_black)?;
-                    run(&mut bits, a2.checked_sub(a1)
-                        .ok_or_else(|| invalid("fax second run moves backwards"))?, !is_black)?;
+                    run(
+                        &mut bits,
+                        a1.checked_sub(a0)
+                            .ok_or_else(|| invalid("fax first run moves backwards"))?,
+                        is_black,
+                    )?;
+                    run(
+                        &mut bits,
+                        a2.checked_sub(a1)
+                            .ok_or_else(|| invalid("fax second run moves backwards"))?,
+                        !is_black,
+                    )?;
                     a0 = a2;
                     a_index = add(a_index, 2)?;
                 }
@@ -445,8 +607,12 @@ impl Mq {
     fn new() -> Self {
         // The virtual byte before BPST is zero and is never emitted.
         Self {
-            a: 0x8000, c: 0, ct: 12, pending: 0,
-            live: false, out: Vec::new(),
+            a: 0x8000,
+            c: 0,
+            ct: 12,
+            pending: 0,
+            live: false,
+            out: Vec::new(),
         }
     }
 
@@ -454,7 +620,9 @@ impl Mq {
         let stuffed = if self.pending == 0xff {
             true
         } else if self.c & 0x0800_0000 != 0 {
-            self.pending = self.pending.checked_add(1)
+            self.pending = self
+                .pending
+                .checked_add(1)
                 .ok_or_else(|| invalid("MQ carry overflow"))?;
             self.c &= 0x07ff_ffff;
             self.pending == 0xff
@@ -466,8 +634,8 @@ impl Mq {
         }
         self.live = true;
         let shift = if stuffed { 20 } else { 19 };
-        self.pending = u8::try_from(self.c >> shift)
-            .map_err(|_| invalid("MQ output byte overflow"))?;
+        self.pending =
+            u8::try_from(self.c >> shift).map_err(|_| invalid("MQ output byte overflow"))?;
         self.c &= if stuffed { 0x000f_ffff } else { 0x0007_ffff };
         self.ct = if stuffed { 7 } else { 8 };
         Ok(())
@@ -478,11 +646,15 @@ impl Mq {
             if self.a & 0x8000 != 0 {
                 return Ok(());
             }
-            self.a = self.a.checked_mul(2)
+            self.a = self
+                .a
+                .checked_mul(2)
                 .ok_or_else(|| invalid("MQ interval overflow"))?;
             // C is a modular coding register, not an input size or offset.
             self.c = self.c.wrapping_shl(1);
-            self.ct = self.ct.checked_sub(1)
+            self.ct = self
+                .ct
+                .checked_sub(1)
                 .ok_or_else(|| invalid("MQ bit counter underflow"))?;
             if self.ct == 0 {
                 self.byte_out()?;
@@ -501,10 +673,14 @@ impl Mq {
         }
         let index = usize::from(*context >> 1);
         let mps = *context & 1;
-        let (qe, nmps, nlps, switch) = MQ_STATES.get(index).copied()
+        let (qe, nmps, nlps, switch) = MQ_STATES
+            .get(index)
+            .copied()
             .ok_or_else(|| invalid("MQ probability state outside table"))?;
         let qe = u32::from(qe);
-        self.a = self.a.checked_sub(qe)
+        self.a = self
+            .a
+            .checked_sub(qe)
             .ok_or_else(|| invalid("MQ interval underflow"))?;
         if decision == mps {
             if self.a & 0x8000 != 0 {
@@ -531,11 +707,15 @@ impl Mq {
 
     fn finish(mut self) -> io::Result<Vec<u8>> {
         // SETBITS, then the two BYTEOUT operations of Annex E FLUSH.
-        let upper = self.c.checked_add(self.a)
+        let upper = self
+            .c
+            .checked_add(self.a)
             .ok_or_else(|| invalid("MQ termination interval overflow"))?;
         self.c |= 0xffff;
         if self.c >= upper {
-            self.c = self.c.checked_sub(0x8000)
+            self.c = self
+                .c
+                .checked_sub(0x8000)
                 .ok_or_else(|| invalid("MQ termination interval underflow"))?;
         }
         self.c = self.c.wrapping_shl(u32::from(self.ct));
@@ -553,15 +733,29 @@ impl Mq {
 
 // T.88 template 0 with its nominal adaptive pixels, in context bit order.
 const TEMPLATE_0: [(i64, i64); 16] = [
-    (-1, 0), (-2, 0), (-3, 0), (-4, 0),
-    (3, -1), (2, -1), (1, -1), (0, -1),
-    (-1, -1), (-2, -1), (-3, -1),
-    (2, -2), (1, -2), (0, -2), (-1, -2), (-2, -2),
+    (-1, 0),
+    (-2, 0),
+    (-3, 0),
+    (-4, 0),
+    (3, -1),
+    (2, -1),
+    (1, -1),
+    (0, -1),
+    (-1, -1),
+    (-2, -1),
+    (-3, -1),
+    (2, -2),
+    (1, -2),
+    (0, -2),
+    (-1, -2),
+    (-2, -2),
 ];
 
 fn generic(bitmap: &Bitmap<'_>) -> io::Result<Vec<u8>> {
     let mut contexts = Vec::new();
-    contexts.try_reserve_exact(GENERIC_CONTEXTS).map_err(|_| allocation())?;
+    contexts
+        .try_reserve_exact(GENERIC_CONTEXTS)
+        .map_err(|_| allocation())?;
     contexts.resize(GENERIC_CONTEXTS, 0u8);
     let mut mq = Mq::new();
     for y in 0..bitmap.height {
@@ -570,14 +764,20 @@ fn generic(bitmap: &Bitmap<'_>) -> io::Result<Vec<u8>> {
             let x = i64::try_from(x).map_err(|_| invalid("JBIG2 x exceeds i64"))?;
             let mut index = 0usize;
             for (bit, (dx, dy)) in TEMPLATE_0.iter().copied().enumerate() {
-                let sx = x.checked_add(dx).ok_or_else(|| invalid("JBIG2 context x overflow"))?;
-                let sy = y.checked_add(dy).ok_or_else(|| invalid("JBIG2 context y overflow"))?;
+                let sx = x
+                    .checked_add(dx)
+                    .ok_or_else(|| invalid("JBIG2 context x overflow"))?;
+                let sy = y
+                    .checked_add(dy)
+                    .ok_or_else(|| invalid("JBIG2 context y overflow"))?;
                 let shift = u32::try_from(bit).map_err(|_| invalid("JBIG2 context bit"))?;
-                let sample = usize::from(bitmap.pixel(sx, sy)?).checked_shl(shift)
+                let sample = usize::from(bitmap.pixel(sx, sy)?)
+                    .checked_shl(shift)
                     .ok_or_else(|| invalid("JBIG2 context shift overflow"))?;
                 index |= sample;
             }
-            let context = contexts.get_mut(index)
+            let context = contexts
+                .get_mut(index)
                 .ok_or_else(|| invalid("JBIG2 context outside table"))?;
             mq.bit(context, bitmap.pixel(x, y)?)?;
         }
@@ -589,14 +789,9 @@ fn number(out: &mut Vec<u8>, value: u32) -> io::Result<()> {
     append(out, &value.to_be_bytes())
 }
 
-fn segment(
-    out: &mut Vec<u8>,
-    id: u32,
-    kind: u8,
-    payload: &[u8],
-) -> io::Result<()> {
-    let length = u32::try_from(payload.len())
-        .map_err(|_| invalid("JBIG2 segment length exceeds u32"))?;
+fn segment(out: &mut Vec<u8>, id: u32, kind: u8, payload: &[u8]) -> io::Result<()> {
+    let length =
+        u32::try_from(payload.len()).map_err(|_| invalid("JBIG2 segment length exceeds u32"))?;
     number(out, id)?;
     // Short page association 1, zero references, no retention or deferred flag.
     append(out, &[kind, 0, 1])?;
@@ -632,4 +827,3 @@ pub fn jbig2(data: &[u8], width: u32, height: u32) -> io::Result<Vec<u8>> {
     segment(&mut out, 2, 49, &[])?;
     Ok(out)
 }
-

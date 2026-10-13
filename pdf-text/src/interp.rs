@@ -6,8 +6,8 @@ use pdf_core::pages::Page;
 use pdf_core::{DictRef, DocError, LimitKind, Limits, Object, ObjectRef, Resolver, Value, Warning};
 
 use crate::content::{
-    check, container_body, decode_name, decode_string, inline_number, name_eq, refusal,
-    Content, ContentCursor, Op, Operand, Values,
+    check, container_body, decode_name, decode_string, inline_number, name_eq, refusal, Content,
+    ContentCursor, Op, Operand, Values,
 };
 use crate::data::encodings::{PDF_DOC, WIN_ANSI};
 use crate::font::{Font, FontCache, FontFlags, FontKind, Glyph, GlyphText};
@@ -123,7 +123,10 @@ struct GraphicsState {
 
 impl Default for GraphicsState {
     fn default() -> Self {
-        Self { ctm: Matrix::IDENTITY, text: TextState::default() }
+        Self {
+            ctm: Matrix::IDENTITY,
+            text: TextState::default(),
+        }
     }
 }
 
@@ -217,12 +220,20 @@ pub fn page_text_cached(
     };
     push(
         &mut interpreter.output.fonts,
-        FontInfo { name: String::from("Fallback"), flags: FontFlags::default() },
+        FontInfo {
+            name: String::from("Fallback"),
+            flags: FontFlags::default(),
+        },
         limits,
     )?;
     push(
         &mut interpreter.fonts,
-        CachedFont { resources: None, name: Vec::new(), font: None, info: 0 },
+        CachedFont {
+            resources: None,
+            name: Vec::new(),
+            font: None,
+            info: 0,
+        },
         limits,
     )?;
 
@@ -263,12 +274,7 @@ pub fn page_text_cached(
                         Ok(Some(op)) => op,
                         Ok(None) => break,
                         Err(error) => {
-                            recover(
-                                resolver,
-                                error,
-                                Some(frame.id),
-                                "content_stream_failed",
-                            )?;
+                            recover(resolver, error, Some(frame.id), "content_stream_failed")?;
                             break;
                         }
                     };
@@ -292,12 +298,7 @@ pub fn page_text_cached(
                         }
                         Ok(None) => {}
                         Err(error) => {
-                            recover(
-                                resolver,
-                                error,
-                                Some(frame.id),
-                                "content_operator_failed",
-                            )?;
+                            recover(resolver, error, Some(frame.id), "content_operator_failed")?;
                         }
                     }
                 }
@@ -313,20 +314,16 @@ pub fn page_text_cached(
 
             if let Some(object) = invocation {
                 let depth = frames.len().saturating_add(1);
-                let cycle = object.id().map(|id| {
-                    id == frame.id || frames.iter().any(|ancestor| ancestor.id == id)
-                }).unwrap_or(false);
+                let cycle = object
+                    .id()
+                    .map(|id| id == frame.id || frames.iter().any(|ancestor| ancestor.id == id))
+                    .unwrap_or(false);
                 if cycle {
                     warn(resolver, object.id(), "form_cycle");
                     push(&mut frames, frame, limits)?;
                     continue;
                 }
-                let child = interpreter.form(
-                    resolver,
-                    object,
-                    frame.resources.as_ref(),
-                    depth,
-                );
+                let child = interpreter.form(resolver, object, frame.resources.as_ref(), depth);
                 match child {
                     Ok(Some(child)) => {
                         push(&mut frames, frame, limits)?;
@@ -601,11 +598,9 @@ impl Interpreter<'_> {
                 }
             }
             b"\"" => {
-                if let [
-                    Operand::Number(word),
-                    Operand::Number(character),
-                    Operand::String(raw),
-                ] = operands {
+                if let [Operand::Number(word), Operand::Number(character), Operand::String(raw)] =
+                    operands
+                {
                     self.graphics.text.word_space = *word;
                     self.graphics.text.character_space = *character;
                     self.next_line();
@@ -632,7 +627,10 @@ impl Interpreter<'_> {
                 )?;
                 push(
                     &mut self.marked,
-                    Marked { start: self.output.glyphs.len(), actual },
+                    Marked {
+                        start: self.output.glyphs.len(),
+                        actual,
+                    },
                     self.limits,
                 )?;
             }
@@ -701,7 +699,9 @@ impl Interpreter<'_> {
     }
 
     fn adjust(&mut self, value: f64) {
-        let vertical = self.fonts.get(self.graphics.text.font)
+        let vertical = self
+            .fonts
+            .get(self.graphics.text.font)
             .and_then(|entry| entry.font.as_ref())
             .map(Font::is_vertical)
             .unwrap_or(false);
@@ -722,7 +722,9 @@ impl Interpreter<'_> {
         if !self.in_text {
             return Ok(());
         }
-        let (font, info) = self.fonts.get(self.graphics.text.font)
+        let (font, info) = self
+            .fonts
+            .get(self.graphics.text.font)
             .map(|entry| (entry.font.clone(), entry.info))
             .unwrap_or((None, 0));
         // Temporarily move the reusable buffer so glyph emission can borrow self.
@@ -782,12 +784,19 @@ impl Interpreter<'_> {
     ) -> Result<(), DocError> {
         let text = self.graphics.text;
         let spaces = text.character_space
-            + if glyph.word_space { text.word_space } else { 0.0 };
+            + if glyph.word_space {
+                text.word_space
+            } else {
+                0.0
+            };
         // Font::glyphs has already applied Type3 FontMatrix to glyph.width.
         let (dx, dy) = if vertical {
             (0.0, -text.size + spaces)
         } else {
-            ((glyph.width * text.size + spaces) * text.horizontal_scale, 0.0)
+            (
+                (glyph.width * text.size + spaces) * text.horizontal_scale,
+                0.0,
+            )
         };
         let transform = self.text_matrix.then(self.graphics.ctm).then(self.display);
         let origin = transform.point(
@@ -859,7 +868,12 @@ impl Interpreter<'_> {
             transform.point(0.0, 1.0),
             transform.point(1.0, 1.0),
         ];
-        let mut bounds = [f64::INFINITY, f64::INFINITY, f64::NEG_INFINITY, f64::NEG_INFINITY];
+        let mut bounds = [
+            f64::INFINITY,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            f64::NEG_INFINITY,
+        ];
         for [x, y] in points {
             if !x.is_finite() || !y.is_finite() {
                 warn(resolver, id, "image_geometry_failed");
@@ -905,8 +919,13 @@ impl Interpreter<'_> {
         let Some(first) = self.output.glyphs.get(marked.start).copied() else {
             return Ok(());
         };
-        let width = self.output.glyphs.get(marked.start..).unwrap_or(&[])
-            .iter().fold(0.0f64, |sum, glyph| sum + f64::from(glyph.width));
+        let width = self
+            .output
+            .glyphs
+            .get(marked.start..)
+            .unwrap_or(&[])
+            .iter()
+            .fold(0.0f64, |sum, glyph| sum + f64::from(glyph.width));
         let width = finite_f32(width).unwrap_or_else(|| {
             warn(resolver, id, "actualtext_geometry_failed");
             0.0
@@ -942,14 +961,17 @@ fn load_font(
     font_cache: &mut FontCache,
     limits: Limits,
 ) -> Result<usize, DocError> {
-    if let Some(index) = cache.iter().position(|entry| {
-        entry.name == name && same_resources(entry.resources.as_ref(), resources)
-    }) {
+    if let Some(index) = cache
+        .iter()
+        .position(|entry| entry.name == name && same_resources(entry.resources.as_ref(), resources))
+    {
         return Ok(index);
     }
     let loaded = (|| {
-        let value = resource(resolver, resources, b"Font", name)?
-            .ok_or(DocError::WrongType { id: None, expected: "font resource" })?;
+        let value = resource(resolver, resources, b"Font", name)?.ok_or(DocError::WrongType {
+            id: None,
+            expected: "font resource",
+        })?;
         font_cache.load(resolver, &value)
     })();
     let font = match loaded {
@@ -962,7 +984,11 @@ fn load_font(
     let info_name = font.as_ref().map(Font::base_name).unwrap_or(name);
     let flags = font.as_ref().map(Font::flags).unwrap_or_default();
     let info = u16::try_from(infos.len()).map_err(|_| {
-        refusal(LimitKind::Objects, infos.len().saturating_add(1) as u64, 65_536)
+        refusal(
+            LimitKind::Objects,
+            infos.len().saturating_add(1) as u64,
+            65_536,
+        )
     })?;
     let mut owned_name = Vec::new();
     owned_name.try_reserve_exact(name.len()).map_err(|_| {
@@ -974,11 +1000,23 @@ fn load_font(
     })?;
     owned_name.extend_from_slice(name);
     let info_name = String::from_utf8_lossy(info_name).into_owned();
-    push(infos, FontInfo { name: info_name, flags }, limits)?;
+    push(
+        infos,
+        FontInfo {
+            name: info_name,
+            flags,
+        },
+        limits,
+    )?;
     let index = cache.len();
     push(
         cache,
-        CachedFont { resources: resources.cloned(), name: owned_name, font, info },
+        CachedFont {
+            resources: resources.cloned(),
+            name: owned_name,
+            font,
+            info,
+        },
         limits,
     )?;
     Ok(index)
@@ -1057,9 +1095,8 @@ fn actual_text(
             if actual.get().as_str().is_none() {
                 return Ok(None);
             }
-            let bytes = crate::content::decode_object_string(
-                resolver, &actual, limits.max_decoded_bytes,
-            )?;
+            let bytes =
+                crate::content::decode_object_string(resolver, &actual, limits.max_decoded_bytes)?;
             make_actual_bytes(&bytes, limits).map(Some)
         }
         _ => Ok(None),
@@ -1117,7 +1154,11 @@ fn append_actual(
     character: char,
     limits: Limits,
 ) -> Result<(), DocError> {
-    if result.last_mut().map(|text| text.push(character)).unwrap_or(false) {
+    if result
+        .last_mut()
+        .map(|text| text.push(character))
+        .unwrap_or(false)
+    {
         return Ok(());
     }
     push(result, GlyphText::from_char(character), limits)
@@ -1140,7 +1181,10 @@ fn read_matrix(resolver: &mut Resolver<'_>, dict: DictRef<'_>) -> Result<Matrix,
     let mut matrix = [0.0; 6];
     for (slot, component) in matrix.iter_mut().zip(array.iter()) {
         let component = resolver.resolve(component)?;
-        *slot = component.get().as_f64().filter(|number| number.is_finite())
+        *slot = component
+            .get()
+            .as_f64()
+            .filter(|number| number.is_finite())
             .ok_or(DocError::WrongType {
                 id: value.object().id(),
                 expected: "Form Matrix number",
@@ -1154,13 +1198,15 @@ fn read_number(
     dict: DictRef<'_>,
     key: &[u8],
 ) -> Result<Option<f64>, DocError> {
-    Ok(resolver.resolve_dict_key(dict, key)?
+    Ok(resolver
+        .resolve_dict_key(dict, key)?
         .and_then(|value| value.get().as_f64())
         .filter(|number| number.is_finite()))
 }
 
 fn dimension(value: Option<f64>) -> u32 {
-    value.filter(|number| *number >= 0.0)
+    value
+        .filter(|number| *number >= 0.0)
         .map(|number| number.min(f64::from(u32::MAX)) as u32)
         .unwrap_or(0)
 }
@@ -1187,9 +1233,14 @@ fn numbers<const N: usize>(operands: &[Operand<'_>]) -> Option<[f64; N]> {
 pub fn display_transform(page: &Page) -> impl Fn(f32, f32) -> (f32, f32) + 'static {
     let matrix = display_matrix(page).ok().map(|(matrix, _, _)| matrix);
     move |x, y| {
-        let Some(matrix) = matrix else { return (f32::NAN, f32::NAN) };
+        let Some(matrix) = matrix else {
+            return (f32::NAN, f32::NAN);
+        };
         let [x, y] = matrix.point(f64::from(x), f64::from(y));
-        (finite_f32(x).unwrap_or(f32::NAN), finite_f32(y).unwrap_or(f32::NAN))
+        (
+            finite_f32(x).unwrap_or(f32::NAN),
+            finite_f32(y).unwrap_or(f32::NAN),
+        )
     }
 }
 
@@ -1213,9 +1264,14 @@ pub fn user_space_transform(page: &Page) -> impl Fn(f32, f32) -> (f32, f32) + 's
         ]))
     });
     move |x, y| {
-        let Some(matrix) = inverse else { return (f32::NAN, f32::NAN) };
+        let Some(matrix) = inverse else {
+            return (f32::NAN, f32::NAN);
+        };
         let [x, y] = matrix.point(f64::from(x), f64::from(y));
-        (finite_f32(x).unwrap_or(f32::NAN), finite_f32(y).unwrap_or(f32::NAN))
+        (
+            finite_f32(x).unwrap_or(f32::NAN),
+            finite_f32(y).unwrap_or(f32::NAN),
+        )
     }
 }
 
@@ -1229,16 +1285,19 @@ pub fn user_space_rect(page: &Page, bbox: [f32; 4]) -> [f32; 4] {
 }
 
 pub(crate) fn display_dimensions(page: &Page) -> (f32, f32) {
-    display_matrix(page).map(|(_, width, height)| (width, height)).unwrap_or((0.0, 0.0))
+    display_matrix(page)
+        .map(|(_, width, height)| (width, height))
+        .unwrap_or((0.0, 0.0))
 }
 
 fn display_matrix(page: &Page) -> Result<(Matrix, f32, f32), DocError> {
     let [x0, y0, x1, y1] = page.crop_box;
     let unit = page.user_unit;
-    if !unit.is_finite() || unit <= 0.0
-        || !page.crop_box.iter().all(|number| number.is_finite())
-    {
-        return Err(DocError::Malformed { offset: 0, what: "page_display_geometry" });
+    if !unit.is_finite() || unit <= 0.0 || !page.crop_box.iter().all(|number| number.is_finite()) {
+        return Err(DocError::Malformed {
+            offset: 0,
+            what: "page_display_geometry",
+        });
     }
     let width = (x1 - x0).max(0.0) * unit;
     let height = (y1 - y0).max(0.0) * unit;
@@ -1273,7 +1332,10 @@ fn display_matrix(page: &Page) -> Result<(Matrix, f32, f32), DocError> {
         what: "page_display_geometry",
     })?;
     if !matrix.0.iter().all(|number| number.is_finite()) {
-        return Err(DocError::Malformed { offset: 0, what: "page_display_geometry" });
+        return Err(DocError::Malformed {
+            offset: 0,
+            what: "page_display_geometry",
+        });
     }
     Ok((matrix, width, height))
 }
@@ -1333,7 +1395,11 @@ fn angle(x: f64, y: f64) -> i16 {
         radians = -radians;
     }
     let degrees = radians * (180.0 / core::f64::consts::PI);
-    let rounded = if degrees >= 0.0 { degrees + 0.5 } else { degrees - 0.5 };
+    let rounded = if degrees >= 0.0 {
+        degrees + 0.5
+    } else {
+        degrees - 0.5
+    };
     rounded as i16
 }
 
@@ -1359,12 +1425,16 @@ fn atan_unit(value: f64) -> f64 {
 }
 
 fn push<T>(values: &mut Vec<T>, value: T, limits: Limits) -> Result<(), DocError> {
-    let requested = (values.len().saturating_add(1) as u64)
-        .saturating_mul(core::mem::size_of::<T>() as u64);
+    let requested =
+        (values.len().saturating_add(1) as u64).saturating_mul(core::mem::size_of::<T>() as u64);
     let maximum = limits.max_total_decoded_bytes;
     check(LimitKind::TotalDecodedBytes, requested, maximum)?;
     values.try_reserve(1).map_err(|_| {
-        refusal(LimitKind::TotalDecodedBytes, maximum.saturating_add(1), maximum)
+        refusal(
+            LimitKind::TotalDecodedBytes,
+            maximum.saturating_add(1),
+            maximum,
+        )
     })?;
     values.push(value);
     Ok(())
@@ -1386,6 +1456,9 @@ fn recover(
 }
 
 fn warn(resolver: &mut Resolver<'_>, object: Option<ObjectRef>, what: &'static str) {
-    resolver.warn(Warning { offset: None, object, what });
+    resolver.warn(Warning {
+        offset: None,
+        object,
+        what,
+    });
 }
-

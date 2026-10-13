@@ -10,10 +10,20 @@ pub enum DocError {
     Source(SourceError),
     Refused(Refusal),
     Encrypted,
-    Unsupported { feature: &'static str },
-    Malformed { offset: u64, what: &'static str },
-    MissingObject { id: ObjectRef },
-    WrongType { id: Option<ObjectRef>, expected: &'static str },
+    Unsupported {
+        feature: &'static str,
+    },
+    Malformed {
+        offset: u64,
+        what: &'static str,
+    },
+    MissingObject {
+        id: ObjectRef,
+    },
+    WrongType {
+        id: Option<ObjectRef>,
+        expected: &'static str,
+    },
     Filter(FilterError),
 }
 
@@ -69,7 +79,9 @@ impl fmt::Display for DocError {
                 refusal.maximum
             ),
             Self::Encrypted => formatter.write_str("encrypted PDF stream"),
-            Self::Unsupported { feature } => write!(formatter, "unsupported PDF feature: {feature}"),
+            Self::Unsupported { feature } => {
+                write!(formatter, "unsupported PDF feature: {feature}")
+            }
             Self::Malformed { offset, what } => {
                 write!(formatter, "malformed {what} at byte {offset}")
             }
@@ -124,6 +136,8 @@ pub struct Warning {
 }
 
 pub(crate) fn malformed(offset: usize, what: &'static str) -> DocError {
-    DocError::Malformed { offset: offset as u64, what }
+    DocError::Malformed {
+        offset: offset as u64,
+        what,
+    }
 }
-

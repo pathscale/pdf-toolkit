@@ -79,11 +79,17 @@ fn corrupt(offset: usize) -> FilterError {
 }
 
 fn unsupported() -> FilterError {
-    FilterError::Unsupported { filter: FilterKind::Jbig2 }
+    FilterError::Unsupported {
+        filter: FilterKind::Jbig2,
+    }
 }
 
 fn refusal(limit: LimitKind, requested: u64, maximum: u64) -> FilterError {
-    FilterError::Refused(Refusal { limit, requested, maximum })
+    FilterError::Refused(Refusal {
+        limit,
+        requested,
+        maximum,
+    })
 }
 
 fn check(limit: LimitKind, requested: u64, maximum: u64) -> Result<(), FilterError> {
@@ -107,25 +113,30 @@ impl Budget {
         Self {
             max_pixels,
             bytes: 0,
-            max_bytes: max_pixels.saturating_mul(8)
+            max_bytes: max_pixels
+                .saturating_mul(8)
                 .saturating_add(4 << 20)
                 .min(MAX_CODEC_BYTES)
                 .min(isize::MAX as u64),
             work: 0,
-            max_work: max_pixels.saturating_mul(32)
+            max_work: max_pixels
+                .saturating_mul(32)
                 .saturating_add(4_000_000)
                 .min(MAX_CODEC_WORK),
         }
     }
 
     fn pixels(&self, width: u32, height: u32) -> Result<(), FilterError> {
-        let pixels = u64::from(width).checked_mul(u64::from(height))
+        let pixels = u64::from(width)
+            .checked_mul(u64::from(height))
             .ok_or_else(|| refusal(LimitKind::ImagePixels, u64::MAX, self.max_pixels))?;
         check(LimitKind::ImagePixels, pixels, self.max_pixels)
     }
 
     fn charge(&mut self, bytes: u64) -> Result<(), FilterError> {
-        let requested = self.bytes.checked_add(bytes)
+        let requested = self
+            .bytes
+            .checked_add(bytes)
             .ok_or_else(|| refusal(LimitKind::CodecBytes, u64::MAX, self.max_bytes))?;
         check(LimitKind::CodecBytes, requested, self.max_bytes)?;
         self.bytes = requested;
@@ -133,7 +144,9 @@ impl Budget {
     }
 
     fn step(&mut self, count: u64) -> Result<(), FilterError> {
-        let requested = self.work.checked_add(count)
+        let requested = self
+            .work
+            .checked_add(count)
             .ok_or_else(|| refusal(LimitKind::CodecWork, u64::MAX, self.max_work))?;
         check(LimitKind::CodecWork, requested, self.max_work)?;
         self.work = requested;
@@ -149,11 +162,14 @@ impl Budget {
     }
 
     fn vector<T>(&mut self, count: usize) -> Result<Vec<T>, FilterError> {
-        let bytes = count.checked_mul(size_of::<T>())
+        let bytes = count
+            .checked_mul(size_of::<T>())
             .ok_or_else(|| self.allocation_error())?;
         self.charge(bytes as u64)?;
         let mut result = Vec::new();
-        result.try_reserve_exact(count).map_err(|_| self.allocation_error())?;
+        result
+            .try_reserve_exact(count)
+            .map_err(|_| self.allocation_error())?;
         Ok(result)
     }
 
@@ -161,14 +177,18 @@ impl Budget {
         if vector.len() < vector.capacity() {
             return Ok(());
         }
-        let needed = vector.len().checked_add(1)
+        let needed = vector
+            .len()
+            .checked_add(1)
             .ok_or_else(|| self.allocation_error())?;
         let capacity = vector.capacity().saturating_mul(2).max(8).max(needed);
-        let extra = capacity.checked_sub(vector.capacity())
+        let extra = capacity
+            .checked_sub(vector.capacity())
             .and_then(|count| count.checked_mul(size_of::<T>()))
             .ok_or_else(|| self.allocation_error())?;
         self.charge(extra as u64)?;
-        vector.try_reserve_exact(capacity.saturating_sub(vector.len()))
+        vector
+            .try_reserve_exact(capacity.saturating_sub(vector.len()))
             .map_err(|_| self.allocation_error())
     }
 
@@ -179,39 +199,35 @@ impl Budget {
         Ok(bytes)
     }
 
-    fn bitmap(
-        &mut self,
-        width: u32,
-        height: u32,
-        black: bool,
-    ) -> Result<Bitmap, FilterError> {
+    fn bitmap(&mut self, width: u32, height: u32, black: bool) -> Result<Bitmap, FilterError> {
         self.pixels(width, height)?;
         let size = bitmap_size(width, height)?;
         let mut data = self.zeros(size)?;
         if black {
             data.fill(255);
         }
-        let mut bitmap = Bitmap { width, height, data };
+        let mut bitmap = Bitmap {
+            width,
+            height,
+            data,
+        };
         bitmap.clear_padding()?;
         Ok(bitmap)
     }
 
     fn shared(&mut self, bitmap: Bitmap) -> Result<Arc<Bitmap>, FilterError> {
-        self.charge(
-            (size_of::<Bitmap>() as u64)
-                .saturating_add((2 * size_of::<usize>()) as u64),
-        )?;
+        self.charge((size_of::<Bitmap>() as u64).saturating_add((2 * size_of::<usize>()) as u64))?;
         Ok(Arc::new(bitmap))
     }
 }
 
 fn stride(width: u32) -> Result<usize, FilterError> {
-    usize::try_from((u64::from(width) + 7) / 8)
-        .map_err(|_| corrupt(0))
+    usize::try_from((u64::from(width) + 7) / 8).map_err(|_| corrupt(0))
 }
 
 fn bitmap_size(width: u32, height: u32) -> Result<usize, FilterError> {
-    stride(width)?.checked_mul(usize::try_from(height).map_err(|_| corrupt(0))?)
+    stride(width)?
+        .checked_mul(usize::try_from(height).map_err(|_| corrupt(0))?)
         .filter(|&size| size <= isize::MAX as usize)
         .ok_or_else(|| corrupt(0))
 }
@@ -224,10 +240,13 @@ impl Bitmap {
         if x >= self.width || y >= self.height {
             return 0;
         }
-        let offset = stride(self.width).ok()
+        let offset = stride(self.width)
+            .ok()
             .and_then(|row| usize::try_from(y).ok()?.checked_mul(row))
             .and_then(|row| row.checked_add(usize::try_from(x / 8).ok()?));
-        offset.and_then(|offset| self.data.get(offset)).copied()
+        offset
+            .and_then(|offset| self.data.get(offset))
+            .copied()
             .map(|byte| (byte >> (7 - (x & 7))) & 1)
             .unwrap_or(0)
     }
@@ -236,7 +255,8 @@ impl Bitmap {
         if x >= self.width || y >= self.height {
             return Err(corrupt(0));
         }
-        let offset = usize::try_from(y).ok()
+        let offset = usize::try_from(y)
+            .ok()
             .and_then(|y| y.checked_mul(stride(self.width).ok()?))
             .and_then(|row| row.checked_add(usize::try_from(x / 8).ok()?))
             .ok_or_else(|| corrupt(0))?;
@@ -270,11 +290,16 @@ impl Bitmap {
         }
         let row_bytes = stride(self.width)?;
         budget.step(row_bytes as u64)?;
-        let destination = usize::try_from(y).ok()
+        let destination = usize::try_from(y)
+            .ok()
             .and_then(|y| y.checked_mul(row_bytes))
             .ok_or_else(|| corrupt(0))?;
-        let source = destination.checked_sub(row_bytes).ok_or_else(|| corrupt(0))?;
-        let end = destination.checked_add(row_bytes).ok_or_else(|| corrupt(0))?;
+        let source = destination
+            .checked_sub(row_bytes)
+            .ok_or_else(|| corrupt(0))?;
+        let end = destination
+            .checked_add(row_bytes)
+            .ok_or_else(|| corrupt(0))?;
         if end > self.data.len() {
             return Err(corrupt(0));
         }
@@ -294,16 +319,21 @@ fn compose(
     if operator > 4 {
         return Err(corrupt(0));
     }
-    let right = dx.checked_add(i64::from(source.width)).ok_or_else(|| corrupt(0))?
+    let right = dx
+        .checked_add(i64::from(source.width))
+        .ok_or_else(|| corrupt(0))?
         .min(i64::from(destination.width));
-    let bottom = dy.checked_add(i64::from(source.height)).ok_or_else(|| corrupt(0))?
+    let bottom = dy
+        .checked_add(i64::from(source.height))
+        .ok_or_else(|| corrupt(0))?
         .min(i64::from(destination.height));
     let left = dx.max(0);
     let top = dy.max(0);
     if right <= left || bottom <= top {
         return Ok(());
     }
-    let count = u64::try_from(right - left).ok()
+    let count = u64::try_from(right - left)
+        .ok()
         .and_then(|width| width.checked_mul(u64::try_from(bottom - top).ok()?))
         .ok_or_else(|| corrupt(0))?;
     budget.step(count)?;
@@ -340,7 +370,11 @@ struct Cursor<'a> {
 
 impl<'a> Cursor<'a> {
     fn new(bytes: &'a [u8], base: usize) -> Self {
-        Self { bytes, position: 0, base }
+        Self {
+            bytes,
+            position: 0,
+            base,
+        }
     }
 
     fn offset(&self) -> usize {
@@ -352,15 +386,23 @@ impl<'a> Cursor<'a> {
     }
 
     fn take(&mut self, count: usize) -> Result<&'a [u8], FilterError> {
-        let end = self.position.checked_add(count).ok_or_else(|| corrupt(self.offset()))?;
-        let bytes = self.bytes.get(self.position..end)
+        let end = self
+            .position
+            .checked_add(count)
+            .ok_or_else(|| corrupt(self.offset()))?;
+        let bytes = self
+            .bytes
+            .get(self.position..end)
             .ok_or_else(|| corrupt(self.offset()))?;
         self.position = end;
         Ok(bytes)
     }
 
     fn byte(&mut self) -> Result<u8, FilterError> {
-        self.take(1)?.first().copied().ok_or_else(|| corrupt(self.offset()))
+        self.take(1)?
+            .first()
+            .copied()
+            .ok_or_else(|| corrupt(self.offset()))
     }
 
     fn word(&mut self) -> Result<u16, FilterError> {
@@ -407,9 +449,8 @@ impl Header {
         };
         check(LimitKind::Jbig2Segments, u64::from(count), MAX_SEGMENTS)?;
         budget.step(u64::from(count))?;
-        let mut references = budget.vector(
-            usize::try_from(count).map_err(|_| corrupt(cursor.offset()))?,
-        )?;
+        let mut references =
+            budget.vector(usize::try_from(count).map_err(|_| corrupt(cursor.offset()))?)?;
         for _ in 0..count {
             let reference = if number <= 256 {
                 u32::from(cursor.byte()?)
@@ -429,7 +470,13 @@ impl Header {
             u32::from(cursor.byte()?)
         };
         let length = cursor.number()?;
-        Ok(Self { number, kind: flags & 63, page, references, length })
+        Ok(Self {
+            number,
+            kind: flags & 63,
+            page,
+            references,
+            length,
+        })
     }
 
     fn payload<'a>(
@@ -439,9 +486,7 @@ impl Header {
     ) -> Result<(&'a [u8], Option<u32>), FilterError> {
         if self.length != u32::MAX {
             return Ok((
-                cursor.take(
-                    usize::try_from(self.length).map_err(|_| corrupt(cursor.offset()))?,
-                )?,
+                cursor.take(usize::try_from(self.length).map_err(|_| corrupt(cursor.offset()))?)?,
                 None,
             ));
         }
@@ -449,7 +494,10 @@ impl Header {
             return Err(corrupt(cursor.offset()));
         }
         let remaining = cursor.remaining();
-        let flags = remaining.get(17).copied().ok_or_else(|| corrupt(cursor.offset()))?;
+        let flags = remaining
+            .get(17)
+            .copied()
+            .ok_or_else(|| corrupt(cursor.offset()))?;
         let mmr = flags & 1 != 0;
         let template = (flags >> 1) & 3;
         let start = if mmr {
@@ -463,17 +511,23 @@ impl Header {
         let candidates = remaining.len().saturating_sub(5);
         for offset in start..candidates {
             budget.step(1)?;
-            let marker_end = offset.checked_add(2).ok_or_else(|| corrupt(cursor.offset()))?;
+            let marker_end = offset
+                .checked_add(2)
+                .ok_or_else(|| corrupt(cursor.offset()))?;
             if remaining.get(offset..marker_end) != Some(marker.as_slice()) {
                 continue;
             }
-            let end = marker_end.checked_add(4).ok_or_else(|| corrupt(cursor.offset()))?;
+            let end = marker_end
+                .checked_add(4)
+                .ok_or_else(|| corrupt(cursor.offset()))?;
             let rows = match remaining.get(marker_end..end) {
                 Some([a, b, c, d]) => u32::from_be_bytes([*a, *b, *c, *d]),
                 _ => return Err(corrupt(cursor.offset())),
             };
             let whole = cursor.take(end)?;
-            let payload = whole.get(..marker_end).ok_or_else(|| corrupt(cursor.offset()))?;
+            let payload = whole
+                .get(..marker_end)
+                .ok_or_else(|| corrupt(cursor.offset()))?;
             return Ok((payload, Some(rows)));
         }
         Err(corrupt(cursor.offset()))
@@ -498,7 +552,13 @@ impl Region {
         if flags & 0xf8 != 0 || flags & 7 > 4 {
             return Err(corrupt(cursor.offset()));
         }
-        Ok(Self { width, height, x, y, operator: flags & 7 })
+        Ok(Self {
+            width,
+            height,
+            x,
+            y,
+            operator: flags & 7,
+        })
     }
 }
 
@@ -537,12 +597,18 @@ impl Page {
         }
         budget.pixels(self.bitmap.width, height)?;
         let size = bitmap_size(self.bitmap.width, height)?;
-        let additional = size.checked_sub(self.bitmap.data.len()).ok_or_else(|| corrupt(0))?;
+        let additional = size
+            .checked_sub(self.bitmap.data.len())
+            .ok_or_else(|| corrupt(0))?;
         budget.charge(additional as u64)?;
         budget.step(additional as u64)?;
-        self.bitmap.data.try_reserve_exact(additional)
+        self.bitmap
+            .data
+            .try_reserve_exact(additional)
             .map_err(|_| budget.allocation_error())?;
-        self.bitmap.data.resize(size, if self.default_black { 255 } else { 0 });
+        self.bitmap
+            .data
+            .resize(size, if self.default_black { 255 } else { 0 });
         self.bitmap.height = height;
         self.bitmap.clear_padding()
     }
@@ -561,14 +627,18 @@ struct Decoder {
 
 impl Decoder {
     fn entry(&self, number: u32) -> Option<&Entry> {
-        self.entries.binary_search_by_key(&number, |entry| entry.number).ok()
+        self.entries
+            .binary_search_by_key(&number, |entry| entry.number)
+            .ok()
             .and_then(|index| self.entries.get(index))
     }
 
     fn consume(&mut self, data: &[u8], globals: bool) -> Result<(), FilterError> {
         let mut cursor = Cursor::new(data, 0);
         while !cursor.remaining().is_empty() {
-            self.segments = self.segments.checked_add(1)
+            self.segments = self
+                .segments
+                .checked_add(1)
                 .ok_or_else(|| refusal(LimitKind::Jbig2Segments, u64::MAX, MAX_SEGMENTS))?;
             check(LimitKind::Jbig2Segments, self.segments, MAX_SEGMENTS)?;
             self.budget.step(1)?;
@@ -576,10 +646,10 @@ impl Decoder {
             if globals && header.page != 0 {
                 return Err(corrupt(cursor.offset()));
             }
-            let insertion = match self.entries.binary_search_by_key(
-                &header.number,
-                |entry| entry.number,
-            ) {
+            let insertion = match self
+                .entries
+                .binary_search_by_key(&header.number, |entry| entry.number)
+            {
                 Ok(_) => return Err(corrupt(cursor.offset())),
                 Err(index) => index,
             };
@@ -599,13 +669,17 @@ impl Decoder {
                 }
             };
             self.budget.reserve_one(&mut self.entries)?;
-            self.budget.step(self.entries.len().saturating_sub(insertion) as u64)?;
-            self.entries.insert(insertion, Entry {
-                number: header.number,
-                page: header.page,
-                is_dictionary: header.kind == 0,
-                dictionary,
-            });
+            self.budget
+                .step(self.entries.len().saturating_sub(insertion) as u64)?;
+            self.entries.insert(
+                insertion,
+                Entry {
+                    number: header.number,
+                    page: header.page,
+                    is_dictionary: header.kind == 0,
+                    dictionary,
+                },
+            );
             if header.kind == 51 {
                 if !cursor.remaining().is_empty() {
                     self.truncated = true;
@@ -723,7 +797,9 @@ impl Decoder {
         let stripe = cursor.word()?;
         let unknown_height = height == u32::MAX;
         let striped = stripe & 0x8000 != 0;
-        if width == 0 || height == 0 || flags & 0x80 != 0
+        if width == 0
+            || height == 0
+            || flags & 0x80 != 0
             || (unknown_height && !striped)
             || !cursor.remaining().is_empty()
         {
@@ -749,18 +825,15 @@ impl Decoder {
         Ok(())
     }
 
-    fn paint(
-        &mut self,
-        number: u32,
-        region: &Region,
-        bitmap: &Bitmap,
-    ) -> Result<(), FilterError> {
+    fn paint(&mut self, number: u32, region: &Region, bitmap: &Bitmap) -> Result<(), FilterError> {
         let page = self.page.as_mut().ok_or_else(|| corrupt(0))?;
         if number == 0 || page.number != number || page.ended {
             return Err(corrupt(0));
         }
         if page.unknown_height {
-            let bottom = region.y.checked_add(i64::from(region.height))
+            let bottom = region
+                .y
+                .checked_add(i64::from(region.height))
                 .and_then(|height| u32::try_from(height).ok())
                 .ok_or_else(|| corrupt(0))?;
             page.grow(bottom, &mut self.budget)?;
@@ -786,7 +859,8 @@ impl Decoder {
             let entry = self.entry(*reference).ok_or_else(|| corrupt(0))?;
             if entry.is_dictionary {
                 let dictionary = entry.dictionary.as_ref().ok_or_else(|| corrupt(0))?;
-                count = count.checked_add(dictionary.symbols.len())
+                count = count
+                    .checked_add(dictionary.symbols.len())
                     .ok_or_else(|| refusal(LimitKind::Jbig2Symbols, u64::MAX, MAX_SYMBOLS))?;
                 check(LimitKind::Jbig2Symbols, count as u64, MAX_SYMBOLS)?;
             }
@@ -830,19 +904,23 @@ impl Decoder {
             self.budget.pixels(region.width, region.height)?;
             let size = bitmap_size(region.width, region.height)?;
             self.budget.charge(size as u64)?;
-            self.budget.step(
-                u64::from(region.width).saturating_mul(u64::from(region.height)),
-            )?;
+            self.budget
+                .step(u64::from(region.width).saturating_mul(u64::from(region.height)))?;
             let data = crate::filter::ccitt::decode_g4(
                 cursor.remaining(),
                 region.width,
                 region.height,
                 true,
-            ).ok_or_else(|| corrupt(cursor.offset()))?;
+            )
+            .ok_or_else(|| corrupt(cursor.offset()))?;
             if data.len() != size {
                 return Err(corrupt(cursor.offset()));
             }
-            let mut bitmap = Bitmap { width: region.width, height: region.height, data };
+            let mut bitmap = Bitmap {
+                width: region.width,
+                height: region.height,
+                data,
+            };
             bitmap.clear_padding()?;
             return Ok((region, bitmap));
         }
@@ -883,14 +961,18 @@ impl Decoder {
         let template = ((flags >> 10) & 3) as u8;
         let adaptive = adaptive_pixels(&mut cursor, template)?;
         let exported = cursor.number()?;
-        let new = cursor.number()?;        check(LimitKind::Jbig2Symbols, u64::from(exported), MAX_SYMBOLS)?;
-        let requested = self.symbols.checked_add(u64::from(new))
+        let new = cursor.number()?;
+        check(LimitKind::Jbig2Symbols, u64::from(exported), MAX_SYMBOLS)?;
+        let requested = self
+            .symbols
+            .checked_add(u64::from(new))
             .ok_or_else(|| refusal(LimitKind::Jbig2Symbols, u64::MAX, MAX_SYMBOLS))?;
         check(LimitKind::Jbig2Symbols, requested, MAX_SYMBOLS)?;
         self.symbols = requested;
         let mut symbols = self.input_symbols(header)?;
         let imported = symbols.len();
-        let total = imported.checked_add(usize::try_from(new).map_err(|_| corrupt(base))?)
+        let total = imported
+            .checked_add(usize::try_from(new).map_err(|_| corrupt(base))?)
             .ok_or_else(|| refusal(LimitKind::Jbig2Symbols, u64::MAX, MAX_SYMBOLS))?;
         check(LimitKind::Jbig2Symbols, total as u64, MAX_SYMBOLS)?;
         if u64::from(exported) > total as u64 {
@@ -898,27 +980,34 @@ impl Decoder {
         }
         if total > symbols.capacity() {
             let additional = total.saturating_sub(symbols.capacity());
-            self.budget.charge(
-                (additional as u64).saturating_mul(size_of::<Arc<Bitmap>>() as u64),
-            )?;
-            symbols.try_reserve_exact(total.saturating_sub(symbols.len()))
+            self.budget
+                .charge((additional as u64).saturating_mul(size_of::<Arc<Bitmap>>() as u64))?;
+            symbols
+                .try_reserve_exact(total.saturating_sub(symbols.len()))
                 .map_err(|_| self.budget.allocation_error())?;
         }
         let mut contexts = self.budget.zeros(context_count(template)?)?;
         if flags & 0x100 != 0 {
-            let retained = header.references.iter().rev().find_map(|reference| {
-                self.entry(*reference)?.dictionary.as_ref()
-                    .filter(|dictionary| dictionary.contexts.is_some())
-            }).ok_or_else(|| corrupt(base))?;
+            let retained = header
+                .references
+                .iter()
+                .rev()
+                .find_map(|reference| {
+                    self.entry(*reference)?
+                        .dictionary
+                        .as_ref()
+                        .filter(|dictionary| dictionary.contexts.is_some())
+                })
+                .ok_or_else(|| corrupt(base))?;
             let previous = retained.contexts.as_ref().ok_or_else(|| corrupt(base))?;
             if retained.template != template || previous.len() != contexts.len() {
                 return Err(corrupt(base));
             }
             contexts.copy_from_slice(previous);
         }
-        let mut output = self.budget.vector(
-            usize::try_from(exported).map_err(|_| corrupt(base))?,
-        )?;
+        let mut output = self
+            .budget
+            .vector(usize::try_from(exported).map_err(|_| corrupt(base))?)?;
         if total != 0 {
             let mut mq = Mq::new(cursor.remaining(), cursor.offset())?;
             let mut dh = Integer::new();
@@ -928,7 +1017,8 @@ impl Decoder {
             let mut decoded = 0u32;
             while decoded < new {
                 self.budget.step(1)?;
-                height = add(height, dh.required(&mut mq, &mut self.budget)?)?;                let symbol_height = u32::try_from(height).map_err(|_| corrupt(base))?;
+                height = add(height, dh.required(&mut mq, &mut self.budget)?)?;
+                let symbol_height = u32::try_from(height).map_err(|_| corrupt(base))?;
                 let mut width = 0i64;
                 let before = decoded;
                 loop {
@@ -939,7 +1029,8 @@ impl Decoder {
                     if decoded >= new {
                         return Err(corrupt(base));
                     }
-                    width = add(width, delta)?;                    let symbol_width = u32::try_from(width).map_err(|_| corrupt(base))?;
+                    width = add(width, delta)?;
+                    let symbol_width = u32::try_from(width).map_err(|_| corrupt(base))?;
                     let mut bitmap = self.budget.bitmap(symbol_width, symbol_height, false)?;
                     generic_bitmap(
                         &mut bitmap,
@@ -963,7 +1054,8 @@ impl Decoder {
                 self.budget.step(1)?;
                 let run = ex.required(&mut mq, &mut self.budget)?;
                 let run = usize::try_from(run).map_err(|_| corrupt(base))?;
-                let end = position.checked_add(run)
+                let end = position
+                    .checked_add(run)
                     .filter(|&end| end <= total)
                     .ok_or_else(|| corrupt(base))?;
                 if exporting {
@@ -984,7 +1076,11 @@ impl Decoder {
         }
         Ok(Dictionary {
             symbols: output,
-            contexts: if flags & 0x200 != 0 { Some(contexts) } else { None },
+            contexts: if flags & 0x200 != 0 {
+                Some(contexts)
+            } else {
+                None
+            },
             template,
         })
     }
@@ -1009,11 +1105,9 @@ impl Decoder {
         let instances = cursor.number()?;
         check(LimitKind::Jbig2Symbols, u64::from(instances), MAX_SYMBOLS)?;
         let symbols = self.input_symbols(header)?;
-        let mut bitmap = self.budget.bitmap(
-            region.width,
-            region.height,
-            flags & 0x200 != 0,
-        )?;
+        let mut bitmap = self
+            .budget
+            .bitmap(region.width, region.height, flags & 0x200 != 0)?;
         if instances == 0 {
             return Ok((region, bitmap));
         }
@@ -1043,14 +1137,18 @@ impl Decoder {
         let mut ds = Integer::new();
         let mut it = Integer::new();
         let initial = dt.required(&mut mq, &mut self.budget)?;
-        let mut strip_t = initial.checked_mul(strip_size)
-            .and_then(i64::checked_neg).ok_or_else(|| corrupt(base))?;
+        let mut strip_t = initial
+            .checked_mul(strip_size)
+            .and_then(i64::checked_neg)
+            .ok_or_else(|| corrupt(base))?;
         let mut first_s = 0i64;
         let mut placed = 0u32;
         while placed < instances {
             self.budget.step(1)?;
-            let delta = dt.required(&mut mq, &mut self.budget)?
-                .checked_mul(strip_size).ok_or_else(|| corrupt(base))?;
+            let delta = dt
+                .required(&mut mq, &mut self.budget)?
+                .checked_mul(strip_size)
+                .ok_or_else(|| corrupt(base))?;
             strip_t = add(strip_t, delta)?;
             first_s = add(first_s, fs.required(&mut mq, &mut self.budget)?)?;
             let mut current_s = first_s;
@@ -1079,9 +1177,21 @@ impl Decoder {
                 } else if transposed && bottom {
                     current_s = add(current_s, height)?;
                 }
-                let (x, y) = if transposed { (t, current_s) } else { (current_s, t) };
-                let x = if right { x.checked_sub(width).ok_or_else(|| corrupt(base))? } else { x };
-                let y = if bottom { y.checked_sub(height).ok_or_else(|| corrupt(base))? } else { y };
+                let (x, y) = if transposed {
+                    (t, current_s)
+                } else {
+                    (current_s, t)
+                };
+                let x = if right {
+                    x.checked_sub(width).ok_or_else(|| corrupt(base))?
+                } else {
+                    x
+                };
+                let y = if bottom {
+                    y.checked_sub(height).ok_or_else(|| corrupt(base))?
+                } else {
+                    y
+                };
                 compose(&mut bitmap, symbol, x, y, operator, &mut self.budget)?;
                 if !transposed && !right {
                     current_s = add(current_s, width)?;
@@ -1132,24 +1242,61 @@ fn context_count(template: u8) -> Result<usize, FilterError> {
 // Coordinates run from the least significant context bit to the most
 // significant one. Adaptive pixels occupy their nominal template slots.
 const TEMPLATE_0: [(i64, i64); 16] = [
-    (-1, 0), (-2, 0), (-3, 0), (-4, 0),
-    (3, -1), (2, -1), (1, -1), (0, -1),
-    (-1, -1), (-2, -1), (-3, -1),
-    (2, -2), (1, -2), (0, -2), (-1, -2), (-2, -2),
+    (-1, 0),
+    (-2, 0),
+    (-3, 0),
+    (-4, 0),
+    (3, -1),
+    (2, -1),
+    (1, -1),
+    (0, -1),
+    (-1, -1),
+    (-2, -1),
+    (-3, -1),
+    (2, -2),
+    (1, -2),
+    (0, -2),
+    (-1, -2),
+    (-2, -2),
 ];
 const TEMPLATE_1: [(i64, i64); 13] = [
-    (-1, 0), (-2, 0), (-3, 0),
-    (3, -1), (2, -1), (1, -1), (0, -1), (-1, -1), (-2, -1),
-    (2, -2), (1, -2), (0, -2), (-1, -2),
+    (-1, 0),
+    (-2, 0),
+    (-3, 0),
+    (3, -1),
+    (2, -1),
+    (1, -1),
+    (0, -1),
+    (-1, -1),
+    (-2, -1),
+    (2, -2),
+    (1, -2),
+    (0, -2),
+    (-1, -2),
 ];
 const TEMPLATE_2: [(i64, i64); 10] = [
-    (-1, 0), (-2, 0),
-    (2, -1), (1, -1), (0, -1), (-1, -1), (-2, -1),
-    (1, -2), (0, -2), (-1, -2),
+    (-1, 0),
+    (-2, 0),
+    (2, -1),
+    (1, -1),
+    (0, -1),
+    (-1, -1),
+    (-2, -1),
+    (1, -2),
+    (0, -2),
+    (-1, -2),
 ];
 const TEMPLATE_3: [(i64, i64); 10] = [
-    (-1, 0), (-2, 0), (-3, 0), (-4, 0),
-    (2, -1), (1, -1), (0, -1), (-1, -1), (-2, -1), (-3, -1),
+    (-1, 0),
+    (-2, 0),
+    (-3, 0),
+    (-4, 0),
+    (2, -1),
+    (1, -1),
+    (0, -1),
+    (-1, -1),
+    (-2, -1),
+    (-3, -1),
 ];
 
 fn generic_bitmap(
@@ -1183,12 +1330,18 @@ fn generic_bitmap(
                 *used.get_mut(*slot).ok_or_else(|| corrupt(0))? = *pixel;
             }
         }
-        1 => *used.get_mut(3).ok_or_else(|| corrupt(0))? =
-            *adaptive.first().ok_or_else(|| corrupt(0))?,
-        2 => *used.get_mut(2).ok_or_else(|| corrupt(0))? =
-            *adaptive.first().ok_or_else(|| corrupt(0))?,
-        3 => *used.get_mut(4).ok_or_else(|| corrupt(0))? =
-            *adaptive.first().ok_or_else(|| corrupt(0))?,
+        1 => {
+            *used.get_mut(3).ok_or_else(|| corrupt(0))? =
+                *adaptive.first().ok_or_else(|| corrupt(0))?
+        }
+        2 => {
+            *used.get_mut(2).ok_or_else(|| corrupt(0))? =
+                *adaptive.first().ok_or_else(|| corrupt(0))?
+        }
+        3 => {
+            *used.get_mut(4).ok_or_else(|| corrupt(0))? =
+                *adaptive.first().ok_or_else(|| corrupt(0))?
+        }
         _ => return Err(corrupt(0)),
     }
     let mut ltp = 0u8;
@@ -1218,22 +1371,18 @@ fn generic_bitmap(
 }
 
 const QE: [u16; 47] = [
-    0x5601, 0x3401, 0x1801, 0x0ac1, 0x0521, 0x0221,
-    0x5601, 0x5401, 0x4801, 0x3801, 0x3001, 0x2401, 0x1c01, 0x1601,
-    0x5601, 0x5401, 0x5101, 0x4801, 0x3801, 0x3401, 0x3001, 0x2801,
-    0x2401, 0x2201, 0x1c01, 0x1801, 0x1601, 0x1401, 0x1201, 0x1101,
-    0x0ac1, 0x09c1, 0x08a1, 0x0521, 0x0441, 0x02a1, 0x0221, 0x0141,
-    0x0111, 0x0085, 0x0049, 0x0025, 0x0015, 0x0009, 0x0005, 0x0001, 0x5601,
+    0x5601, 0x3401, 0x1801, 0x0ac1, 0x0521, 0x0221, 0x5601, 0x5401, 0x4801, 0x3801, 0x3001, 0x2401,
+    0x1c01, 0x1601, 0x5601, 0x5401, 0x5101, 0x4801, 0x3801, 0x3401, 0x3001, 0x2801, 0x2401, 0x2201,
+    0x1c01, 0x1801, 0x1601, 0x1401, 0x1201, 0x1101, 0x0ac1, 0x09c1, 0x08a1, 0x0521, 0x0441, 0x02a1,
+    0x0221, 0x0141, 0x0111, 0x0085, 0x0049, 0x0025, 0x0015, 0x0009, 0x0005, 0x0001, 0x5601,
 ];
 const NMPS: [u8; 47] = [
-    1, 2, 3, 4, 5, 38, 7, 8, 9, 10, 11, 12, 13, 29, 15, 16,
-    17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30,
-    31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 45, 46,
+    1, 2, 3, 4, 5, 38, 7, 8, 9, 10, 11, 12, 13, 29, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26,
+    27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 45, 46,
 ];
 const NLPS: [u8; 47] = [
-    1, 6, 9, 12, 29, 33, 6, 14, 14, 14, 17, 18, 20, 21, 14, 14,
-    15, 16, 17, 18, 19, 19, 20, 21, 22, 23, 24, 25, 26, 27,
-    28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 46,
+    1, 6, 9, 12, 29, 33, 6, 14, 14, 14, 17, 18, 20, 21, 14, 14, 15, 16, 17, 18, 19, 19, 20, 21, 22,
+    23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 46,
 ];
 
 struct Mq<'a> {
@@ -1267,11 +1416,19 @@ impl<'a> Mq<'a> {
     }
 
     fn byte_in(&mut self) -> Result<(), FilterError> {
-        let current = self.bytes.get(self.position).copied()
+        let current = self
+            .bytes
+            .get(self.position)
+            .copied()
             .ok_or_else(|| corrupt(self.offset()))?;
-        let next_position = self.position.checked_add(1)
+        let next_position = self
+            .position
+            .checked_add(1)
             .ok_or_else(|| corrupt(self.offset()))?;
-        let next = self.bytes.get(next_position).copied()
+        let next = self
+            .bytes
+            .get(next_position)
+            .copied()
             .ok_or_else(|| corrupt(self.offset()))?;
         // C is a modular 32-bit coding register, not a size or offset.
         if current == 255 {
@@ -1304,9 +1461,16 @@ impl<'a> Mq<'a> {
             }
             self.a <<= 1;
             self.c <<= 1;
-            self.ct = self.ct.checked_sub(1).ok_or_else(|| corrupt(self.offset()))?;
+            self.ct = self
+                .ct
+                .checked_sub(1)
+                .ok_or_else(|| corrupt(self.offset()))?;
         }
-        if self.a & 0x8000 != 0 { Ok(()) } else { Err(corrupt(self.offset())) }
+        if self.a & 0x8000 != 0 {
+            Ok(())
+        } else {
+            Err(corrupt(self.offset()))
+        }
     }
 
     fn bit(&mut self, context: &mut u8, budget: &mut Budget) -> Result<u8, FilterError> {
@@ -1316,7 +1480,10 @@ impl<'a> Mq<'a> {
         let qe = u32::from(*QE.get(index).ok_or_else(|| corrupt(self.offset()))?);
         let nmps = *NMPS.get(index).ok_or_else(|| corrupt(self.offset()))?;
         let nlps = *NLPS.get(index).ok_or_else(|| corrupt(self.offset()))?;
-        self.a = self.a.checked_sub(qe).ok_or_else(|| corrupt(self.offset()))?;
+        self.a = self
+            .a
+            .checked_sub(qe)
+            .ok_or_else(|| corrupt(self.offset()))?;
         let decision;
         if self.c >> 16 < qe {
             if self.a < qe {
@@ -1324,19 +1491,30 @@ impl<'a> Mq<'a> {
                 *context = (nmps << 1) | mps;
             } else {
                 decision = mps ^ 1;
-                let switched = if matches!(index, 0 | 6 | 14) { mps ^ 1 } else { mps };
+                let switched = if matches!(index, 0 | 6 | 14) {
+                    mps ^ 1
+                } else {
+                    mps
+                };
                 *context = (nlps << 1) | switched;
             }
             self.a = qe;
             self.renormalize()?;
         } else {
-            self.c = self.c.checked_sub(qe << 16).ok_or_else(|| corrupt(self.offset()))?;
+            self.c = self
+                .c
+                .checked_sub(qe << 16)
+                .ok_or_else(|| corrupt(self.offset()))?;
             if self.a & 0x8000 != 0 {
                 return Ok(mps);
             }
             if self.a < qe {
                 decision = mps ^ 1;
-                let switched = if matches!(index, 0 | 6 | 14) { mps ^ 1 } else { mps };
+                let switched = if matches!(index, 0 | 6 | 14) {
+                    mps ^ 1
+                } else {
+                    mps
+                };
                 *context = (nlps << 1) | switched;
             } else {
                 decision = mps;
@@ -1363,18 +1541,21 @@ impl Integer {
         mq: &mut Mq<'_>,
         budget: &mut Budget,
     ) -> Result<u8, FilterError> {
-        let context = self.contexts.get_mut(*previous).ok_or_else(|| corrupt(mq.offset()))?;
+        let context = self
+            .contexts
+            .get_mut(*previous)
+            .ok_or_else(|| corrupt(mq.offset()))?;
         let bit = mq.bit(context, budget)?;
         let next = (*previous << 1) | usize::from(bit);
-        *previous = if *previous < 256 { next } else { (next & 511) | 256 };
+        *previous = if *previous < 256 {
+            next
+        } else {
+            (next & 511) | 256
+        };
         Ok(bit)
     }
 
-    fn read(
-        &mut self,
-        mq: &mut Mq<'_>,
-        budget: &mut Budget,
-    ) -> Result<Option<i64>, FilterError> {
+    fn read(&mut self, mq: &mut Mq<'_>, budget: &mut Budget) -> Result<Option<i64>, FilterError> {
         let mut previous = 1usize;
         let sign = self.next(&mut previous, mq, budget)?;
         let categories = [(2u8, 0i64), (4, 4), (6, 20), (8, 84), (12, 340)];
@@ -1388,27 +1569,26 @@ impl Integer {
         let (bits, offset) = selected;
         let mut value = 0i64;
         for _ in 0..bits {
-            value = value.checked_mul(2)
-                .and_then(|value| value.checked_add(
-                    i64::from(self.next(&mut previous, mq, budget).ok()?),
-                ))
+            value = value
+                .checked_mul(2)
+                .and_then(|value| {
+                    value.checked_add(i64::from(self.next(&mut previous, mq, budget).ok()?))
+                })
                 .ok_or_else(|| corrupt(mq.offset()))?;
         }
         value = add(value, offset)?;
         if sign != 0 && value == 0 {
             Ok(None)
         } else if sign != 0 {
-            Ok(Some(value.checked_neg().ok_or_else(|| corrupt(mq.offset()))?))
+            Ok(Some(
+                value.checked_neg().ok_or_else(|| corrupt(mq.offset()))?,
+            ))
         } else {
             Ok(Some(value))
         }
     }
 
-    fn required(
-        &mut self,
-        mq: &mut Mq<'_>,
-        budget: &mut Budget,
-    ) -> Result<i64, FilterError> {
+    fn required(&mut self, mq: &mut Mq<'_>, budget: &mut Budget) -> Result<i64, FilterError> {
         self.read(mq, budget)?.ok_or_else(|| corrupt(mq.offset()))
     }
 }
@@ -1424,12 +1604,20 @@ fn identifier(
     }
     let mut previous = 1usize;
     for _ in 0..bits {
-        let context = contexts.get_mut(previous).ok_or_else(|| corrupt(mq.offset()))?;
+        let context = contexts
+            .get_mut(previous)
+            .ok_or_else(|| corrupt(mq.offset()))?;
         let bit = mq.bit(context, budget)?;
-        previous = previous.checked_mul(2)
+        previous = previous
+            .checked_mul(2)
             .and_then(|value| value.checked_add(usize::from(bit)))
             .ok_or_else(|| corrupt(mq.offset()))?;
     }
-    previous.checked_sub(1usize.checked_shl(bits).ok_or_else(|| corrupt(mq.offset()))?)
+    previous
+        .checked_sub(
+            1usize
+                .checked_shl(bits)
+                .ok_or_else(|| corrupt(mq.offset()))?,
+        )
         .ok_or_else(|| corrupt(mq.offset()))
 }

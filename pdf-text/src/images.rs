@@ -49,7 +49,10 @@ struct ColorSpec {
 
 impl ColorSpec {
     fn simple(space: ColorSpace) -> Self {
-        Self { space, lookup: None }
+        Self {
+            space,
+            lookup: None,
+        }
     }
 }
 
@@ -60,13 +63,10 @@ struct Budget {
 
 impl Budget {
     fn charge(&mut self, bytes: usize) -> Result<(), DocError> {
-        let requested = self.used.checked_add(bytes as u64).ok_or_else(|| {
-            refusal(
-                LimitKind::TotalDecodedBytes,
-                u64::MAX,
-                self.maximum,
-            )
-        })?;
+        let requested = self
+            .used
+            .checked_add(bytes as u64)
+            .ok_or_else(|| refusal(LimitKind::TotalDecodedBytes, u64::MAX, self.maximum))?;
         check(LimitKind::TotalDecodedBytes, requested, self.maximum)?;
         self.used = requested;
         Ok(())
@@ -91,8 +91,7 @@ pub fn load_image(
         used: 0,
         maximum: resolver.document().limits().max_total_decoded_bytes,
     };
-    let (mut image, soft) =
-        read_image(resolver, &object, max_pixels, true, &mut budget)?;
+    let (mut image, soft) = read_image(resolver, &object, max_pixels, true, &mut budget)?;
 
     if matches!(&image.data, ImageData::Pixels { .. }) {
         if let Some(soft) = soft {
@@ -122,9 +121,12 @@ fn read_image(
     if !object.is_stream() {
         return Err(wrong(object.id(), "image stream"));
     }
-    let dict = object.dict().ok_or_else(|| wrong(object.id(), "image dictionary"))?;
+    let dict = object
+        .dict()
+        .ok_or_else(|| wrong(object.id(), "image dictionary"))?;
     let subtype = resolver.resolve_dict_key(dict, b"Subtype")?;
-    if !subtype.as_ref()
+    if !subtype
+        .as_ref()
         .and_then(|value| value.get().as_name())
         .map(|name| name.eq_bytes(b"Image"))
         .unwrap_or(false)
@@ -134,13 +136,15 @@ fn read_image(
 
     let width = dimension(resolver, dict, b"Width", object.id())?;
     let height = dimension(resolver, dict, b"Height", object.id())?;
-    let pixels = u64::from(width).checked_mul(u64::from(height)).ok_or_else(|| {
-        refusal(
-            LimitKind::DecodedBytes,
-            u64::MAX,
-            max_pixels.saturating_mul(4),
-        )
-    })?;
+    let pixels = u64::from(width)
+        .checked_mul(u64::from(height))
+        .ok_or_else(|| {
+            refusal(
+                LimitKind::DecodedBytes,
+                u64::MAX,
+                max_pixels.saturating_mul(4),
+            )
+        })?;
     if pixels > max_pixels {
         return Err(refusal(
             LimitKind::DecodedBytes,
@@ -152,7 +156,9 @@ fn read_image(
     let image_mask = match resolver.resolve_dict_key(dict, b"ImageMask")? {
         None => false,
         Some(value) if value.get().is_null() => false,
-        Some(value) => value.get().as_bool()
+        Some(value) => value
+            .get()
+            .as_bool()
             .ok_or_else(|| wrong(object.id(), "ImageMask boolean"))?,
     };
     let decoded_result = decode(resolver, object, budget);
@@ -163,7 +169,8 @@ fn read_image(
     ) {
         0
     } else {
-        resolver.resolve_dict_key(dict, b"BitsPerComponent")?
+        resolver
+            .resolve_dict_key(dict, b"BitsPerComponent")?
             .and_then(|value| value.get().as_i64())
             .and_then(|number| u8::try_from(number).ok())
             .unwrap_or(if image_mask { 1 } else { 0 })
@@ -192,8 +199,13 @@ fn read_image(
         match dict.get(b"SMask") {
             None => (false, None),
             Some(value) => match resolver.resolve(value) {
-                Ok(value) if value.get().is_null() || value.get().as_name()
-                    .map(|name| name.eq_bytes(b"None")).unwrap_or(false) =>
+                Ok(value)
+                    if value.get().is_null()
+                        || value
+                            .get()
+                            .as_name()
+                            .map(|name| name.eq_bytes(b"None"))
+                            .unwrap_or(false) =>
                 {
                     (false, None)
                 }
@@ -232,12 +244,9 @@ fn read_image(
             let maximum = resolver.document().limits().max_decoded_bytes;
             SampleLayout::new(width, height, 1, 1, maximum)?;
             let result = (|| {
-                let params = image_params(
-                    resolver, object, dict, codec, width, height, budget,
-                )?;
-                let mut binary = decode_image_report(
-                    codec, &decoded.bytes, &params, max_pixels,
-                ).map_err(DocError::from)?;
+                let params = image_params(resolver, object, dict, codec, width, height, budget)?;
+                let mut binary = decode_image_report(codec, &decoded.bytes, &params, max_pixels)
+                    .map_err(DocError::from)?;
                 check(LimitKind::DecodedBytes, binary.bytes.len() as u64, maximum)?;
                 budget.charge(binary.bytes.len())?;
                 if codec == FilterKind::Jbig2 {
@@ -253,9 +262,11 @@ fn read_image(
                 Ok(binary) => binary,
                 Err(error) => {
                     recover(resolver, object, error, "image_bilevel_decode_failed")?;
-                    image.data = ImageData::Unsupported(
-                        if codec == FilterKind::Jbig2 { "jbig2" } else { "ccitt" },
-                    );
+                    image.data = ImageData::Unsupported(if codec == FilterKind::Jbig2 {
+                        "jbig2"
+                    } else {
+                        "ccitt"
+                    });
                     return Ok((image, soft));
                 }
             };
@@ -279,14 +290,22 @@ fn read_image(
             #[cfg(feature = "jpx")]
             if codec == FilterKind::Jpx {
                 let result = decode_jpx(
-                    resolver, object, dict, &decoded.bytes, &color, &mut image, budget,
+                    resolver,
+                    object,
+                    dict,
+                    &decoded.bytes,
+                    &color,
+                    &mut image,
+                    budget,
                 );
                 match result {
                     Ok(true) => return Ok((image, None)),
                     Ok(false) => return Ok((image, soft)),
                     Err(error) => {
                         let reason = match &error {
-                            DocError::Unsupported { feature: "jpx_components" } => "jpx_components",
+                            DocError::Unsupported {
+                                feature: "jpx_components",
+                            } => "jpx_components",
                             _ => "jpx",
                         };
                         recover(resolver, object, error, "jpx_decode")?;
@@ -298,7 +317,13 @@ fn read_image(
             #[cfg(feature = "jxl")]
             if codec == FilterKind::Jxl {
                 if let Err(error) = decode_jxl(
-                    resolver, object, dict, &decoded.bytes, &mut image, max_pixels, budget,
+                    resolver,
+                    object,
+                    dict,
+                    &decoded.bytes,
+                    &mut image,
+                    max_pixels,
+                    budget,
                 ) {
                     recover(resolver, object, error, "jxl_decode")?;
                     image.data = ImageData::Unsupported("jxl");
@@ -323,8 +348,7 @@ fn read_image(
         image.data = ImageData::Unsupported("colorspace");
         return Ok((image, soft));
     }
-    if !matches!(bits_per_component, 1 | 2 | 4 | 8 | 16)
-        || (image_mask && bits_per_component != 1)
+    if !matches!(bits_per_component, 1 | 2 | 4 | 8 | 16) || (image_mask && bits_per_component != 1)
     {
         warn(resolver, object, "image_bits_per_component_unsupported");
         image.data = ImageData::Unsupported("bits_per_component");
@@ -366,10 +390,21 @@ fn read_image(
     let mut missing = decoded.bytes.len() < layout.expected;
 
     'rows: for (y, output) in rgba.chunks_exact_mut(layout.row_rgba).enumerate() {
-        let start = y.checked_mul(layout.stride).ok_or_else(|| size_error(maximum))?;
-        let end = start.checked_add(layout.stride).ok_or_else(|| size_error(maximum))?;
-        let row = decoded.bytes.get(start..end.min(decoded.bytes.len())).unwrap_or(&[]);
-        let mut samples = Samples { bytes: row, bit: 0, bpc: bits_per_component };
+        let start = y
+            .checked_mul(layout.stride)
+            .ok_or_else(|| size_error(maximum))?;
+        let end = start
+            .checked_add(layout.stride)
+            .ok_or_else(|| size_error(maximum))?;
+        let row = decoded
+            .bytes
+            .get(start..end.min(decoded.bytes.len()))
+            .unwrap_or(&[]);
+        let mut samples = Samples {
+            bytes: row,
+            bit: 0,
+            bpc: bits_per_component,
+        };
 
         for pixel in output.chunks_exact_mut(4) {
             let mut raw = [0u16; 4];
@@ -423,8 +458,13 @@ fn decode_jxl(
 
     let width = source.width();
     let height = source.height();
-    let maximum = resolver.document().limits().max_decoded_bytes.min(isize::MAX as u64);
-    let pixels = u64::from(width).checked_mul(u64::from(height))
+    let maximum = resolver
+        .document()
+        .limits()
+        .max_decoded_bytes
+        .min(isize::MAX as u64);
+    let pixels = u64::from(width)
+        .checked_mul(u64::from(height))
         .ok_or_else(|| size_error(maximum))?;
     if pixels > max_pixels {
         return Err(refusal(
@@ -434,28 +474,48 @@ fn decode_jxl(
         ));
     }
     if width != image.width || height != image.height {
-        return Err(wrong(object.id(), "JXL dimensions matching image dictionary"));
+        return Err(wrong(
+            object.id(),
+            "JXL dimensions matching image dictionary",
+        ));
     }
     let metadata = &source.image_header().metadata;
-    let space = if metadata.grayscale() { ColorSpace::Gray } else { ColorSpace::Rgb };
+    let space = if metadata.grayscale() {
+        ColorSpace::Gray
+    } else {
+        ColorSpace::Rgb
+    };
     let count = channels(space);
     let has_alpha = source.pixel_format().has_alpha();
-    let associated_alpha = metadata.ec_info.iter()
-        .find_map(|info| info.alpha_associated()).unwrap_or(false);
+    let associated_alpha = metadata
+        .ec_info
+        .iter()
+        .find_map(|info| info.alpha_associated())
+        .unwrap_or(false);
     // Include every extra plane, even those omitted from the output stream.
     // XYB decoding can use three working colour planes for a gray image.
-    let plane_count = count.max(3).checked_add(metadata.ec_info.len())
+    let plane_count = count
+        .max(3)
+        .checked_add(metadata.ec_info.len())
         .ok_or_else(|| size_error(maximum))?;
-    let plane_bytes = pixels.checked_mul(plane_count as u64)
+    let plane_bytes = pixels
+        .checked_mul(plane_count as u64)
         .and_then(|size| size.checked_mul(4))
         .ok_or_else(|| size_error(maximum))?;
     check(LimitKind::DecodedBytes, plane_bytes, maximum)?;
     budget.charge(usize::try_from(plane_bytes).map_err(|_| size_error(maximum))?)?;
     let layout = SampleLayout::new(width, height, count, 8, maximum)?;
     budget.charge(layout.rgba)?;
-    let has_pdf_soft = resolver.resolve_dict_key(dict, b"SMask")?
-        .map(|value| !value.get().is_null() && !value.get().as_name()
-            .map(|name| name.eq_bytes(b"None")).unwrap_or(false))
+    let has_pdf_soft = resolver
+        .resolve_dict_key(dict, b"SMask")?
+        .map(|value| {
+            !value.get().is_null()
+                && !value
+                    .get()
+                    .as_name()
+                    .map(|name| name.eq_bytes(b"None"))
+                    .unwrap_or(false)
+        })
         .unwrap_or(false);
     let use_alpha = has_alpha && !has_pdf_soft;
     let alpha_size = usize::try_from(pixels).map_err(|_| size_error(maximum))?;
@@ -474,9 +534,11 @@ fn decode_jxl(
     }
     let rendered = source.render_frame(0).map_err(|_| jxl_decode_error())?;
     let mut stream = rendered.stream();
-    let stream_count = count.checked_add(usize::from(has_alpha))
+    let stream_count = count
+        .checked_add(usize::from(has_alpha))
         .ok_or_else(jxl_decode_error)?;
-    if stream.width() != width || stream.height() != height
+    if stream.width() != width
+        || stream.height() != height
         || usize::try_from(stream.channels()).ok() != Some(stream_count)
         || stream_count > 4
     {
@@ -490,7 +552,9 @@ fn decode_jxl(
     };
     for (index, pixel) in rgba.chunks_exact_mut(4).enumerate() {
         let mut samples = [0u8; 4];
-        let output = samples.get_mut(..stream_count).ok_or_else(jxl_decode_error)?;
+        let output = samples
+            .get_mut(..stream_count)
+            .ok_or_else(jxl_decode_error)?;
         if stream.write_to_buffer(output) != stream_count {
             return Err(jxl_decode_error());
         }
@@ -507,8 +571,8 @@ fn decode_jxl(
                 if alpha == 0 {
                     0
                 } else {
-                    ((u32::from(*sample) * 255 + u32::from(alpha) / 2)
-                        / u32::from(alpha)).min(255) as u8
+                    ((u32::from(*sample) * 255 + u32::from(alpha) / 2) / u32::from(alpha)).min(255)
+                        as u8
                 }
             } else {
                 *sample
@@ -531,7 +595,10 @@ fn decode_jxl(
 
 #[cfg(feature = "jxl")]
 fn jxl_decode_error() -> DocError {
-    DocError::Malformed { offset: 0, what: "jxl_decode" }
+    DocError::Malformed {
+        offset: 0,
+        what: "jxl_decode",
+    }
 }
 
 #[cfg(feature = "jpx")]
@@ -547,8 +614,10 @@ fn decode_jpx(
     use hayro_jpeg2000::{DecodeSettings, DecoderContext};
 
     let header = JpxHeader::read(bytes)?;
-    let has_pdf_color = resolver.resolve_dict_key(dict, b"ColorSpace")?
-        .map(|value| !value.get().is_null()).unwrap_or(false);
+    let has_pdf_color = resolver
+        .resolve_dict_key(dict, b"ColorSpace")?
+        .map(|value| !value.get().is_null())
+        .unwrap_or(false);
     let settings = DecodeSettings {
         resolve_palette_indices: !matches!(color.space, ColorSpace::Indexed { .. }),
         ..DecodeSettings::default()
@@ -578,18 +647,27 @@ fn decode_jpx(
         return Err(jpx_components());
     }
 
-    let maximum = resolver.document().limits().max_decoded_bytes.min(isize::MAX as u64);
-    let pixels = u64::from(width).checked_mul(u64::from(height))
+    let maximum = resolver
+        .document()
+        .limits()
+        .max_decoded_bytes
+        .min(isize::MAX as u64);
+    let pixels = u64::from(width)
+        .checked_mul(u64::from(height))
         .ok_or_else(|| size_error(maximum))?;
     // The public decoder hides the raw component count. SIZ supplies it,
     // including planes that a palette or channel definition might replace.
-    let plane_bytes = pixels.checked_mul(header.count.max(stream_count) as u64)
+    let plane_bytes = pixels
+        .checked_mul(header.count.max(stream_count) as u64)
         .and_then(|size| size.checked_mul(4))
         .ok_or_else(|| size_error(maximum))?;
     check(LimitKind::DecodedBytes, plane_bytes, maximum)?;
     budget.charge(usize::try_from(plane_bytes).map_err(|_| size_error(maximum))?)?;
     if width != image.width || height != image.height {
-        return Err(wrong(object.id(), "JPX dimensions matching image dictionary"));
+        return Err(wrong(
+            object.id(),
+            "JPX dimensions matching image dictionary",
+        ));
     }
     let layout = SampleLayout::new(width, height, count, 8, maximum)?;
     budget.charge(layout.rgba)?;
@@ -598,9 +676,16 @@ fn decode_jpx(
     if !matches!(in_data, 0 | 1 | 2) {
         return Err(wrong(object.id(), "SMaskInData in 0..2"));
     }
-    let has_pdf_soft = resolver.resolve_dict_key(dict, b"SMask")?
-        .map(|value| !value.get().is_null() && !value.get().as_name()
-            .map(|name| name.eq_bytes(b"None")).unwrap_or(false))
+    let has_pdf_soft = resolver
+        .resolve_dict_key(dict, b"SMask")?
+        .map(|value| {
+            !value.get().is_null()
+                && !value
+                    .get()
+                    .as_name()
+                    .map(|name| name.eq_bytes(b"None"))
+                    .unwrap_or(false)
+        })
         .unwrap_or(false);
     let use_stream_alpha = in_data != 0 || !has_pdf_soft;
     let alpha_size = usize::try_from(pixels).map_err(|_| size_error(maximum))?;
@@ -629,20 +714,32 @@ fn decode_jpx(
     }
     let mut planes = [None; 5];
     for (index, component) in components.iter().enumerate() {
-        let geometry = header.geometry.get(index).copied().ok_or_else(jpx_components)?;
+        let geometry = header
+            .geometry
+            .get(index)
+            .copied()
+            .ok_or_else(jpx_components)?;
         let plane = JpxPlane::new(component, width, height, geometry)?;
         *planes.get_mut(index).ok_or_else(jpx_components)? = Some(plane);
     }
-    let first = planes.first().and_then(|plane| *plane).ok_or_else(jpx_components)?;
+    let first = planes
+        .first()
+        .and_then(|plane| *plane)
+        .ok_or_else(jpx_components)?;
     let depth = components.first().ok_or_else(jpx_components)?.bit_depth();
     let mut pairs = if has_pdf_color {
         read_decode(resolver, dict, count, space, 8, object.id())?
     } else {
-        [DecodePair { low: 0.0, high: 1.0 }; 4]
+        [DecodePair {
+            low: 0.0,
+            high: 1.0,
+        }; 4]
     };
     if matches!(space, ColorSpace::Indexed { .. }) {
-        let explicit_decode = resolver.resolve_dict_key(dict, b"Decode")?
-            .map(|value| !value.get().is_null()).unwrap_or(false);
+        let explicit_decode = resolver
+            .resolve_dict_key(dict, b"Decode")?
+            .map(|value| !value.get().is_null())
+            .unwrap_or(false);
         if !explicit_decode {
             pairs.first_mut().ok_or_else(jpx_components)?.high = first.maximum;
         }
@@ -661,18 +758,27 @@ fn decode_jpx(
         for (x, pixel) in row.chunks_exact_mut(4).enumerate() {
             let opacity = if use_alpha {
                 let index = alpha_index.ok_or_else(jpx_components)?;
-                planes.get(index).and_then(|plane| *plane).ok_or_else(jpx_components)?
+                planes
+                    .get(index)
+                    .and_then(|plane| *plane)
+                    .ok_or_else(jpx_components)?
                     .fraction(x, y, width, height)?
             } else {
                 1.0
             };
             let mut fractions = [0.0; 4];
             for (slot, plane) in fractions.iter_mut().zip(planes.iter()).take(count) {
-                let fraction = plane.ok_or_else(jpx_components)?.fraction(x, y, width, height)?;
+                let fraction = plane
+                    .ok_or_else(jpx_components)?
+                    .fraction(x, y, width, height)?;
                 // SMaskInData 2 supplies premultiplied colour. The pixel API
                 // stores straight alpha, so undo that before applying Decode.
                 *slot = if in_data == 2 {
-                    if opacity > 0.0 { (fraction / opacity).clamp(0.0, 1.0) } else { 0.0 }
+                    if opacity > 0.0 {
+                        (fraction / opacity).clamp(0.0, 1.0)
+                    } else {
+                        0.0
+                    }
                 } else {
                     fraction
                 };
@@ -684,16 +790,23 @@ fn decode_jpx(
             } else if let ColorSpace::Indexed { base, hival } = space {
                 let index = (pair.map(first).clamp(0.0, f64::from(hival)) + 0.5) as usize;
                 let base = base_space(base);
-                let start = index.checked_mul(channels(base)).ok_or_else(jpx_components)?;
-                let end = start.checked_add(channels(base)).ok_or_else(jpx_components)?;
-                let values = palette.get(start..end)
+                let start = index
+                    .checked_mul(channels(base))
+                    .ok_or_else(jpx_components)?;
+                let end = start
+                    .checked_add(channels(base))
+                    .ok_or_else(jpx_components)?;
+                let values = palette
+                    .get(start..end)
                     .ok_or_else(|| wrong(object.id(), "JPX Indexed lookup entry"))?;
                 let [r, g, b] = rgb(base, values).ok_or_else(jpx_components)?;
                 [r, g, b, 255]
             } else {
                 let mut values = [0u8; 4];
-                for (slot, (fraction, pair)) in values.iter_mut()
-                    .zip(fractions.iter().zip(pairs.iter())).take(count)
+                for (slot, (fraction, pair)) in values
+                    .iter_mut()
+                    .zip(fractions.iter().zip(pairs.iter()))
+                    .take(count)
                 {
                     *slot = jpx_byte(pair.map(*fraction));
                 }
@@ -702,11 +815,13 @@ fn decode_jpx(
             };
             if use_alpha {
                 let alpha = jpx_byte(opacity);
-                let offset = y.checked_mul(usize::try_from(width)
-                    .map_err(|_| size_error(maximum))?)
+                let offset = y
+                    .checked_mul(usize::try_from(width).map_err(|_| size_error(maximum))?)
                     .and_then(|row| row.checked_add(x))
                     .ok_or_else(|| size_error(maximum))?;
-                let slot = soft_mask.as_mut().and_then(|mask| mask.get_mut(offset))
+                let slot = soft_mask
+                    .as_mut()
+                    .and_then(|mask| mask.get_mut(offset))
                     .ok_or_else(jpx_components)?;
                 *slot = alpha;
                 if let Some(current) = value.get_mut(3) {
@@ -731,7 +846,9 @@ fn jpx_byte(fraction: f64) -> u8 {
 
 #[cfg(feature = "jpx")]
 fn jpx_components() -> DocError {
-    DocError::Unsupported { feature: "jpx_components" }
+    DocError::Unsupported {
+        feature: "jpx_components",
+    }
 }
 
 #[cfg(feature = "jpx")]
@@ -740,7 +857,10 @@ fn jpx_error(error: hayro_jpeg2000::DecodeError) -> DocError {
         hayro_jpeg2000::DecodeError::Validation(
             hayro_jpeg2000::ValidationError::TooManyChannels,
         ) => jpx_components(),
-        _ => DocError::Malformed { offset: 0, what: "jpx_decode" },
+        _ => DocError::Malformed {
+            offset: 0,
+            what: "jpx_decode",
+        },
     }
 }
 
@@ -762,7 +882,8 @@ impl<'a> JpxPlane<'a> {
         geometry: (u32, u32),
     ) -> Result<Self, DocError> {
         let samples = component.samples();
-        let full_size = u64::from(width).checked_mul(u64::from(height))
+        let full_size = u64::from(width)
+            .checked_mul(u64::from(height))
             .ok_or_else(jpx_components)?;
         // Hayro normally expands subsampled components itself. If a compact
         // plane is returned, retain its SIZ geometry for nearest sampling.
@@ -771,37 +892,46 @@ impl<'a> JpxPlane<'a> {
         } else {
             geometry
         };
-        if width == 0 || height == 0
+        if width == 0
+            || height == 0
             || u64::from(width).checked_mul(u64::from(height)) != Some(samples.len() as u64)
         {
             return Err(jpx_components());
         }
         let depth = component.bit_depth();
-        let maximum = 1u32.checked_shl(u32::from(depth))
+        let maximum = 1u32
+            .checked_shl(u32::from(depth))
             .and_then(|value| value.checked_sub(1))
-            .filter(|value| *value != 0).ok_or_else(jpx_components)?;
-        Ok(Self { samples, width, height, maximum: f64::from(maximum) })
+            .filter(|value| *value != 0)
+            .ok_or_else(jpx_components)?;
+        Ok(Self {
+            samples,
+            width,
+            height,
+            maximum: f64::from(maximum),
+        })
     }
 
-    fn fraction(
-        self,
-        x: usize,
-        y: usize,
-        width: u32,
-        height: u32,
-    ) -> Result<f64, DocError> {
-        let source_x = (x as u64).checked_mul(u64::from(self.width))
+    fn fraction(self, x: usize, y: usize, width: u32, height: u32) -> Result<f64, DocError> {
+        let source_x = (x as u64)
+            .checked_mul(u64::from(self.width))
             .and_then(|value| value.checked_div(u64::from(width)))
             .ok_or_else(jpx_components)?;
-        let source_y = (y as u64).checked_mul(u64::from(self.height))
+        let source_y = (y as u64)
+            .checked_mul(u64::from(self.height))
             .and_then(|value| value.checked_div(u64::from(height)))
             .ok_or_else(jpx_components)?;
-        let offset = source_y.checked_mul(u64::from(self.width))
+        let offset = source_y
+            .checked_mul(u64::from(self.width))
             .and_then(|row| row.checked_add(source_x))
             .and_then(|offset| usize::try_from(offset).ok())
             .ok_or_else(jpx_components)?;
-        let sample = self.samples.get(offset).copied()
-            .filter(|value| value.is_finite()).ok_or_else(jpx_components)?;
+        let sample = self
+            .samples
+            .get(offset)
+            .copied()
+            .filter(|value| value.is_finite())
+            .ok_or_else(jpx_components)?;
         Ok((f64::from(sample) / self.maximum).clamp(0.0, 1.0))
     }
 }
@@ -817,37 +947,49 @@ impl JpxHeader {
     fn read(bytes: &[u8]) -> Result<Self, DocError> {
         let stream = jpx_codestream(bytes)?;
         if !stream.starts_with(b"\xff\x4f\xff\x51") {
-            return Err(jpx_error(hayro_jpeg2000::FormatError::InvalidSignature.into()));
+            return Err(jpx_error(
+                hayro_jpeg2000::FormatError::InvalidSignature.into(),
+            ));
         }
         let count = usize::from(jpx_u16(stream, 40)?);
         if !(1..=5).contains(&count) {
             return Err(jpx_components());
         }
-        let end = count.checked_mul(3).and_then(|size| size.checked_add(42))
+        let end = count
+            .checked_mul(3)
+            .and_then(|size| size.checked_add(42))
             .ok_or_else(jpx_components)?;
         let length = usize::from(jpx_u16(stream, 4)?);
         if length.checked_add(4) != Some(end) || stream.get(..end).is_none() {
-            return Err(DocError::Malformed { offset: 4, what: "jpx_decode" });
+            return Err(DocError::Malformed {
+                offset: 4,
+                what: "jpx_decode",
+            });
         }
         let right = jpx_u32(stream, 8)?;
         let bottom = jpx_u32(stream, 12)?;
         let left = jpx_u32(stream, 16)?;
         let top = jpx_u32(stream, 20)?;
         if right <= left || bottom <= top {
-            return Err(DocError::Malformed { offset: 8, what: "jpx_decode" });
+            return Err(DocError::Malformed {
+                offset: 8,
+                what: "jpx_decode",
+            });
         }
         let mut geometry = [(0, 0); 5];
-        for (slot, entry) in geometry.iter_mut()
-            .zip(stream.get(42..end).ok_or_else(jpx_components)?.chunks_exact(3))
-        {
+        for (slot, entry) in geometry.iter_mut().zip(
+            stream
+                .get(42..end)
+                .ok_or_else(jpx_components)?
+                .chunks_exact(3),
+        ) {
             let sx = u32::from(entry.get(1).copied().ok_or_else(jpx_components)?);
             let sy = u32::from(entry.get(2).copied().ok_or_else(jpx_components)?);
             if sx == 0 || sy == 0 {
                 return Err(jpx_components());
             }
-            let ceil = |value: u32, step: u32| {
-                (value / step).saturating_add(u32::from(value % step != 0))
-            };
+            let ceil =
+                |value: u32, step: u32| (value / step).saturating_add(u32::from(value % step != 0));
             *slot = (
                 ceil(right, sx).saturating_sub(ceil(left, sx)),
                 ceil(bottom, sy).saturating_sub(ceil(top, sy)),
@@ -863,38 +1005,55 @@ fn jpx_codestream(bytes: &[u8]) -> Result<&[u8], DocError> {
         return Ok(bytes);
     }
     if !bytes.starts_with(b"\x00\x00\x00\x0c\x6a\x50\x20\x20") {
-        return Err(DocError::Malformed { offset: 0, what: "jpx_decode" });
+        return Err(DocError::Malformed {
+            offset: 0,
+            what: "jpx_decode",
+        });
     }
     let mut remaining = bytes;
     let mut codestream = None;
     while !remaining.is_empty() {
         let size = jpx_u32(remaining, 0)?;
-        let kind = remaining.get(4..8)
-            .ok_or(DocError::Malformed { offset: 0, what: "jpx_decode" })?;
+        let kind = remaining.get(4..8).ok_or(DocError::Malformed {
+            offset: 0,
+            what: "jpx_decode",
+        })?;
         let (size, header) = match size {
             0 => (remaining.len(), 8),
             1 => {
                 let high = u64::from(jpx_u32(remaining, 8)?);
                 let low = u64::from(jpx_u32(remaining, 12)?);
-                let size = usize::try_from((high << 32) | low)
-                    .map_err(|_| DocError::Malformed { offset: 8, what: "jpx_decode" })?;
+                let size =
+                    usize::try_from((high << 32) | low).map_err(|_| DocError::Malformed {
+                        offset: 8,
+                        what: "jpx_decode",
+                    })?;
                 (size, 16)
             }
             size => (
-                usize::try_from(size)
-                    .map_err(|_| DocError::Malformed { offset: 0, what: "jpx_decode" })?,
+                usize::try_from(size).map_err(|_| DocError::Malformed {
+                    offset: 0,
+                    what: "jpx_decode",
+                })?,
                 8,
             ),
         };
-        let payload = remaining.get(header..size)
-            .ok_or(DocError::Malformed { offset: 0, what: "jpx_decode" })?;
+        let payload = remaining.get(header..size).ok_or(DocError::Malformed {
+            offset: 0,
+            what: "jpx_decode",
+        })?;
         if kind == b"jp2c" {
             codestream = Some(payload);
         }
-        remaining = remaining.get(size..)
-            .ok_or(DocError::Malformed { offset: 0, what: "jpx_decode" })?;
+        remaining = remaining.get(size..).ok_or(DocError::Malformed {
+            offset: 0,
+            what: "jpx_decode",
+        })?;
     }
-    codestream.ok_or(DocError::Malformed { offset: 0, what: "jpx_decode" })
+    codestream.ok_or(DocError::Malformed {
+        offset: 0,
+        what: "jpx_decode",
+    })
 }
 
 #[cfg(feature = "jpx")]
@@ -902,7 +1061,10 @@ fn jpx_u16(bytes: &[u8], offset: usize) -> Result<u16, DocError> {
     let end = offset.checked_add(2).ok_or_else(jpx_components)?;
     match bytes.get(offset..end) {
         Some([a, b]) => Ok(u16::from_be_bytes([*a, *b])),
-        _ => Err(DocError::Malformed { offset: offset as u64, what: "jpx_decode" }),
+        _ => Err(DocError::Malformed {
+            offset: offset as u64,
+            what: "jpx_decode",
+        }),
     }
 }
 
@@ -911,7 +1073,10 @@ fn jpx_u32(bytes: &[u8], offset: usize) -> Result<u32, DocError> {
     let end = offset.checked_add(4).ok_or_else(jpx_components)?;
     match bytes.get(offset..end) {
         Some([a, b, c, d]) => Ok(u32::from_be_bytes([*a, *b, *c, *d])),
-        _ => Err(DocError::Malformed { offset: offset as u64, what: "jpx_decode" }),
+        _ => Err(DocError::Malformed {
+            offset: offset as u64,
+            what: "jpx_decode",
+        }),
     }
 }
 
@@ -924,14 +1089,21 @@ fn image_params(
     height: u32,
     budget: &mut Budget,
 ) -> Result<ImageParams, DocError> {
-    let mut params = ImageParams { width, height, ..ImageParams::default() };
-    let filters = resolver.resolve_dict_key(dict, b"Filter")?
+    let mut params = ImageParams {
+        width,
+        height,
+        ..ImageParams::default()
+    };
+    let filters = resolver
+        .resolve_dict_key(dict, b"Filter")?
         .ok_or_else(|| wrong(object.id(), "image filter"))?;
     let mut index = None;
     if let Some(array) = filters.get().as_array() {
         for (position, value) in array.iter().enumerate() {
             let value = resolver.resolve(value)?;
-            let kind = value.get().as_name()
+            let kind = value
+                .get()
+                .as_name()
                 .and_then(|name| FilterKind::from_name(name.decoded().as_ref()));
             if kind.map(FilterKind::is_image_codec).unwrap_or(false) {
                 if kind == Some(codec) {
@@ -941,7 +1113,9 @@ fn image_params(
             }
         }
     } else {
-        let kind = filters.get().as_name()
+        let kind = filters
+            .get()
+            .as_name()
             .and_then(|name| FilterKind::from_name(name.decoded().as_ref()));
         if kind == Some(codec) {
             index = Some(0);
@@ -964,7 +1138,9 @@ fn image_params(
     if value.get().is_null() {
         return Ok(params);
     }
-    let parameters = value.get().as_dict()
+    let parameters = value
+        .get()
+        .as_dict()
         .ok_or_else(|| wrong(object.id(), "image DecodeParms dictionary"))?;
     if codec == FilterKind::Jbig2 {
         if let Some(globals) = resolver.resolve_dict_key(parameters, b"JBIG2Globals")? {
@@ -977,7 +1153,9 @@ fn image_params(
                 }
                 let decoded = decode(resolver, globals_object, budget)?;
                 if decoded.image.is_some() {
-                    return Err(DocError::Unsupported { feature: "JBIG2Globals image codec" });
+                    return Err(DocError::Unsupported {
+                        feature: "JBIG2Globals image codec",
+                    });
                 }
                 if decoded.truncated {
                     warn(resolver, globals_object, "image_jbig2_globals_truncated");
@@ -987,32 +1165,42 @@ fn image_params(
         }
         return Ok(params);
     }
-    params.k = i32::try_from(
-        image_integer(resolver, parameters, b"K", 0, object.id())?,
-    ).map_err(|_| wrong(object.id(), "CCITT K integer"))?;
-    params.columns = u32::try_from(
-        image_integer(resolver, parameters, b"Columns", 1728, object.id())?,
-    ).map_err(|_| wrong(object.id(), "CCITT Columns integer"))?;
-    params.rows = u32::try_from(
-        image_integer(resolver, parameters, b"Rows", 0, object.id())?,
-    ).map_err(|_| wrong(object.id(), "CCITT Rows integer"))?;
-    params.damaged_rows_before_error = u32::try_from(
-        image_integer(
-            resolver, parameters, b"DamagedRowsBeforeError", 0, object.id(),
-        )?,
-    ).map_err(|_| wrong(object.id(), "CCITT damaged row count"))?;
-    params.black_is_1 = image_boolean(
-        resolver, parameters, b"BlackIs1", false, object.id(),
-    )?;
+    params.k = i32::try_from(image_integer(resolver, parameters, b"K", 0, object.id())?)
+        .map_err(|_| wrong(object.id(), "CCITT K integer"))?;
+    params.columns = u32::try_from(image_integer(
+        resolver,
+        parameters,
+        b"Columns",
+        1728,
+        object.id(),
+    )?)
+    .map_err(|_| wrong(object.id(), "CCITT Columns integer"))?;
+    params.rows = u32::try_from(image_integer(
+        resolver,
+        parameters,
+        b"Rows",
+        0,
+        object.id(),
+    )?)
+    .map_err(|_| wrong(object.id(), "CCITT Rows integer"))?;
+    params.damaged_rows_before_error = u32::try_from(image_integer(
+        resolver,
+        parameters,
+        b"DamagedRowsBeforeError",
+        0,
+        object.id(),
+    )?)
+    .map_err(|_| wrong(object.id(), "CCITT damaged row count"))?;
+    params.black_is_1 = image_boolean(resolver, parameters, b"BlackIs1", false, object.id())?;
     params.encoded_byte_align = image_boolean(
-        resolver, parameters, b"EncodedByteAlign", false, object.id(),
+        resolver,
+        parameters,
+        b"EncodedByteAlign",
+        false,
+        object.id(),
     )?;
-    params.end_of_line = image_boolean(
-        resolver, parameters, b"EndOfLine", false, object.id(),
-    )?;
-    params.end_of_block = image_boolean(
-        resolver, parameters, b"EndOfBlock", true, object.id(),
-    )?;
+    params.end_of_line = image_boolean(resolver, parameters, b"EndOfLine", false, object.id())?;
+    params.end_of_block = image_boolean(resolver, parameters, b"EndOfBlock", true, object.id())?;
     Ok(params)
 }
 
@@ -1026,7 +1214,9 @@ fn image_integer(
     match resolver.resolve_dict_key(dict, key)? {
         None => Ok(default),
         Some(value) if value.get().is_null() => Ok(default),
-        Some(value) => value.get().as_i64()
+        Some(value) => value
+            .get()
+            .as_i64()
             .ok_or_else(|| wrong(id, "integer image decode parameter")),
     }
 }
@@ -1041,7 +1231,9 @@ fn image_boolean(
     match resolver.resolve_dict_key(dict, key)? {
         None => Ok(default),
         Some(value) if value.get().is_null() => Ok(default),
-        Some(value) => value.get().as_bool()
+        Some(value) => value
+            .get()
+            .as_bool()
             .ok_or_else(|| wrong(id, "boolean image decode parameter")),
     }
 }
@@ -1052,17 +1244,15 @@ fn dimension(
     key: &[u8],
     id: Option<ObjectRef>,
 ) -> Result<u32, DocError> {
-    resolver.resolve_dict_key(dict, key)?
+    resolver
+        .resolve_dict_key(dict, key)?
         .and_then(|value| value.get().as_i64())
         .and_then(|number| u32::try_from(number).ok())
         .filter(|number| *number != 0)
         .ok_or_else(|| wrong(id, "positive image dimension"))
 }
 
-fn read_color(
-    resolver: &mut Resolver<'_>,
-    dict: DictRef<'_>,
-) -> Result<ColorSpec, DocError> {
+fn read_color(resolver: &mut Resolver<'_>, dict: DictRef<'_>) -> Result<ColorSpec, DocError> {
     let Some(value) = resolver.resolve_dict_key(dict, b"ColorSpace")? else {
         return Ok(ColorSpec::simple(ColorSpace::Unsupported));
     };
@@ -1073,7 +1263,9 @@ fn read_color(
         return Ok(ColorSpec::simple(ColorSpace::Unsupported));
     };
     let first = resolver.resolve(first)?;
-    let indexed = first.get().as_name()
+    let indexed = first
+        .get()
+        .as_name()
         .map(|name| name.eq_bytes(b"Indexed") || name.eq_bytes(b"I"))
         .unwrap_or(false);
     if !indexed {
@@ -1083,7 +1275,8 @@ fn read_color(
         return Err(wrong(value.object().id(), "Indexed color space"));
     }
 
-    let base_value = array.get(1)
+    let base_value = array
+        .get(1)
         .ok_or_else(|| wrong(value.object().id(), "Indexed base"))?;
     let base = match simple_space(resolver, base_value)? {
         ColorSpace::Gray => IndexedBase::Gray,
@@ -1091,12 +1284,18 @@ fn read_color(
         ColorSpace::Cmyk => IndexedBase::Cmyk,
         _ => return Ok(ColorSpec::simple(ColorSpace::Unsupported)),
     };
-    let hival = resolver.resolve(array.get(2)
-        .ok_or_else(|| wrong(value.object().id(), "Indexed hival"))?)?;
-    let hival = hival.get().as_i64()
+    let hival = resolver.resolve(
+        array
+            .get(2)
+            .ok_or_else(|| wrong(value.object().id(), "Indexed hival"))?,
+    )?;
+    let hival = hival
+        .get()
+        .as_i64()
         .and_then(|number| u8::try_from(number).ok())
         .ok_or_else(|| wrong(value.object().id(), "Indexed hival in 0..255"))?;
-    let lookup = array.get(3)
+    let lookup = array
+        .get(3)
         .ok_or_else(|| wrong(value.object().id(), "Indexed lookup"))?
         .to_owned();
     Ok(ColorSpec {
@@ -1107,10 +1306,7 @@ fn read_color(
 
 /// Indexed bases cannot themselves be Indexed. Parsing is nonrecursive,
 /// including when the base or ICC profile is indirect.
-fn simple_space(
-    resolver: &mut Resolver<'_>,
-    value: ValueRef<'_>,
-) -> Result<ColorSpace, DocError> {
+fn simple_space(resolver: &mut Resolver<'_>, value: ValueRef<'_>) -> Result<ColorSpace, DocError> {
     let value = resolver.resolve(value)?;
     if let Some(name) = value.get().as_name() {
         return Ok(named_space(name));
@@ -1129,14 +1325,20 @@ fn simple_space(
         return Ok(named_space(name));
     }
 
-    let profile = resolver.resolve(array.get(1)
-        .ok_or_else(|| wrong(value.object().id(), "ICCBased profile"))?)?;
+    let profile = resolver.resolve(
+        array
+            .get(1)
+            .ok_or_else(|| wrong(value.object().id(), "ICCBased profile"))?,
+    )?;
     if !profile.object().is_stream() {
         return Err(wrong(profile.object().id(), "ICC profile stream"));
     }
-    let dict = profile.object().dict()
+    let dict = profile
+        .object()
+        .dict()
         .ok_or_else(|| wrong(profile.object().id(), "ICC profile dictionary"))?;
-    let count = resolver.resolve_dict_key(dict, b"N")?
+    let count = resolver
+        .resolve_dict_key(dict, b"N")?
         .and_then(|value| value.get().as_i64());
     Ok(match count {
         Some(1) => ColorSpace::Gray,
@@ -1217,7 +1419,10 @@ fn read_decode(
     bpc: u8,
     id: Option<ObjectRef>,
 ) -> Result<[DecodePair; 4], DocError> {
-    let mut pairs = [DecodePair { low: 0.0, high: 1.0 }; 4];
+    let mut pairs = [DecodePair {
+        low: 0.0,
+        high: 1.0,
+    }; 4];
     if matches!(space, ColorSpace::Indexed { .. }) {
         if let Some(pair) = pairs.first_mut() {
             pair.high = f64::from(sample_max(bpc));
@@ -1229,21 +1434,37 @@ fn read_decode(
     if value.get().is_null() {
         return Ok(pairs);
     }
-    let array = value.get().as_array().ok_or_else(|| wrong(id, "image Decode array"))?;
-    let count = channels.checked_mul(2)
+    let array = value
+        .get()
+        .as_array()
+        .ok_or_else(|| wrong(id, "image Decode array"))?;
+    let count = channels
+        .checked_mul(2)
         .ok_or_else(|| wrong(id, "image Decode components"))?;
     if array.len() != count {
         return Err(wrong(id, "image Decode component pairs"));
     }
     let mut values = array.iter();
     for pair in pairs.iter_mut().take(channels) {
-        let low = resolver.resolve(values.next()
-            .ok_or_else(|| wrong(id, "image Decode number"))?)?;
-        let high = resolver.resolve(values.next()
-            .ok_or_else(|| wrong(id, "image Decode number"))?)?;
-        pair.low = low.get().as_f64().filter(|number| number.is_finite())
+        let low = resolver.resolve(
+            values
+                .next()
+                .ok_or_else(|| wrong(id, "image Decode number"))?,
+        )?;
+        let high = resolver.resolve(
+            values
+                .next()
+                .ok_or_else(|| wrong(id, "image Decode number"))?,
+        )?;
+        pair.low = low
+            .get()
+            .as_f64()
+            .filter(|number| number.is_finite())
             .ok_or_else(|| wrong(id, "finite image Decode number"))?;
-        pair.high = high.get().as_f64().filter(|number| number.is_finite())
+        pair.high = high
+            .get()
+            .as_f64()
+            .filter(|number| number.is_finite())
             .ok_or_else(|| wrong(id, "finite image Decode number"))?;
     }
     Ok(pairs)
@@ -1258,7 +1479,8 @@ fn read_lookup(
     let ColorSpace::Indexed { base, hival } = space else {
         return Err(wrong(value.object().id(), "Indexed color space"));
     };
-    let expected = usize::from(hival).checked_add(1)
+    let expected = usize::from(hival)
+        .checked_add(1)
         .and_then(|count| count.checked_mul(channels(base_space(base))))
         .ok_or_else(|| size_error(resolver.document().limits().max_decoded_bytes))?;
     let value = resolver.resolve(value.get())?;
@@ -1279,11 +1501,16 @@ fn read_lookup(
     }
 
     if !value.object().is_stream() {
-        return Err(wrong(value.object().id(), "Indexed lookup string or stream"));
+        return Err(wrong(
+            value.object().id(),
+            "Indexed lookup string or stream",
+        ));
     }
     let mut decoded = decode(resolver, value.object(), budget)?;
     if decoded.image.is_some() {
-        return Err(DocError::Unsupported { feature: "image palette codec" });
+        return Err(DocError::Unsupported {
+            feature: "image palette codec",
+        });
     }
     if decoded.truncated {
         warn(resolver, value.object(), "image_truncated");
@@ -1309,21 +1536,31 @@ impl SampleLayout {
     ) -> Result<Self, DocError> {
         let width = usize::try_from(width).map_err(|_| size_error(maximum))?;
         let height = usize::try_from(height).map_err(|_| size_error(maximum))?;
-        let stride = width.checked_mul(channels)
+        let stride = width
+            .checked_mul(channels)
             .and_then(|samples| samples.checked_mul(usize::from(bpc)))
             .and_then(|bits| bits.checked_add(7))
             .map(|bits| bits / 8)
             .ok_or_else(|| size_error(maximum))?;
         let row_rgba = width.checked_mul(4).ok_or_else(|| size_error(maximum))?;
-        let rgba = row_rgba.checked_mul(height).ok_or_else(|| size_error(maximum))?;
-        let expected = stride.checked_mul(height).ok_or_else(|| size_error(maximum))?;
+        let rgba = row_rgba
+            .checked_mul(height)
+            .ok_or_else(|| size_error(maximum))?;
+        let expected = stride
+            .checked_mul(height)
+            .ok_or_else(|| size_error(maximum))?;
         check(
             LimitKind::DecodedBytes,
             rgba as u64,
             maximum.min(isize::MAX as u64),
         )?;
         check(LimitKind::DecodedBytes, expected as u64, maximum)?;
-        Ok(Self { stride, row_rgba, rgba, expected })
+        Ok(Self {
+            stride,
+            row_rgba,
+            rgba,
+            expected,
+        })
     }
 }
 
@@ -1344,7 +1581,8 @@ impl Samples<'_> {
             }
             8 => u16::from(first),
             1 | 2 | 4 => {
-                let shift = 8u8.saturating_sub(self.bpc)
+                let shift = 8u8
+                    .saturating_sub(self.bpc)
                     .saturating_sub((self.bit % 8) as u8);
                 u16::from(first >> shift) & sample_max(self.bpc)
             }
@@ -1380,7 +1618,9 @@ fn pixel_rgba(
     }
 
     let mut values = [0u8; 4];
-    for (slot, (sample, pair)) in values.iter_mut().zip(raw.iter().zip(pairs.iter()))
+    for (slot, (sample, pair)) in values
+        .iter_mut()
+        .zip(raw.iter().zip(pairs.iter()))
         .take(channels(space))
     {
         *slot = pair.byte(*sample, bpc);
@@ -1396,8 +1636,10 @@ fn rgb(space: ColorSpace, values: &[u8]) -> Option<[u8; 3]> {
         (ColorSpace::Cmyk, [c, m, y, k, ..]) => {
             let black = 255u16.saturating_sub(u16::from(*k));
             let component = |value: u8| {
-                (255u16.saturating_sub(u16::from(value))
-                    .saturating_mul(black) / 255) as u8
+                (255u16
+                    .saturating_sub(u16::from(value))
+                    .saturating_mul(black)
+                    / 255) as u8
             };
             Some([component(*c), component(*m), component(*y)])
         }
@@ -1421,10 +1663,14 @@ fn apply_soft_mask(
     }
     let (mask, _) = read_image(resolver, mask_object, max_pixels, false, budget)?;
     if mask.color_space != ColorSpace::Gray || mask.image_mask {
-        return Err(DocError::Unsupported { feature: "non-gray soft mask" });
+        return Err(DocError::Unsupported {
+            feature: "non-gray soft mask",
+        });
     }
     let ImageData::Pixels { rgba: mask_rgba } = mask.data else {
-        return Err(DocError::Unsupported { feature: "soft mask codec" });
+        return Err(DocError::Unsupported {
+            feature: "soft mask codec",
+        });
     };
     let ImageData::Pixels { rgba } = &mut image.data else {
         return Ok(());
@@ -1437,20 +1683,21 @@ fn apply_soft_mask(
     let mut alpha = zeroed(count, maximum)?;
 
     for (y, row) in alpha.chunks_exact_mut(width).enumerate() {
-        let source_y = (y as u64).saturating_mul(u64::from(mask.height))
-            / u64::from(image.height);
+        let source_y = (y as u64).saturating_mul(u64::from(mask.height)) / u64::from(image.height);
         for (x, slot) in row.iter_mut().enumerate() {
-            let source_x = (x as u64).saturating_mul(u64::from(mask.width))
-                / u64::from(image.width);
-            let offset = source_y.checked_mul(u64::from(mask.width))
+            let source_x =
+                (x as u64).saturating_mul(u64::from(mask.width)) / u64::from(image.width);
+            let offset = source_y
+                .checked_mul(u64::from(mask.width))
                 .and_then(|row| row.checked_add(source_x))
                 .and_then(|pixel| pixel.checked_mul(4))
                 .and_then(|offset| usize::try_from(offset).ok())
                 .ok_or_else(|| size_error(maximum))?;
             let end = offset.checked_add(4).ok_or_else(|| size_error(maximum))?;
             *slot = match mask_rgba.get(offset..end) {
-                Some([gray, _, _, valid]) =>
-                    (u16::from(*gray).saturating_mul(u16::from(*valid)) / 255) as u8,
+                Some([gray, _, _, valid]) => {
+                    (u16::from(*gray).saturating_mul(u16::from(*valid)) / 255) as u8
+                }
                 _ => 0,
             };
         }
@@ -1479,7 +1726,9 @@ fn zeroed(size: usize, maximum: u64) -> Result<Vec<u8>, DocError> {
     let maximum = maximum.min(isize::MAX as u64);
     check(LimitKind::DecodedBytes, size as u64, maximum)?;
     let mut bytes = Vec::new();
-    bytes.try_reserve_exact(size).map_err(|_| size_error(maximum))?;
+    bytes
+        .try_reserve_exact(size)
+        .map_err(|_| size_error(maximum))?;
     bytes.resize(size, 0);
     Ok(bytes)
 }

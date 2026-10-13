@@ -5,13 +5,13 @@ use std::path::Path;
 use pdf_core::file;
 use pdf_core::pages::{Page, PageWalk};
 use pdf_core::{Document, Limits};
-use pdf_toolkit_inspect::JsonWriter;
 use pdf_text::extract::{extract_text, page_receipt, page_receipt_cached, PageReceipt};
 use pdf_text::layout::BlockKind;
+use pdf_toolkit_inspect::JsonWriter;
 
 use super::{
-    append_resolver_warnings, inspect_pages, object_ref_text, refusal_from_error,
-    write_file_info, write_refusal, write_warnings,
+    append_resolver_warnings, inspect_pages, object_ref_text, refusal_from_error, write_file_info,
+    write_refusal, write_warnings,
 };
 
 fn write_text_output(text: &str, note: Option<&str>) -> u8 {
@@ -64,11 +64,8 @@ pub(super) fn run_text(path: &Path, limits: Limits, repair: bool) -> u8 {
     };
 
     if repair {
-        let document = match Document::open_with(
-            source.clone(),
-            limits,
-            pdf_core::OpenMode::Repair,
-        ) {
+        let document = match Document::open_with(source.clone(), limits, pdf_core::OpenMode::Repair)
+        {
             Ok(document) => document,
             Err(error) => {
                 eprintln!("{error}");
@@ -147,7 +144,9 @@ fn write_page(json: &mut JsonWriter, page: &PageReceipt) {
         json.string(&page.layout.block_text(block));
         json.member("lines");
         json.begin_array();
-        let lines = page.layout.lines
+        let lines = page
+            .layout
+            .lines
             .get(block.lines.start as usize..block.lines.end as usize)
             .unwrap_or(&[]);
         for line in lines {
@@ -243,11 +242,7 @@ pub(super) fn run_receipt(path: &Path, limits: Limits) -> u8 {
 
 /// Materialize every layout, including during mutation checks.
 /// A separate resolver keeps this pass independent of stream-only decoding.
-pub(super) fn scan_text(
-    document: &Document,
-    pages: &[Page],
-    refusal: &mut Option<String>,
-) -> u64 {
+pub(super) fn scan_text(document: &Document, pages: &[Page], refusal: &mut Option<String>) -> u64 {
     let mut resolver = document.resolver();
     let mut fonts = pdf_text::font::FontCache::default();
     let mut glyphs = 0u64;
@@ -282,33 +277,35 @@ pub(super) fn fixture_values(
 ) {
     actuals.insert(
         format!("{prefix}.text_refusal"),
-        page.refusal.as_ref().map(|error| error.code())
-            .unwrap_or("none").to_string(),
+        page.refusal
+            .as_ref()
+            .map(|error| error.code())
+            .unwrap_or("none")
+            .to_string(),
     );
     if page.refusal.is_some() {
         return;
     }
     let plain = page.layout.plain_text();
     actuals.insert(format!("{prefix}.text_norm"), normalized(&plain));
-    let lines = plain.lines().map(normalized).filter(|line| !line.is_empty())
+    let lines = plain
+        .lines()
+        .map(normalized)
+        .filter(|line| !line.is_empty())
         .collect::<Vec<_>>();
     actuals.insert(format!("{prefix}.lines"), lines.join(" / "));
-    let headings = page.layout.blocks.iter()
+    let headings = page
+        .layout
+        .blocks
+        .iter()
         .filter(|block| matches!(block.kind, BlockKind::Heading(_)))
         .map(|block| normalized(&page.layout.block_text(block)))
         .collect::<Vec<_>>();
     actuals.insert(format!("{prefix}.headings"), headings.join(" | "));
-    actuals.insert(
-        format!("{prefix}.columns"),
-        page.layout.columns.to_string(),
-    );
-    actuals.insert(
-        format!("{prefix}.unmapped"),
-        page.unmapped.to_string(),
-    );
+    actuals.insert(format!("{prefix}.columns"), page.layout.columns.to_string());
+    actuals.insert(format!("{prefix}.unmapped"), page.unmapped.to_string());
     actuals.insert(
         format!("{prefix}.ocr_required"),
         (page.glyphs == 0 && !page.images.is_empty()).to_string(),
     );
 }
-

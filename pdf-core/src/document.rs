@@ -5,7 +5,9 @@ use crate::crypt::Crypt;
 use crate::error::{malformed, DocError, Warning};
 use crate::filter::{DecodeParams, Decoded, FilterKind, FilterStep};
 use crate::limits::{check, LimitKind, Limits, Refusal};
-use crate::object::{parse_indirect_pending, parse_indirect_pending_repair, DictRef, Object, PdfStr, Value, ValueRef};
+use crate::object::{
+    parse_indirect_pending, parse_indirect_pending_repair, DictRef, Object, PdfStr, Value, ValueRef,
+};
 use crate::objstm::ObjectStream;
 use crate::source::PdfSource;
 use crate::work::ObjectRef;
@@ -66,9 +68,9 @@ impl Document {
             return Err(malformed(source.header().offset(), "header"));
         }
         let mut document = match crate::xref::read(&source, &limits) {
-            Ok((xref, trailer, warnings)) => {
-                Ok(Self::from_parts(source, xref, trailer, limits, warnings, None, false))
-            }
+            Ok((xref, trailer, warnings)) => Ok(Self::from_parts(
+                source, xref, trailer, limits, warnings, None, false,
+            )),
             Err(error) if mode == OpenMode::Repair && !crate::repair::is_hard_error(&error) => {
                 match crate::repair::rebuild(source, limits) {
                     Ok(document) => {
@@ -79,13 +81,15 @@ impl Document {
                         } else {
                             Ok(document)
                         }
-                    },
+                    }
                     Err(repair_error) if crate::repair::is_hard_error(&repair_error) => {
                         Err(repair_error)
                     }
                     // Keep an accurate codec or unsupported-feature refusal when
                     // scanning could not recover a usable document.
-                    Err(_) if matches!(error, DocError::Filter(_) | DocError::Unsupported { .. }) => {
+                    Err(_)
+                        if matches!(error, DocError::Filter(_) | DocError::Unsupported { .. }) =>
+                    {
                         Err(error)
                     }
                     Err(repair_error) => Err(repair_error),
@@ -120,8 +124,13 @@ impl Document {
     }
 
     fn initialize_crypt(&mut self, password: Option<&[u8]>) -> Result<(), DocError> {
-        let Some(value) = self.trailer.dict().and_then(|dict| dict.get(b"Encrypt"))
-            .filter(|value| !value.is_null()).map(|value| value.to_owned()) else {
+        let Some(value) = self
+            .trailer
+            .dict()
+            .and_then(|dict| dict.get(b"Encrypt"))
+            .filter(|value| !value.is_null())
+            .map(|value| value.to_owned())
+        else {
             return Ok(());
         };
         let mut permissions = None;
@@ -134,12 +143,15 @@ impl Document {
                 if crate::encryption::PrivateCrypt::recognizes(&value) {
                     private_handler = true;
                     private_crypt = Some(Arc::new(crate::encryption::PrivateCrypt::open(
-                        &value, password, resolver.document().limits(),
+                        &value,
+                        password,
+                        resolver.document().limits(),
                     )?));
                     return Ok(None);
                 }
                 if let Some(dict) = value.get().as_dict() {
-                    permissions = resolver.resolve_dict_key(dict, b"P")?
+                    permissions = resolver
+                        .resolve_dict_key(dict, b"P")?
                         .and_then(|value| value.get().as_i64())
                         .and_then(|number| i32::try_from(number).ok());
                 }
@@ -236,12 +248,16 @@ impl Document {
     }
 
     pub fn encryption_ref(&self) -> Option<ObjectRef> {
-        self.trailer.dict().and_then(|dict| dict.get(b"Encrypt"))
+        self.trailer
+            .dict()
+            .and_then(|dict| dict.get(b"Encrypt"))
             .and_then(|value| value.as_ref())
     }
 
     fn verify_private_objects(&self) -> Result<(), DocError> {
-        let Some(crypt) = &self.private_crypt else { return Ok(()) };
+        let Some(crypt) = &self.private_crypt else {
+            return Ok(());
+        };
         let mut resolver = self.resolver();
         let mut total = 0u64;
         for number in 1..self.xref.size() {
@@ -254,12 +270,21 @@ impl Document {
             }
             total = total.saturating_add(object.decrypted_string_bytes());
             if let Some(raw) = object.stream_raw() {
-                let id = object.id().ok_or_else(|| malformed(0, "PSChaCha object ID"))?;
+                let id = object
+                    .id()
+                    .ok_or_else(|| malformed(0, "PSChaCha object ID"))?;
                 total = total.saturating_add(
-                    crypt.key.open(id, raw, self.limits.max_decoded_bytes)?.len() as u64,
+                    crypt
+                        .key
+                        .open(id, raw, self.limits.max_decoded_bytes)?
+                        .len() as u64,
                 );
             }
-            check(LimitKind::TotalDecodedBytes, total, self.limits.max_total_decoded_bytes)?;
+            check(
+                LimitKind::TotalDecodedBytes,
+                total,
+                self.limits.max_total_decoded_bytes,
+            )?;
         }
         Ok(())
     }
@@ -316,7 +341,11 @@ pub struct Resolver<'d> {
 
 enum GetTask {
     Object(ObjectRef),
-    FinishObjectStream { id: ObjectRef, index: u32, number: u32 },
+    FinishObjectStream {
+        id: ObjectRef,
+        index: u32,
+        number: u32,
+    },
 }
 
 impl<'d> Resolver<'d> {
@@ -353,8 +382,8 @@ impl<'d> Resolver<'d> {
                     active.push(id.number());
                     match self.document.xref.get(id.number()) {
                         Some(XrefEntry::InUse { offset, generation }) => {
-                            let offset =
-                                usize::try_from(offset).map_err(|_| malformed(0, "object offset"))?;
+                            let offset = usize::try_from(offset)
+                                .map_err(|_| malformed(0, "object offset"))?;
                             let parse = if self.document.repair_mode {
                                 parse_indirect_pending_repair
                             } else {
@@ -443,21 +472,19 @@ impl<'d> Resolver<'d> {
                     }
                 }
                 GetTask::FinishObjectStream { id, index, number } => {
-                    let container = objects.pop().ok_or_else(|| malformed(0, "resolver state"))?;
+                    let container = objects
+                        .pop()
+                        .ok_or_else(|| malformed(0, "resolver state"))?;
                     let decoded = self.decode_stream(&container)?;
-                    if decoded.image.is_some()
-                        || (decoded.truncated && !self.document.repair_mode)
+                    if decoded.image.is_some() || (decoded.truncated && !self.document.repair_mode)
                     {
                         return Err(malformed(0, "object stream decode"));
                     }
                     let truncated = decoded.truncated;
                     let buf = Arc::<[u8]>::from(decoded.bytes);
                     let stream = if self.document.repair_mode {
-                        let (stream, recovered) = ObjectStream::parse_repair(
-                            &container,
-                            buf,
-                            &self.document.limits,
-                        )?;
+                        let (stream, recovered) =
+                            ObjectStream::parse_repair(&container, buf, &self.document.limits)?;
                         if recovered || truncated {
                             self.warn(Warning {
                                 offset: container.stream_range().map(|range| range.start as u64),
@@ -568,20 +595,24 @@ impl<'d> Resolver<'d> {
         if !self.document.decryptable() {
             return Err(DocError::Encrypted);
         }
-        let raw = stream
-            .stream_raw()
-            .ok_or(DocError::WrongType {
-                id: stream.id(),
-                expected: "stream",
-            })?;
+        let raw = stream.stream_raw().ok_or(DocError::WrongType {
+            id: stream.id(),
+            expected: "stream",
+        })?;
         let steps = filter_steps_for(stream, |value| self.resolve(value), true)?;
         if let Some(crypt) = &self.document.private_crypt {
             if !crypt.excluded(stream) {
                 if steps.iter().any(|step| step.kind == FilterKind::Crypt) {
-                    return Err(DocError::Unsupported { feature: "PSChaCha Crypt filter" });
+                    return Err(DocError::Unsupported {
+                        feature: "PSChaCha Crypt filter",
+                    });
                 }
-                let id = stream.id().ok_or_else(|| malformed(0, "PSChaCha object ID"))?;
-                let plain = crypt.key.open(id, raw, self.document.limits.max_decoded_bytes)?;
+                let id = stream
+                    .id()
+                    .ok_or_else(|| malformed(0, "PSChaCha object ID"))?;
+                let plain = crypt
+                    .key
+                    .open(id, raw, self.document.limits.max_decoded_bytes)?;
                 return crate::crypt::decode_stream(self, stream, &plain, &steps);
             }
         }
@@ -594,23 +625,42 @@ impl<'d> Resolver<'d> {
     pub fn decode_string(&mut self, owner: ObjectRef, s: PdfStr<'_>) -> Vec<u8> {
         let id = s.owner().unwrap_or(owner);
         if !self.document.decryptable() {
-            self.warn(Warning { offset: None, object: Some(id), what: "encrypted" });
+            self.warn(Warning {
+                offset: None,
+                object: Some(id),
+                what: "encrypted",
+            });
             return Vec::new();
         }
         s.decode_with(|bytes| {
-            let Some(crypt) = self.document.crypt() else { return bytes };
+            let Some(crypt) = self.document.crypt() else {
+                return bytes;
+            };
             if s.plaintext() || crypt.excluded(Some(id)) {
                 return bytes;
             }
-            match crypt.decrypt_owned(id, crypt.strings(), bytes, self.document.limits.max_decoded_bytes) {
+            match crypt.decrypt_owned(
+                id,
+                crypt.strings(),
+                bytes,
+                self.document.limits.max_decoded_bytes,
+            ) {
                 Ok((bytes, padding)) => {
                     if padding {
-                        self.warn(Warning { offset: None, object: Some(id), what: "crypt_padding" });
+                        self.warn(Warning {
+                            offset: None,
+                            object: Some(id),
+                            what: "crypt_padding",
+                        });
                     }
                     bytes
                 }
                 Err(error) => {
-                    self.warn(Warning { offset: None, object: Some(id), what: error.code() });
+                    self.warn(Warning {
+                        offset: None,
+                        object: Some(id),
+                        what: error.code(),
+                    });
                     Vec::new()
                 }
             }
@@ -626,10 +676,7 @@ impl<'d> Resolver<'d> {
     }
 }
 
-pub(crate) fn filter_steps<F>(
-    stream: &Object,
-    resolve: F,
-) -> Result<Vec<FilterStep>, DocError>
+pub(crate) fn filter_steps<F>(stream: &Object, resolve: F) -> Result<Vec<FilterStep>, DocError>
 where
     F: for<'o> FnMut(ValueRef<'o>) -> Result<Value, DocError>,
 {
@@ -669,10 +716,9 @@ where
     for (index, value) in values.iter().enumerate() {
         let value = resolve(value.get())?;
         let name = value.get().as_name().ok_or_else(wrong)?;
-        let kind = FilterKind::from_name(name.decoded().as_ref())
-            .ok_or(DocError::Unsupported {
-                feature: "filter:unknown",
-            })?;
+        let kind = FilterKind::from_name(name.decoded().as_ref()).ok_or(DocError::Unsupported {
+            feature: "filter:unknown",
+        })?;
         let param = if let Some(params) = &params {
             if let Some(array) = params.get().as_array() {
                 match array.get(index) {
@@ -687,7 +733,8 @@ where
         } else {
             None
         };
-        let decoded_params = parameters(param.as_ref(), kind, &mut resolve, stream.id(), allow_crypt)?;
+        let decoded_params =
+            parameters(param.as_ref(), kind, &mut resolve, stream.id(), allow_crypt)?;
         steps.push(FilterStep {
             kind,
             params: decoded_params,
@@ -774,12 +821,8 @@ where
     if value.get().is_null() {
         return Ok(None);
     }
-    value
-        .get()
-        .as_i64()
-        .map(Some)
-        .ok_or(DocError::WrongType {
-            id,
-            expected: "integer decode parameter",
-        })
+    value.get().as_i64().map(Some).ok_or(DocError::WrongType {
+        id,
+        expected: "integer decode parameter",
+    })
 }

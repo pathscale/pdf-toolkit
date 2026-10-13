@@ -16,32 +16,17 @@ pub(super) fn decode(input: &[u8], max_output: u64) -> Result<Decoded, FilterErr
                 let count = usize::from(control).saturating_add(1);
                 let Some(literal) = remaining.get(..count) else {
                     output.extend(remaining)?;
-                    return finish(
-                        output.into_vec(),
-                        true,
-                        FilterKind::RunLength,
-                        input.len(),
-                    );
+                    return finish(output.into_vec(), true, FilterKind::RunLength, input.len());
                 };
                 output.extend(literal)?;
                 let Some(rest) = remaining.get(count..) else {
-                    return finish(
-                        output.into_vec(),
-                        true,
-                        FilterKind::RunLength,
-                        offset,
-                    );
+                    return finish(output.into_vec(), true, FilterKind::RunLength, offset);
                 };
                 remaining = rest;
             }
             _ => {
                 let Some((&byte, rest)) = remaining.split_first() else {
-                    return finish(
-                        output.into_vec(),
-                        true,
-                        FilterKind::RunLength,
-                        input.len(),
-                    );
+                    return finish(output.into_vec(), true, FilterKind::RunLength, input.len());
                 };
                 remaining = rest;
                 let count = 257usize.saturating_sub(usize::from(control));
@@ -50,10 +35,5 @@ pub(super) fn decode(input: &[u8], max_output: u64) -> Result<Decoded, FilterErr
         }
     }
 
-    finish(
-        output.into_vec(),
-        true,
-        FilterKind::RunLength,
-        input.len(),
-    )
+    finish(output.into_vec(), true, FilterKind::RunLength, input.len())
 }

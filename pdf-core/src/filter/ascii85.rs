@@ -50,12 +50,7 @@ pub(super) fn decode(input: &[u8], max_output: u64) -> Result<Decoded, FilterErr
     }
 
     if count == 1 {
-        return finish(
-            output.into_vec(),
-            true,
-            FilterKind::Ascii85,
-            group_start,
-        );
+        return finish(output.into_vec(), true, FilterKind::Ascii85, group_start);
     }
     if count > 1 {
         for _ in count..5 {
@@ -63,31 +58,16 @@ pub(super) fn decode(input: &[u8], max_output: u64) -> Result<Decoded, FilterErr
                 .checked_mul(85)
                 .and_then(|value| value.checked_add(84))
             else {
-                return finish(
-                    output.into_vec(),
-                    true,
-                    FilterKind::Ascii85,
-                    group_start,
-                );
+                return finish(output.into_vec(), true, FilterKind::Ascii85, group_start);
             };
             value = next_value;
         }
         let word = value.to_be_bytes();
         let Some(partial) = word.get(..usize::from(count.saturating_sub(1))) else {
-            return finish(
-                output.into_vec(),
-                true,
-                FilterKind::Ascii85,
-                group_start,
-            );
+            return finish(output.into_vec(), true, FilterKind::Ascii85, group_start);
         };
         output.extend(partial)?;
     }
 
-    finish(
-        output.into_vec(),
-        !ended,
-        FilterKind::Ascii85,
-        input.len(),
-    )
+    finish(output.into_vec(), !ended, FilterKind::Ascii85, input.len())
 }

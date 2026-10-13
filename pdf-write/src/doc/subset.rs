@@ -56,10 +56,14 @@ fn unhint(bytes: &[u8]) -> io::Result<(Vec<u8>, Vec<u16>)> {
             if decoded == points {
                 break;
             }
-            let flag = *bytes.get(cursor).ok_or_else(|| invalid("simple glyph flags are truncated"))?;
+            let flag = *bytes
+                .get(cursor)
+                .ok_or_else(|| invalid("simple glyph flags are truncated"))?;
             cursor = add(cursor, 1)?;
             let repeat = if flag & 8 != 0 {
-                let repeat = *bytes.get(cursor).ok_or_else(|| invalid("glyph repeat is truncated"))?;
+                let repeat = *bytes
+                    .get(cursor)
+                    .ok_or_else(|| invalid("glyph repeat is truncated"))?;
                 cursor = add(cursor, 1)?;
                 add(usize::from(repeat), 1)?
             } else {
@@ -69,15 +73,33 @@ fn unhint(bytes: &[u8]) -> io::Result<(Vec<u8>, Vec<u16>)> {
             if decoded > points {
                 return Err(invalid("glyph flag repeat exceeds point count"));
             }
-            let x = if flag & 2 != 0 { 1 } else if flag & 16 != 0 { 0 } else { 2 };
-            let y = if flag & 4 != 0 { 1 } else if flag & 32 != 0 { 0 } else { 2 };
+            let x = if flag & 2 != 0 {
+                1
+            } else if flag & 16 != 0 {
+                0
+            } else {
+                2
+            };
+            let y = if flag & 4 != 0 {
+                1
+            } else if flag & 32 != 0 {
+                0
+            } else {
+                2
+            };
             coordinate_bytes = add(coordinate_bytes, mul(repeat, add(x, y)?)?)?;
         }
         let end = add(cursor, coordinate_bytes)?;
         slice(bytes, cursor, coordinate_bytes)?;
         let mut out = copied(slice(bytes, 0, instructions_at)?, MAX_FONT_BYTES)?;
         append(&mut out, &[0, 0], MAX_FONT_BYTES)?;
-        append(&mut out, bytes.get(flags_start..end).ok_or_else(|| invalid("glyph data range"))?, MAX_FONT_BYTES)?;
+        append(
+            &mut out,
+            bytes
+                .get(flags_start..end)
+                .ok_or_else(|| invalid("glyph data range"))?,
+            MAX_FONT_BYTES,
+        )?;
         return Ok((out, Vec::new()));
     }
     if contours != -1 {
@@ -95,7 +117,9 @@ fn unhint(bytes: &[u8]) -> io::Result<(Vec<u8>, Vec<u16>)> {
             return Err(invalid("composite glyph has unsupported flags"));
         }
         let transforms = [0x0008, 0x0040, 0x0080]
-            .iter().filter(|flag| flags & **flag != 0).count();
+            .iter()
+            .filter(|flag| flags & **flag != 0)
+            .count();
         if transforms > 1 || flags & 0x1800 == 0x1800 {
             return Err(invalid("composite glyph transform flags conflict"));
         }
@@ -122,7 +146,11 @@ fn unhint(bytes: &[u8]) -> io::Result<(Vec<u8>, Vec<u16>)> {
         }
     }
     if !complete {
-        return Err(refusal("glyph_components", MAX_COMPONENTS.saturating_add(1), MAX_COMPONENTS));
+        return Err(refusal(
+            "glyph_components",
+            MAX_COMPONENTS.saturating_add(1),
+            MAX_COMPONENTS,
+        ));
     }
     if instructions {
         let count = usize::from(read16(bytes, cursor)?);
@@ -140,13 +168,19 @@ fn retained(font: &TrueType) -> io::Result<BTreeSet<u16>> {
     let mut kept = BTreeSet::new();
     for root in roots {
         let mut stack = Vec::new();
-        push(&mut stack, (root, 1usize, false), "composite_work", MAX_WORK)?;
+        push(
+            &mut stack,
+            (root, 1usize, false),
+            "composite_work",
+            MAX_WORK,
+        )?;
         while let Some((glyph, depth, exit)) = stack.pop() {
             if exit {
                 let (_, components) = unhint(font.glyph_bytes(glyph)?)?;
                 let mut height = 1usize;
                 for component in components {
-                    let child = *heights.get(&component)
+                    let child = *heights
+                        .get(&component)
                         .ok_or_else(|| invalid("composite dependency is unfinished"))?;
                     height = height.max(add(child, 1)?);
                 }
@@ -167,8 +201,10 @@ fn retained(font: &TrueType) -> io::Result<BTreeSet<u16>> {
             push(&mut stack, (glyph, depth, true), "composite_work", MAX_WORK)?;
             for component in components.into_iter().rev() {
                 push(
-                    &mut stack, (component, add(depth, 1)?, false),
-                    "composite_work", MAX_WORK,
+                    &mut stack,
+                    (component, add(depth, 1)?, false),
+                    "composite_work",
+                    MAX_WORK,
                 )?;
             }
         }
@@ -187,18 +223,38 @@ fn minimal_cmap(font: &TrueType) -> io::Result<Vec<u8>> {
     let length = add(16, mul(count, 8)?)?;
     let mut four = zeroed(length, MAX_FONT_BYTES)?;
     set16(&mut four, 0, 4)?;
-    set16(&mut four, 2, u16::try_from(length).map_err(|_| invalid("cmap length exceeds u16"))?)?;
-    set16(&mut four, 6, u16::try_from(mul(count, 2)?).map_err(|_| invalid("cmap segments exceed u16"))?)?;
+    set16(
+        &mut four,
+        2,
+        u16::try_from(length).map_err(|_| invalid("cmap length exceeds u16"))?,
+    )?;
+    set16(
+        &mut four,
+        6,
+        u16::try_from(mul(count, 2)?).map_err(|_| invalid("cmap segments exceed u16"))?,
+    )?;
     let power = 1usize << (usize::BITS - 1 - count.leading_zeros());
-    set16(&mut four, 8, u16::try_from(mul(power, 2)?).map_err(|_| invalid("cmap search range"))?)?;
+    set16(
+        &mut four,
+        8,
+        u16::try_from(mul(power, 2)?).map_err(|_| invalid("cmap search range"))?,
+    )?;
     set16(&mut four, 10, power.trailing_zeros() as u16)?;
-    set16(&mut four, 12, u16::try_from(mul(count - power, 2)?).map_err(|_| invalid("cmap range shift"))?)?;
+    set16(
+        &mut four,
+        12,
+        u16::try_from(mul(count - power, 2)?).map_err(|_| invalid("cmap range shift"))?,
+    )?;
     for (index, (code, glyph)) in bmp.into_iter().enumerate() {
         let code = u16::try_from(*code).map_err(|_| invalid("BMP cmap code overflow"))?;
         let offset = mul(index, 2)?;
         set16(&mut four, add(14, offset)?, code)?;
         set16(&mut four, add(add(16, mul(count, 2)?)?, offset)?, code)?;
-        set16(&mut four, add(add(16, mul(count, 4)?)?, offset)?, glyph.wrapping_sub(code))?;
+        set16(
+            &mut four,
+            add(add(16, mul(count, 4)?)?, offset)?,
+            glyph.wrapping_sub(code),
+        )?;
     }
     let sentinel = mul(count - 1, 2)?;
     set16(&mut four, add(14, sentinel)?, 0xffff)?;
@@ -231,22 +287,35 @@ fn minimal_cmap(font: &TrueType) -> io::Result<Vec<u8>> {
 
 fn names(name: &str) -> io::Result<Vec<u8>> {
     let entries = [
-        (1u16, name), (2, "Regular"), (3, name),
-        (4, name), (5, "Version 1.000"), (6, name),
+        (1u16, name),
+        (2, "Regular"),
+        (3, name),
+        (4, name),
+        (5, "Version 1.000"),
+        (6, name),
     ];
     let header = add(6, mul(entries.len(), 12)?)?;
     let mut out = zeroed(header, MAX_FONT_BYTES)?;
     set16(&mut out, 2, entries.len() as u16)?;
     set16(&mut out, 4, header as u16)?;
     for (index, (id, text)) in entries.into_iter().enumerate() {
-        let offset = out.len().checked_sub(header).ok_or_else(|| invalid("name string offset"))?;
+        let offset = out
+            .len()
+            .checked_sub(header)
+            .ok_or_else(|| invalid("name string offset"))?;
         let length = mul(text.encode_utf16().count(), 2)?;
         let record = add(6, mul(index, 12)?)?;
         for (field, value) in [
-            3, 1, 0x0409, id,
+            3,
+            1,
+            0x0409,
+            id,
             u16::try_from(length).map_err(|_| invalid("name length exceeds u16"))?,
             u16::try_from(offset).map_err(|_| invalid("name offset exceeds u16"))?,
-        ].into_iter().enumerate() {
+        ]
+        .into_iter()
+        .enumerate()
+        {
             set16(&mut out, add(record, mul(field, 2)?)?, value)?;
         }
         for unit in text.encode_utf16() {
@@ -274,7 +343,11 @@ pub(super) fn build(font: &TrueType) -> io::Result<(Vec<u8>, String)> {
     let mut loca = Vec::new();
     let mut hmtx = Vec::new();
     for glyph in 0..font.glyph_count {
-        append(&mut loca, &size32(glyf.len())?.to_be_bytes(), MAX_FONT_BYTES)?;
+        append(
+            &mut loca,
+            &size32(glyf.len())?.to_be_bytes(),
+            MAX_FONT_BYTES,
+        )?;
         if kept.contains(&glyph) {
             let (bytes, _) = unhint(font.glyph_bytes(glyph)?)?;
             append(&mut glyf, &bytes, MAX_FONT_BYTES)?;
@@ -284,7 +357,11 @@ pub(super) fn build(font: &TrueType) -> io::Result<(Vec<u8>, String)> {
         append(&mut hmtx, &advance.to_be_bytes(), MAX_FONT_BYTES)?;
         append(&mut hmtx, &bearing.to_be_bytes(), MAX_FONT_BYTES)?;
     }
-    append(&mut loca, &size32(glyf.len())?.to_be_bytes(), MAX_FONT_BYTES)?;
+    append(
+        &mut loca,
+        &size32(glyf.len())?.to_be_bytes(),
+        MAX_FONT_BYTES,
+    )?;
     let mut head = copied(font.table(b"head")?, MAX_FONT_BYTES)?;
     set32(&mut head, 8, 0)?;
     let flags = read16(&head, 16)?;
@@ -299,7 +376,11 @@ pub(super) fn build(font: &TrueType) -> io::Result<(Vec<u8>, String)> {
     }
     let mut post = zeroed(32, MAX_FONT_BYTES)?;
     if let Some(range) = font.tables.get(b"post") {
-        if let Some(bytes) = font.data.get(range.clone()).filter(|bytes| bytes.len() >= 32) {
+        if let Some(bytes) = font
+            .data
+            .get(range.clone())
+            .filter(|bytes| bytes.len() >= 32)
+        {
             patch(&mut post, 4, slice(bytes, 4, 28)?)?;
         }
     }
@@ -319,10 +400,18 @@ pub(super) fn build(font: &TrueType) -> io::Result<(Vec<u8>, String)> {
             bytes
         }
     };
-    let first = font.used.values().map(|character| u32::from(*character).min(65535) as u16)
-        .min().unwrap_or(0);
-    let last = font.used.values().map(|character| u32::from(*character).min(65535) as u16)
-        .max().unwrap_or(0);
+    let first = font
+        .used
+        .values()
+        .map(|character| u32::from(*character).min(65535) as u16)
+        .min()
+        .unwrap_or(0);
+    let last = font
+        .used
+        .values()
+        .map(|character| u32::from(*character).min(65535) as u16)
+        .max()
+        .unwrap_or(0);
     set16(&mut os2, 64, first)?;
     set16(&mut os2, 66, last)?;
     let base_name = font.tables.get(b"name");
@@ -330,10 +419,16 @@ pub(super) fn build(font: &TrueType) -> io::Result<(Vec<u8>, String)> {
     // The PDF name and font program use the same deterministic subset tag.
     let pdf_name = font.subset_name(&tag);
     let tables: [([u8; 4], Vec<u8>); 10] = [
-        (*b"OS/2", os2), (*b"cmap", minimal_cmap(font)?),
-        (*b"glyf", glyf), (*b"head", head), (*b"hhea", hhea),
-        (*b"hmtx", hmtx), (*b"loca", loca), (*b"maxp", maxp),
-        (*b"name", names(&pdf_name)?), (*b"post", post),
+        (*b"OS/2", os2),
+        (*b"cmap", minimal_cmap(font)?),
+        (*b"glyf", glyf),
+        (*b"head", head),
+        (*b"hhea", hhea),
+        (*b"hmtx", hmtx),
+        (*b"loca", loca),
+        (*b"maxp", maxp),
+        (*b"name", names(&pdf_name)?),
+        (*b"post", post),
     ];
     let mut out = zeroed(172, MAX_FONT_BYTES)?;
     set32(&mut out, 0, 0x0001_0000)?;
@@ -371,4 +466,3 @@ impl TrueType {
         &self.base_name
     }
 }
-

@@ -5,8 +5,15 @@ use super::bounds::*;
 use super::font::{read16, slice};
 
 pub(super) enum Pixels {
-    Jpeg { data: Arc<[u8]>, components: u8, invert: bool },
-    Rgb { data: Vec<u8>, alpha: Option<Vec<u8>> },
+    Jpeg {
+        data: Arc<[u8]>,
+        components: u8,
+        invert: bool,
+    },
+    Rgb {
+        data: Vec<u8>,
+        alpha: Option<Vec<u8>>,
+    },
 }
 
 pub(super) struct Image {
@@ -42,7 +49,9 @@ pub(super) fn jpeg_frame(data: &[u8]) -> io::Result<(u32, u32, u8)> {
             }
             at = add(at, 1)?;
         }
-        let marker = *data.get(at).ok_or_else(|| invalid("JPEG marker is truncated"))?;
+        let marker = *data
+            .get(at)
+            .ok_or_else(|| invalid("JPEG marker is truncated"))?;
         at = add(at, 1)?;
         let length = usize::from(read16(data, at)?);
         if length < 2 {
@@ -52,7 +61,9 @@ pub(super) fn jpeg_frame(data: &[u8]) -> io::Result<(u32, u32, u8)> {
         if matches!(marker, 0xc0..=0xcf) && !matches!(marker, 0xc4 | 0xc8 | 0xcc) {
             let height = u32::from(read16(segment, 3)?);
             let width = u32::from(read16(segment, 5)?);
-            let components = *segment.get(7).ok_or_else(|| invalid("JPEG frame is truncated"))?;
+            let components = *segment
+                .get(7)
+                .ok_or_else(|| invalid("JPEG frame is truncated"))?;
             return Ok((width, height, components));
         }
         if marker == 0xda {
@@ -67,9 +78,9 @@ impl Image {
     pub fn bytes(&self) -> usize {
         match &self.pixels {
             Pixels::Jpeg { data, .. } => data.len(),
-            Pixels::Rgb { data, alpha } => {
-                data.len().saturating_add(alpha.as_ref().map_or(0, Vec::len))
-            }
+            Pixels::Rgb { data, alpha } => data
+                .len()
+                .saturating_add(alpha.as_ref().map_or(0, Vec::len)),
         }
     }
 
@@ -85,7 +96,8 @@ impl Image {
             .map_err(|_| refusal("allocation_bytes", expected, MAX_BYTES))?;
         let mut alpha = if alpha_needed {
             let mut bytes = Vec::new();
-            bytes.try_reserve_exact(count)
+            bytes
+                .try_reserve_exact(count)
                 .map_err(|_| refusal("allocation_bytes", expected, MAX_BYTES))?;
             Some(bytes)
         } else {
@@ -97,7 +109,11 @@ impl Image {
                 append(alpha, slice(pixel, 3, 1)?, count)?;
             }
         }
-        Ok(Self { width, height, pixels: Pixels::Rgb { data: rgb, alpha } })
+        Ok(Self {
+            width,
+            height,
+            pixels: Pixels::Rgb { data: rgb, alpha },
+        })
     }
 
     pub fn jpeg(data: Arc<[u8]>, width: u32, height: u32, components: u8) -> io::Result<Self> {
@@ -123,7 +139,9 @@ impl Image {
                 }
                 at = add(at, 1)?;
             }
-            let marker = *data.get(at).ok_or_else(|| invalid("JPEG marker is truncated"))?;
+            let marker = *data
+                .get(at)
+                .ok_or_else(|| invalid("JPEG marker is truncated"))?;
             at = add(at, 1)?;
             if matches!(marker, 0 | 0xd8 | 0xd9 | 0x01 | 0xd0..=0xd7) {
                 return Err(invalid("unexpected JPEG header marker"));
@@ -145,11 +163,14 @@ impl Image {
                 }
                 let frame_height = u32::from(read16(segment, 3)?);
                 let frame_width = u32::from(read16(segment, 5)?);
-                if frame_width != width || frame_height != height
+                if frame_width != width
+                    || frame_height != height
                     || segment.get(7) != Some(&components)
                     || length != add(8, mul(usize::from(components), 3)?)?
                 {
-                    return Err(invalid("JPEG frame does not match supplied dimensions or components"));
+                    return Err(invalid(
+                        "JPEG frame does not match supplied dimensions or components",
+                    ));
                 }
                 found = true;
             }
@@ -165,7 +186,14 @@ impl Image {
         if !found {
             return Err(invalid("JPEG frame is missing"));
         }
-        Ok(Self { width, height, pixels: Pixels::Jpeg { data, components, invert } })
+        Ok(Self {
+            width,
+            height,
+            pixels: Pixels::Jpeg {
+                data,
+                components,
+                invert,
+            },
+        })
     }
 }
-

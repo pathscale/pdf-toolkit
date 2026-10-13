@@ -4,24 +4,22 @@ use core::ops::Range;
 
 use pdf_core::pages::Page;
 use pdf_core::{
-    DictRef, DocError, LimitKind, Limits, Object, ObjectRef, Refusal, Resolver,
-    Value, Warning,
+    DictRef, DocError, LimitKind, Limits, Object, ObjectRef, Refusal, Resolver, Value, Warning,
 };
 use pdf_text::content::{
-    container_body, decode_name, decode_string, inline_number, name_eq,
-    Content, ContentCursor, Op, Operand, Values,
+    container_body, decode_name, decode_string, inline_number, name_eq, Content, ContentCursor, Op,
+    Operand, Values,
 };
 use pdf_text::encoding::BaseEncoding;
 use pdf_text::font::{Font, FontCache, FontKind, Glyph, GlyphText};
 
 use crate::glyphs::{GlyphSource, GlyphSourceCache};
-use crate::paint::{self, ColorState, ColorSpace};
+use crate::paint::{self, ColorSpace, ColorState};
 
 const PATH_ELEMENTS: u64 = 1_000_000;
 const FORM_DEPTH: u64 = 16;
 const CLIP_DEPTH: u64 = 64;
 const ANNOTATIONS: u64 = 10_000;
-
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Matrix(pub [f32; 6]);
@@ -33,11 +31,17 @@ impl Matrix {
     pub fn then(self, outer: Self) -> Self {
         let [a, b, c, d, e, f] = self.0.map(f64::from);
         let [g, h, i, j, k, l] = outer.0.map(f64::from);
-        Self([
-            g * a + i * b, h * a + j * b,
-            g * c + i * d, h * c + j * d,
-            g * e + i * f + k, h * e + j * f + l,
-        ].map(|value| value as f32))
+        Self(
+            [
+                g * a + i * b,
+                h * a + j * b,
+                g * c + i * d,
+                h * c + j * d,
+                g * e + i * f + k,
+                h * e + j * f + l,
+            ]
+            .map(|value| value as f32),
+        )
     }
 
     pub fn point(self, x: f32, y: f32) -> (f32, f32) {
@@ -125,18 +129,42 @@ pub enum BlendMode {
 #[derive(Clone, Debug, PartialEq)]
 pub enum Item {
     SetBlendMode(BlendMode),
-    PushClip { path: Path, rule: FillRule },
+    PushClip {
+        path: Path,
+        rule: FillRule,
+    },
     PopClip,
-    Fill { path: Path, rule: FillRule, paint: Paint },
-    Stroke { path: Path, stroke: Stroke, dash: Option<Dash>, paint: Paint },
-    Image { image: ImageSource, transform: Matrix, alpha: f32 },
-    Glyphs { glyphs: Vec<GlyphPath>, paint: Paint, stroke: Option<Stroke> },
+    Fill {
+        path: Path,
+        rule: FillRule,
+        paint: Paint,
+    },
+    Stroke {
+        path: Path,
+        stroke: Stroke,
+        dash: Option<Dash>,
+        paint: Paint,
+    },
+    Image {
+        image: ImageSource,
+        transform: Matrix,
+        alpha: f32,
+    },
+    Glyphs {
+        glyphs: Vec<GlyphPath>,
+        paint: Paint,
+        stroke: Option<Stroke>,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum ImageSource {
     Object(ObjectRef),
-    Inline { width: u32, height: u32, rgba: Vec<u8> },
+    Inline {
+        width: u32,
+        height: u32,
+        rgba: Vec<u8>,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -164,9 +192,10 @@ pub(crate) struct Budget {
 
 impl Budget {
     pub(crate) fn charge(&mut self, bytes: usize) -> Result<(), DocError> {
-        let requested = self.used.checked_add(bytes as u64).ok_or_else(|| {
-            refusal(LimitKind::TotalDecodedBytes, u64::MAX, self.maximum)
-        })?;
+        let requested = self
+            .used
+            .checked_add(bytes as u64)
+            .ok_or_else(|| refusal(LimitKind::TotalDecodedBytes, u64::MAX, self.maximum))?;
         check(LimitKind::TotalDecodedBytes, requested, self.maximum)?;
         self.used = requested;
         Ok(())
@@ -177,15 +206,26 @@ impl Budget {
         values: &mut Vec<T>,
         additional: usize,
     ) -> Result<(), DocError> {
-        let bytes = additional.checked_mul(core::mem::size_of::<T>())
+        let bytes = additional
+            .checked_mul(core::mem::size_of::<T>())
             .ok_or_else(|| refusal(LimitKind::TotalDecodedBytes, u64::MAX, self.maximum))?;
-        let total = values.len().checked_add(additional)
+        let total = values
+            .len()
+            .checked_add(additional)
             .and_then(|count| count.checked_mul(core::mem::size_of::<T>()))
             .ok_or_else(|| refusal(LimitKind::TotalDecodedBytes, u64::MAX, self.maximum))?;
-        check(LimitKind::TotalDecodedBytes, total as u64, isize::MAX as u64)?;
+        check(
+            LimitKind::TotalDecodedBytes,
+            total as u64,
+            isize::MAX as u64,
+        )?;
         self.charge(bytes)?;
         values.try_reserve(additional).map_err(|_| {
-            refusal(LimitKind::TotalDecodedBytes, self.maximum.saturating_add(1), self.maximum)
+            refusal(
+                LimitKind::TotalDecodedBytes,
+                self.maximum.saturating_add(1),
+                self.maximum,
+            )
         })
     }
 
@@ -211,8 +251,14 @@ struct TextState {
 impl Default for TextState {
     fn default() -> Self {
         Self {
-            character_space: 0.0, word_space: 0.0, horizontal_scale: 1.0,
-            leading: 0.0, size: 0.0, rise: 0.0, mode: 0, font: None,
+            character_space: 0.0,
+            word_space: 0.0,
+            horizontal_scale: 1.0,
+            leading: 0.0,
+            size: 0.0,
+            rise: 0.0,
+            mode: 0,
+            font: None,
         }
     }
 }
@@ -237,7 +283,12 @@ impl GraphicsState {
             ctm,
             fill: ColorState::gray(),
             stroke_color: ColorState::gray(),
-            stroke: Stroke { width: 1.0, cap: 0, join: 0, miter: 10.0 },
+            stroke: Stroke {
+                width: 1.0,
+                cap: 0,
+                join: 0,
+                miter: 10.0,
+            },
             dash: None,
             fill_alpha: 1.0,
             stroke_alpha: 1.0,
@@ -382,8 +433,11 @@ pub fn display_list(
     options: &RenderOptions,
 ) -> Result<DisplayList, DocError> {
     display_list_cached(
-        resolver, page, options,
-        &mut FontCache::default(), &mut GlyphSourceCache::default(),
+        resolver,
+        page,
+        options,
+        &mut FontCache::default(),
+        &mut GlyphSourceCache::default(),
     )
 }
 
@@ -412,7 +466,8 @@ pub fn display_list_cached(
             missing_fonts: 0,
         });
     }
-    let pixels = u64::from(width).checked_mul(u64::from(height))
+    let pixels = u64::from(width)
+        .checked_mul(u64::from(height))
         .and_then(|count| count.checked_mul(4))
         .ok_or_else(|| refusal(LimitKind::DecodedBytes, u64::MAX, limits.max_decoded_bytes))?;
     check(LimitKind::DecodedBytes, pixels, limits.max_decoded_bytes)?;
@@ -420,8 +475,16 @@ pub fn display_list_cached(
         font_cache: cache,
         glyph_cache,
         limits,
-        budget: Budget { used: 0, maximum: limits.max_total_decoded_bytes },
-        output: DisplayList { width, height, items: Vec::new(), missing_fonts: 0 },
+        budget: Budget {
+            used: 0,
+            maximum: limits.max_total_decoded_bytes,
+        },
+        output: DisplayList {
+            width,
+            height,
+            items: Vec::new(),
+            missing_fonts: 0,
+        },
         graphics: GraphicsState::new(ctm),
         pattern_ctm: ctm,
         saved: Vec::new(),
@@ -456,13 +519,19 @@ pub fn display_list_cached(
             }
         };
         let context = Context {
-            bytes, resources: page.resources.clone(), id: Some(id), graphics_base: 0,
+            bytes,
+            resources: page.resources.clone(),
+            id: Some(id),
+            graphics_base: 0,
         };
         builder.active.clear();
         builder.budget.push(&mut builder.active, id)?;
         builder.budget.push(
             &mut tasks,
-            Task::Stream(Frame { context, cursor: ContentCursor::default() }),
+            Task::Stream(Frame {
+                context,
+                cursor: ContentCursor::default(),
+            }),
         )?;
         while let Some(task) = tasks.pop() {
             match task {
@@ -500,7 +569,9 @@ impl Builder<'_> {
             }
         };
         let result = (|| {
-            let Some(dict) = object.dict() else { return Ok(None) };
+            let Some(dict) = object.dict() else {
+                return Ok(None);
+            };
             resolver.resolve_dict_key(dict, b"Annots")
         })();
         let annots = match result {
@@ -516,7 +587,8 @@ impl Builder<'_> {
             return Ok(());
         };
         check(
-            LimitKind::Objects, array.len() as u64,
+            LimitKind::Objects,
+            array.len() as u64,
             ANNOTATIONS.min(u64::from(self.limits.max_objects)),
         )?;
         let mut tasks = Vec::new();
@@ -566,39 +638,70 @@ impl Builder<'_> {
         inherited: Option<Value>,
     ) -> Result<Option<(Invocation, f32)>, DocError> {
         let annot = resolver.resolve(value)?;
-        let Some(dict) = annot.get().as_dict() else { return Ok(None) };
+        let Some(dict) = annot.get().as_dict() else {
+            return Ok(None);
+        };
         let flags = match resolver.resolve_dict_key(dict, b"F")? {
-            Some(value) => value.get().as_i64()
+            Some(value) => value
+                .get()
+                .as_i64()
                 .and_then(|value| u32::try_from(value).ok())
                 .ok_or_else(|| bad("annotation_flags"))?,
             None => 0,
         };
-        if flags & (2 | 32) != 0 { return Ok(None); }
-        let Some(rect) = read_array::<4>(resolver, dict, b"Rect")? else { return Ok(None) };
-        let opacity = number(resolver, dict, b"CA")?.unwrap_or(1.0).clamp(0.0, 1.0);
-        let Some(ap) = resolver.resolve_dict_key(dict, b"AP")? else { return Ok(None) };
-        let Some(ap_dict) = ap.get().as_dict() else { return Ok(None) };
+        if flags & (2 | 32) != 0 {
+            return Ok(None);
+        }
+        let Some(rect) = read_array::<4>(resolver, dict, b"Rect")? else {
+            return Ok(None);
+        };
+        let opacity = number(resolver, dict, b"CA")?
+            .unwrap_or(1.0)
+            .clamp(0.0, 1.0);
+        let Some(ap) = resolver.resolve_dict_key(dict, b"AP")? else {
+            return Ok(None);
+        };
+        let Some(ap_dict) = ap.get().as_dict() else {
+            return Ok(None);
+        };
         let Some(mut normal) = resolver.resolve_dict_key(ap_dict, b"N")? else {
             return Ok(None);
         };
         if !normal.object().is_stream() {
-            let Some(states) = normal.get().as_dict() else { return Ok(None) };
-            let Some(state) = resolver.resolve_dict_key(dict, b"AS")? else { return Ok(None) };
-            let Some(name) = state.get().as_name() else { return Ok(None) };
+            let Some(states) = normal.get().as_dict() else {
+                return Ok(None);
+            };
+            let Some(state) = resolver.resolve_dict_key(dict, b"AS")? else {
+                return Ok(None);
+            };
+            let Some(name) = state.get().as_name() else {
+                return Ok(None);
+            };
             let name = name.decoded();
             let Some(selected) = resolver.resolve_dict_key(states, name.as_ref())? else {
                 return Ok(None);
             };
             normal = selected;
         }
-        if !normal.object().is_stream() { return Ok(None); }
-        let form_dict = normal.object().dict().ok_or_else(|| bad("annotation_appearance"))?;
-        let bbox = read_array::<4>(resolver, form_dict, b"BBox")?
-            .ok_or_else(|| bad("annotation_bbox"))?;
+        if !normal.object().is_stream() {
+            return Ok(None);
+        }
+        let form_dict = normal
+            .object()
+            .dict()
+            .ok_or_else(|| bad("annotation_appearance"))?;
+        let bbox =
+            read_array::<4>(resolver, form_dict, b"BBox")?.ok_or_else(|| bad("annotation_bbox"))?;
         let matrix = read_array::<6>(resolver, form_dict, b"Matrix")?
-            .map(Matrix).unwrap_or(Matrix::IDENTITY);
+            .map(Matrix)
+            .unwrap_or(Matrix::IDENTITY);
         let [x0, y0, x1, y1] = bbox;
-        let mut bounds = [f32::INFINITY, f32::INFINITY, f32::NEG_INFINITY, f32::NEG_INFINITY];
+        let mut bounds = [
+            f32::INFINITY,
+            f32::INFINITY,
+            f32::NEG_INFINITY,
+            f32::NEG_INFINITY,
+        ];
         for (x, y) in [(x0, y0), (x0, y1), (x1, y0), (x1, y1)] {
             let (x, y) = checked_point(matrix, x, y)?;
             bounds[0] = bounds[0].min(x);
@@ -619,31 +722,42 @@ impl Builder<'_> {
         let sx = (right - left) / bw;
         let sy = (top - bottom) / bh;
         let mapping = Matrix([
-            finite(sx).ok_or_else(|| bad("annotation_geometry"))?, 0.0,
-            0.0, finite(sy).ok_or_else(|| bad("annotation_geometry"))?,
-            finite(left - f64::from(bounds[0]) * sx)
-                .ok_or_else(|| bad("annotation_geometry"))?,
-            finite(bottom - f64::from(bounds[1]) * sy)
-                .ok_or_else(|| bad("annotation_geometry"))?,
+            finite(sx).ok_or_else(|| bad("annotation_geometry"))?,
+            0.0,
+            0.0,
+            finite(sy).ok_or_else(|| bad("annotation_geometry"))?,
+            finite(left - f64::from(bounds[0]) * sx).ok_or_else(|| bad("annotation_geometry"))?,
+            finite(bottom - f64::from(bounds[1]) * sy).ok_or_else(|| bad("annotation_geometry"))?,
         ]);
         let transform = matrix.then(mapping);
-        if !transform.is_finite() { return Err(bad("annotation_geometry")); }
-        Ok(Some((Invocation {
-            object: normal.object().clone(), inherited,
-            matrix: Some(transform), bbox: Some(bbox), type3_mode: None,
-        }, opacity)))
+        if !transform.is_finite() {
+            return Err(bad("annotation_geometry"));
+        }
+        Ok(Some((
+            Invocation {
+                object: normal.object().clone(),
+                inherited,
+                matrix: Some(transform),
+                bbox: Some(bbox),
+                type3_mode: None,
+            },
+            opacity,
+        )))
     }
 
     fn step(&mut self) -> Result<(), DocError> {
-        self.ops = self.ops.checked_add(1).ok_or_else(|| {
-            refusal(LimitKind::ContentOps, u64::MAX, self.limits.max_content_ops)
-        })?;
+        self.ops = self
+            .ops
+            .checked_add(1)
+            .ok_or_else(|| refusal(LimitKind::ContentOps, u64::MAX, self.limits.max_content_ops))?;
         check(LimitKind::ContentOps, self.ops, self.limits.max_content_ops)
     }
 
-    fn decode(&mut self, resolver: &mut Resolver<'_>, object: &Object)
-        -> Result<Arc<[u8]>, DocError>
-    {
+    fn decode(
+        &mut self,
+        resolver: &mut Resolver<'_>,
+        object: &Object,
+    ) -> Result<Arc<[u8]>, DocError> {
         let decoded = resolver.decode_stream(object)?;
         self.budget.charge(decoded.bytes.len())?;
         if decoded.image.is_some() {
@@ -657,12 +771,15 @@ impl Builder<'_> {
 
     fn emit(&mut self, item: Item) -> Result<(), DocError> {
         let paint = match &item {
-            Item::Fill { paint, .. } | Item::Stroke { paint, .. }
-                | Item::Glyphs { paint, .. } => Some(paint),
+            Item::Fill { paint, .. } | Item::Stroke { paint, .. } | Item::Glyphs { paint, .. } => {
+                Some(paint)
+            }
             _ => None,
         };
         if let Some(Paint::Axial { stops, .. } | Paint::Radial { stops, .. }) = paint {
-            let bytes = stops.len().checked_mul(core::mem::size_of::<(f32, Rgba)>())
+            let bytes = stops
+                .len()
+                .checked_mul(core::mem::size_of::<(f32, Rgba)>())
                 .ok_or_else(|| bad("render_paint_size"))?;
             self.budget.charge(bytes)?;
         }
@@ -670,11 +787,12 @@ impl Builder<'_> {
             self.budget.charge(function.allocated_bytes())?;
         }
         if matches!(
-            &item, Item::Fill { .. } | Item::Stroke { .. }
-                | Item::Glyphs { .. } | Item::Image { .. }
+            &item,
+            Item::Fill { .. } | Item::Stroke { .. } | Item::Glyphs { .. } | Item::Image { .. }
         ) {
             self.budget.push(
-                &mut self.output.items, Item::SetBlendMode(self.graphics.blend),
+                &mut self.output.items,
+                Item::SetBlendMode(self.graphics.blend),
             )?;
         }
         self.budget.push(&mut self.output.items, item)
@@ -722,8 +840,12 @@ impl Builder<'_> {
                     destination.copy_from_slice(op.operands.get(..count).unwrap_or(&[]));
                 }
                 self.inline_image(
-                    resolver, header.get(..count).unwrap_or(&[]), &mut reader, context.id,
-                ).map(|()| None)
+                    resolver,
+                    header.get(..count).unwrap_or(&[]),
+                    &mut reader,
+                    context.id,
+                )
+                .map(|()| None)
             } else {
                 self.execute(resolver, op, &context)
             };
@@ -753,18 +875,21 @@ impl Builder<'_> {
                         recover(resolver, error, context.id, "render_form_failed")?;
                     }
                 }
-                Action::Show(range) => {
-                    match self.make_run(context.clone(), range) {
-                        Ok(run) => self.budget.push(tasks, Task::Run(run))?,
-                        Err(error) => {
-                            recover(resolver, error, context.id, "render_text_failed")?;
-                        }
+                Action::Show(range) => match self.make_run(context.clone(), range) {
+                    Ok(run) => self.budget.push(tasks, Task::Run(run))?,
+                    Err(error) => {
+                        recover(resolver, error, context.id, "render_text_failed")?;
                     }
-                }
+                },
                 Action::Array(range) => {
-                    self.budget.push(tasks, Task::Array(ArrayTask {
-                        context, range, cursor: ContentCursor::default(),
-                    }))?;
+                    self.budget.push(
+                        tasks,
+                        Task::Array(ArrayTask {
+                            context,
+                            range,
+                            cursor: ContentCursor::default(),
+                        }),
+                    )?;
                 }
             }
         }
@@ -778,7 +903,10 @@ impl Builder<'_> {
         tasks: &mut Vec<Task>,
     ) -> Result<(), DocError> {
         let context = task.context.clone();
-        let bytes = context.bytes.get(task.range.clone()).ok_or_else(|| bad("text_array"))?;
+        let bytes = context
+            .bytes
+            .get(task.range.clone())
+            .ok_or_else(|| bad("text_array"))?;
         let mut values = Values::resume(bytes, &self.limits, task.cursor);
         loop {
             let value = match values.next_value() {
@@ -810,10 +938,13 @@ impl Builder<'_> {
     }
 
     fn make_run(&mut self, context: Context, range: Range<usize>) -> Result<Run, DocError> {
-        let raw = context.bytes.get(range.clone()).ok_or_else(|| bad("text_string"))?;
+        let raw = context
+            .bytes
+            .get(range.clone())
+            .ok_or_else(|| bad("text_string"))?;
         let body = raw.get(1..raw.len().saturating_sub(1)).unwrap_or(&[]);
-        let borrowed = raw.first() == Some(&b'(')
-            && !body.contains(&b'\\') && !body.contains(&b'\r');
+        let borrowed =
+            raw.first() == Some(&b'(') && !body.contains(&b'\\') && !body.contains(&b'\r');
         let mut decoded = core::mem::take(&mut self.strings);
         decoded.clear();
         let range = if borrowed {
@@ -824,10 +955,17 @@ impl Builder<'_> {
             range
         };
         let font_index = self.graphics.text.font;
-        let font = font_index.and_then(|index| self.fonts.get(index))
+        let font = font_index
+            .and_then(|index| self.fonts.get(index))
             .map(|entry| entry.font.clone());
         Ok(Run {
-            context, range, decoded, borrowed, offset: 0, font, font_index,
+            context,
+            range,
+            decoded,
+            borrowed,
+            offset: 0,
+            font,
+            font_index,
             paths: Vec::new(),
         })
     }
@@ -845,50 +983,86 @@ impl Builder<'_> {
                 &run.decoded
             };
             let remaining = bytes.get(run.offset..).unwrap_or(&[]);
-            let Some(first) = remaining.first().copied() else { break };
-            let glyph = run.font.as_ref()
+            let Some(first) = remaining.first().copied() else {
+                break;
+            };
+            let glyph = run
+                .font
+                .as_ref()
                 .and_then(|font| font.glyphs(remaining).next())
                 .unwrap_or(Glyph {
-                    code: u32::from(first), byte_len: 1, width: 0.5,
-                    text: GlyphText::from_char('\u{fffd}'), mapped: false,
+                    code: u32::from(first),
+                    byte_len: 1,
+                    width: 0.5,
+                    text: GlyphText::from_char('\u{fffd}'),
+                    mapped: false,
                     word_space: first == 32,
                 });
             let consumed = usize::from(glyph.byte_len).max(1).min(remaining.len());
-            run.offset = run.offset.checked_add(consumed).ok_or_else(|| bad("text_offset"))?;
+            run.offset = run
+                .offset
+                .checked_add(consumed)
+                .ok_or_else(|| bad("text_offset"))?;
             self.step()?;
             let text = self.graphics.text;
             let vertical = run.font.as_ref().map(Font::is_vertical).unwrap_or(false);
             let spaces = text.character_space
-                + if glyph.word_space { text.word_space } else { 0.0 };
+                + if glyph.word_space {
+                    text.word_space
+                } else {
+                    0.0
+                };
             let (dx, dy) = if vertical {
                 (0.0, -text.size + spaces)
             } else {
-                (((glyph.width * f64::from(text.size) + f64::from(spaces))
-                    * f64::from(text.horizontal_scale)) as f32, 0.0)
+                (
+                    ((glyph.width * f64::from(text.size) + f64::from(spaces))
+                        * f64::from(text.horizontal_scale)) as f32,
+                    0.0,
+                )
             };
             if text.mode >= 4 {
                 self.clip_requested = true;
             }
             let transform = Matrix([
-                text.size * text.horizontal_scale / 1000.0, 0.0,
-                0.0, text.size / 1000.0, 0.0, text.rise,
-            ]).then(self.text_matrix).then(self.graphics.ctm);
-            let is_type3 = run.font.as_ref().map(|font| font.kind() == FontKind::Type3)
+                text.size * text.horizontal_scale / 1000.0,
+                0.0,
+                0.0,
+                text.size / 1000.0,
+                0.0,
+                text.rise,
+            ])
+            .then(self.text_matrix)
+            .then(self.graphics.ctm);
+            let is_type3 = run
+                .font
+                .as_ref()
+                .map(|font| font.kind() == FontKind::Type3)
                 .unwrap_or(false);
             let mut invocation = None;
             if text.mode != 3 {
                 if is_type3 {
                     let result = self.type3_invocation(
-                        resolver, run.font_index, glyph.code, run.context.resources.as_ref(),
+                        resolver,
+                        run.font_index,
+                        glyph.code,
+                        run.context.resources.as_ref(),
                     );
                     match result {
                         Ok(Some(mut form)) => {
-                            let matrix = run.font.as_ref().map(Font::font_matrix)
+                            let matrix = run
+                                .font
+                                .as_ref()
+                                .map(Font::font_matrix)
                                 .unwrap_or([0.001, 0.0, 0.0, 0.001, 0.0, 0.0]);
                             let matrix = matrix.map(|value| value as f32);
                             let scale = Matrix([
-                                text.size * text.horizontal_scale, 0.0,
-                                0.0, text.size, 0.0, text.rise,
+                                text.size * text.horizontal_scale,
+                                0.0,
+                                0.0,
+                                text.size,
+                                0.0,
+                                text.rise,
                             ]);
                             form.matrix = Some(Matrix(matrix).then(scale).then(self.text_matrix));
                             form.type3_mode = Some(text.mode);
@@ -903,9 +1077,14 @@ impl Builder<'_> {
                         }
                     }
                 } else {
-                    let outline = run.font_index.and_then(|index| self.fonts.get(index))
+                    let outline = run
+                        .font_index
+                        .and_then(|index| self.fonts.get(index))
                         .and_then(|entry| {
-                            entry.source.as_ref().and_then(|source| source.outline(&glyph))
+                            entry
+                                .source
+                                .as_ref()
+                                .and_then(|source| source.outline(&glyph))
                         });
                     if let Some(mut path) = outline {
                         account_path(&path, &mut self.budget)?;
@@ -921,24 +1100,42 @@ impl Builder<'_> {
                                     let stroke = self.device_stroke()?;
                                     let dash = self.device_dash()?;
                                     let paint = self.graphics.stroke_color.paint(
-                                        resolver, self.pattern_ctm, self.graphics.stroke_alpha,
+                                        resolver,
+                                        self.pattern_ctm,
+                                        self.graphics.stroke_alpha,
                                     )?;
-                                    self.emit(Item::Stroke { path, stroke, dash, paint })?;
+                                    self.emit(Item::Stroke {
+                                        path,
+                                        stroke,
+                                        dash,
+                                        paint,
+                                    })?;
                                 }
                                 2 => {
                                     let second = copy_path(&path, &mut self.budget)?;
                                     let paint = self.graphics.fill.paint(
-                                        resolver, self.pattern_ctm, self.graphics.fill_alpha,
+                                        resolver,
+                                        self.pattern_ctm,
+                                        self.graphics.fill_alpha,
                                     )?;
                                     self.emit(Item::Fill {
-                                        path, rule: FillRule::NonZero, paint,
+                                        path,
+                                        rule: FillRule::NonZero,
+                                        paint,
                                     })?;
                                     let stroke = self.device_stroke()?;
                                     let dash = self.device_dash()?;
                                     let paint = self.graphics.stroke_color.paint(
-                                        resolver, self.pattern_ctm, self.graphics.stroke_alpha,
+                                        resolver,
+                                        self.pattern_ctm,
+                                        self.graphics.stroke_alpha,
                                     )?;
-                                    self.emit(Item::Stroke { path: second, stroke, dash, paint })?;
+                                    self.emit(Item::Stroke {
+                                        path: second,
+                                        stroke,
+                                        dash,
+                                        paint,
+                                    })?;
                                 }
                                 _ => {}
                             }
@@ -968,15 +1165,16 @@ impl Builder<'_> {
         Ok(())
     }
 
-    fn flush_glyphs(&mut self, resolver: &mut Resolver<'_>, run: &mut Run)
-        -> Result<(), DocError>
-    {
+    fn flush_glyphs(&mut self, resolver: &mut Resolver<'_>, run: &mut Run) -> Result<(), DocError> {
         if !run.paths.is_empty() {
-            let paint = self.graphics.fill.paint(
-                resolver, self.pattern_ctm, self.graphics.fill_alpha,
-            )?;
+            let paint =
+                self.graphics
+                    .fill
+                    .paint(resolver, self.pattern_ctm, self.graphics.fill_alpha)?;
             self.emit(Item::Glyphs {
-                glyphs: core::mem::take(&mut run.paths), paint, stroke: None,
+                glyphs: core::mem::take(&mut run.paths),
+                paint,
+                stroke: None,
             })?;
         }
         Ok(())
@@ -994,11 +1192,15 @@ impl Builder<'_> {
             return Ok(());
         }
         check(LimitKind::Depth, self.active.len() as u64, FORM_DEPTH)?;
-        let dict = invocation.object.dict().ok_or_else(|| bad("form_dictionary"))?;
+        let dict = invocation
+            .object
+            .dict()
+            .ok_or_else(|| bad("form_dictionary"))?;
         let matrix = match invocation.matrix {
             Some(matrix) => matrix,
             None => read_array::<6>(resolver, dict, b"Matrix")?
-                .map(Matrix).unwrap_or(Matrix::IDENTITY),
+                .map(Matrix)
+                .unwrap_or(Matrix::IDENTITY),
         };
         let ctm = matrix.then(self.graphics.ctm);
         if !ctm.is_finite() {
@@ -1008,11 +1210,14 @@ impl Builder<'_> {
             Some(bbox) => Some(bbox),
             None => read_array::<4>(resolver, dict, b"BBox")?,
         };
-        let resources = resolver.resolve_dict_key(dict, b"Resources")?
+        let resources = resolver
+            .resolve_dict_key(dict, b"Resources")?
             .filter(|value| value.get().as_dict().is_some())
             .or(invocation.inherited);
         let bytes = self.decode(resolver, &invocation.object)?;
-        let bbox_path = bbox.map(|bbox| rect_path(bbox, ctm, &mut self.budget)).transpose()?;
+        let bbox_path = bbox
+            .map(|bbox| rect_path(bbox, ctm, &mut self.budget))
+            .transpose()?;
         let snapshot = Snapshot {
             graphics: self.graphics.clone(),
             path: core::mem::take(&mut self.path),
@@ -1039,21 +1244,30 @@ impl Builder<'_> {
             return Err(bad("indirect_form"));
         }
         let context = Context {
-            bytes, resources, id, graphics_base: self.saved.len(),
+            bytes,
+            resources,
+            id,
+            graphics_base: self.saved.len(),
         };
         self.budget.push(tasks, Task::Restore(snapshot))?;
-        self.budget.push(tasks, Task::Stream(Frame {
-            context, cursor: ContentCursor::default(),
-        }))?;
+        self.budget.push(
+            tasks,
+            Task::Stream(Frame {
+                context,
+                cursor: ContentCursor::default(),
+            }),
+        )?;
         Ok(())
     }
 
-    fn restore(&mut self, resolver: &mut Resolver<'_>, snapshot: Snapshot)
-        -> Result<(), DocError>
-    {
+    fn restore(&mut self, resolver: &mut Resolver<'_>, snapshot: Snapshot) -> Result<(), DocError> {
         let mut captured = Path::default();
         if snapshot.type3_mode.is_some_and(|mode| mode >= 4) {
-            warn(resolver, self.active.last().copied(), "type3_text_clip_approximate");
+            warn(
+                resolver,
+                self.active.last().copied(),
+                "type3_text_clip_approximate",
+            );
             for item in self.output.items.get(snapshot.item_start..).unwrap_or(&[]) {
                 match item {
                     Item::Fill { path, .. } | Item::Stroke { path, .. } => {
@@ -1069,7 +1283,11 @@ impl Builder<'_> {
             }
         }
         if self.saved.len() > snapshot.saved_base {
-            warn(resolver, self.active.last().copied(), "graphics_state_unclosed");
+            warn(
+                resolver,
+                self.active.last().copied(),
+                "graphics_state_unclosed",
+            );
         }
         self.saved.truncate(snapshot.saved_base);
         self.pop_clips(snapshot.graphics.clips)?;
@@ -1091,17 +1309,27 @@ impl Builder<'_> {
         Ok(())
     }
 
-    fn select_font(&mut self, resolver: &mut Resolver<'_>, value: Value)
-        -> Result<usize, DocError>
-    {
-        if let Some(index) = self.fonts.iter().position(|entry| same_value(&entry.dict, &value)) {
+    fn select_font(
+        &mut self,
+        resolver: &mut Resolver<'_>,
+        value: Value,
+    ) -> Result<usize, DocError> {
+        if let Some(index) = self
+            .fonts
+            .iter()
+            .position(|entry| same_value(&entry.dict, &value))
+        {
             return Ok(index);
         }
-        let dict = value.get().as_dict().ok_or_else(|| bad("font_dictionary"))?;
+        let dict = value
+            .get()
+            .as_dict()
+            .ok_or_else(|| bad("font_dictionary"))?;
         let font = self.font_cache.load(resolver, &value)?;
-        let source = match self.glyph_cache.load(
-            resolver, &font, &value, self.fallback.as_ref(),
-        ) {
+        let source = match self
+            .glyph_cache
+            .load(resolver, &font, &value, self.fallback.as_ref())
+        {
             Ok(source) => source,
             Err(error) => {
                 recover(resolver, error, value.object().id(), "font_program_failed")?;
@@ -1114,7 +1342,15 @@ impl Builder<'_> {
             None
         };
         let index = self.fonts.len();
-        self.budget.push(&mut self.fonts, LoadedFont { dict: value, font, source, type3 })?;
+        self.budget.push(
+            &mut self.fonts,
+            LoadedFont {
+                dict: value,
+                font,
+                source,
+                type3,
+            },
+        )?;
         Ok(index)
     }
 
@@ -1125,12 +1361,25 @@ impl Builder<'_> {
         code: u32,
         inherited: Option<&Value>,
     ) -> Result<Option<Invocation>, DocError> {
-        let Some(type3) = index.and_then(|index| self.fonts.get(index))
-            .and_then(|entry| entry.type3.as_ref()) else { return Ok(None) };
-        let Some(name) = usize::try_from(code).ok().and_then(|code| type3.names.get(code))
-            .and_then(GlyphName::bytes) else { return Ok(None) };
-        let Some(dict) = type3.procs.get().as_dict() else { return Ok(None) };
-        let Some(value) = resolver.resolve_dict_key(dict, name)? else { return Ok(None) };
+        let Some(type3) = index
+            .and_then(|index| self.fonts.get(index))
+            .and_then(|entry| entry.type3.as_ref())
+        else {
+            return Ok(None);
+        };
+        let Some(name) = usize::try_from(code)
+            .ok()
+            .and_then(|code| type3.names.get(code))
+            .and_then(GlyphName::bytes)
+        else {
+            return Ok(None);
+        };
+        let Some(dict) = type3.procs.get().as_dict() else {
+            return Ok(None);
+        };
+        let Some(value) = resolver.resolve_dict_key(dict, name)? else {
+            return Ok(None);
+        };
         Ok(Some(Invocation {
             object: value.object().clone(),
             inherited: type3.resources.clone().or_else(|| inherited.cloned()),
@@ -1150,7 +1399,8 @@ impl Builder<'_> {
         match op.name {
             b"q" => {
                 check(
-                    LimitKind::Depth, self.saved.len().saturating_add(1) as u64,
+                    LimitKind::Depth,
+                    self.saved.len().saturating_add(1) as u64,
                     u64::from(self.limits.max_depth),
                 )?;
                 self.budget.push(&mut self.saved, self.graphics.clone())?;
@@ -1168,13 +1418,17 @@ impl Builder<'_> {
             b"cm" => {
                 if let Some(values) = numbers::<6>(args) {
                     let matrix = Matrix(values).then(self.graphics.ctm);
-                    if !matrix.is_finite() { return Err(bad("graphics_matrix")); }
+                    if !matrix.is_finite() {
+                        return Err(bad("graphics_matrix"));
+                    }
                     self.graphics.ctm = matrix;
                 }
             }
             b"w" => {
                 if let Some([width]) = numbers::<1>(args) {
-                    if width < 0.0 { return Err(bad("stroke_width")); }
+                    if width < 0.0 {
+                        return Err(bad("stroke_width"));
+                    }
                     self.graphics.stroke.width = width;
                 }
             }
@@ -1192,7 +1446,9 @@ impl Builder<'_> {
             }
             b"M" => {
                 if let Some([value]) = numbers::<1>(args) {
-                    if value < 1.0 { return Err(bad("stroke_miter")); }
+                    if value < 1.0 {
+                        return Err(bad("stroke_miter"));
+                    }
                     self.graphics.stroke.miter = value;
                 }
             }
@@ -1203,8 +1459,11 @@ impl Builder<'_> {
                     let mut array = Vec::new();
                     while let Some(value) = values.next_value()? {
                         self.step()?;
-                        let Operand::Number(value) = value else { return Err(bad("dash_array")) };
-                        let value = finite(value).filter(|value| *value >= 0.0)
+                        let Operand::Number(value) = value else {
+                            return Err(bad("dash_array"));
+                        };
+                        let value = finite(value)
+                            .filter(|value| *value >= 0.0)
                             .ok_or_else(|| bad("dash_array"))?;
                         self.budget.push(&mut array, value)?;
                     }
@@ -1214,9 +1473,9 @@ impl Builder<'_> {
             b"gs" => {
                 if let [Operand::Name(name)] = args {
                     let name = decode_name(name, &mut self.names, self.limits.max_object_bytes)?;
-                    if let Some(value) = resource(
-                        resolver, context.resources.as_ref(), b"ExtGState", name,
-                    )? {
+                    if let Some(value) =
+                        resource(resolver, context.resources.as_ref(), b"ExtGState", name)?
+                    {
                         self.ext_gstate(resolver, &value)?;
                     } else {
                         warn(resolver, context.id, "ext_gstate_missing");
@@ -1227,11 +1486,19 @@ impl Builder<'_> {
                 if let Some([x, y]) = numbers::<2>(args) {
                     let point = checked_point(self.graphics.ctm, x, y)?;
                     if op.name == b"m" {
-                        path_push(&mut self.path.path, PathEl::MoveTo(point.0, point.1), &mut self.budget)?;
+                        path_push(
+                            &mut self.path.path,
+                            PathEl::MoveTo(point.0, point.1),
+                            &mut self.budget,
+                        )?;
                         self.path.start = Some(point);
                         self.path.point = Some(point);
                     } else if self.path.point.is_some() {
-                        path_push(&mut self.path.path, PathEl::LineTo(point.0, point.1), &mut self.budget)?;
+                        path_push(
+                            &mut self.path.path,
+                            PathEl::LineTo(point.0, point.1),
+                            &mut self.budget,
+                        )?;
                         self.path.point = Some(point);
                     }
                 }
@@ -1245,8 +1512,7 @@ impl Builder<'_> {
                 }
             }
             b"v" => {
-                if let (Some(point), Some([x2, y2, x3, y3])) =
-                    (self.path.point, numbers::<4>(args))
+                if let (Some(point), Some([x2, y2, x3, y3])) = (self.path.point, numbers::<4>(args))
                 {
                     let b = checked_point(self.graphics.ctm, x2, y2)?;
                     let c = checked_point(self.graphics.ctm, x3, y3)?;
@@ -1264,7 +1530,9 @@ impl Builder<'_> {
             b"re" => {
                 if let Some([x, y, width, height]) = numbers::<4>(args) {
                     let rectangle = rect_path(
-                        [x, y, x + width, y + height], self.graphics.ctm, &mut self.budget,
+                        [x, y, x + width, y + height],
+                        self.graphics.ctm,
+                        &mut self.budget,
                     )?;
                     append_path(&mut self.path.path, &rectangle, &mut self.budget)?;
                     let point = checked_point(self.graphics.ctm, x, y)?;
@@ -1275,7 +1543,9 @@ impl Builder<'_> {
             b"W" => self.path.clip = Some(FillRule::NonZero),
             b"W*" => self.path.clip = Some(FillRule::EvenOdd),
             b"S" | b"s" | b"f" | b"F" | b"f*" | b"B" | b"B*" | b"b" | b"b*" | b"n" => {
-                if matches!(op.name, b"s" | b"b" | b"b*") { self.close_path()?; }
+                if matches!(op.name, b"s" | b"b" | b"b*") {
+                    self.close_path()?;
+                }
                 let fill = matches!(op.name, b"f" | b"F" | b"f*" | b"B" | b"B*" | b"b" | b"b*");
                 let stroke = matches!(op.name, b"S" | b"s" | b"B" | b"B*" | b"b" | b"b*");
                 let rule = if matches!(op.name, b"f*" | b"B*" | b"b*") {
@@ -1288,9 +1558,8 @@ impl Builder<'_> {
             b"CS" | b"cs" => {
                 if let [Operand::Name(name)] = args {
                     let name = decode_name(name, &mut self.names, self.limits.max_object_bytes)?;
-                    let space = ColorSpace::named_or_resource(
-                        resolver, context.resources.as_ref(), name,
-                    )?;
+                    let space =
+                        ColorSpace::named_or_resource(resolver, context.resources.as_ref(), name)?;
                     let color = ColorState::new(space);
                     if op.name == b"CS" {
                         self.graphics.stroke_color = color;
@@ -1315,29 +1584,44 @@ impl Builder<'_> {
             }
             b"SC" | b"SCN" | b"sc" | b"scn" => {
                 if matches!(op.name, b"SC" | b"SCN") {
-                    self.graphics.stroke_color.set(resolver, context.resources.as_ref(), args)?;
+                    self.graphics
+                        .stroke_color
+                        .set(resolver, context.resources.as_ref(), args)?;
                 } else {
-                    self.graphics.fill.set(resolver, context.resources.as_ref(), args)?;
+                    self.graphics
+                        .fill
+                        .set(resolver, context.resources.as_ref(), args)?;
                 }
             }
             b"sh" => {
                 if let [Operand::Name(name)] = args {
                     let name = decode_name(name, &mut self.names, self.limits.max_object_bytes)?;
-                    if let Some(value) = resource(
-                        resolver, context.resources.as_ref(), b"Shading", name,
-                    )? {
+                    if let Some(value) =
+                        resource(resolver, context.resources.as_ref(), b"Shading", name)?
+                    {
                         let shading = paint::shading(
-                            resolver, value.get(), self.graphics.ctm, self.graphics.fill_alpha,
+                            resolver,
+                            value.get(),
+                            self.graphics.ctm,
+                            self.graphics.fill_alpha,
                         )?;
                         let path = match shading.bbox {
                             Some(bbox) => rect_path(bbox, self.graphics.ctm, &mut self.budget)?,
                             None => rect_path(
-                                [0.0, 0.0, self.output.width as f32, self.output.height as f32],
-                                Matrix::IDENTITY, &mut self.budget,
+                                [
+                                    0.0,
+                                    0.0,
+                                    self.output.width as f32,
+                                    self.output.height as f32,
+                                ],
+                                Matrix::IDENTITY,
+                                &mut self.budget,
                             )?,
                         };
                         self.emit(Item::Fill {
-                            path, rule: FillRule::NonZero, paint: shading.paint,
+                            path,
+                            rule: FillRule::NonZero,
+                            paint: shading.paint,
                         })?;
                     } else {
                         warn(resolver, context.id, "shading_missing");
@@ -1347,13 +1631,17 @@ impl Builder<'_> {
             b"Do" => {
                 if let [Operand::Name(name)] = args {
                     let name = decode_name(name, &mut self.names, self.limits.max_object_bytes)?;
-                    if let Some(value) = resource(
-                        resolver, context.resources.as_ref(), b"XObject", name,
-                    )? {
+                    if let Some(value) =
+                        resource(resolver, context.resources.as_ref(), b"XObject", name)?
+                    {
                         let dict = match value.get().as_dict() {
                             Some(dict) => dict,
                             None if resolver.document().repair_mode() => {
-                                warn(resolver, value.object().id(), "xobject_dictionary_recovered");
+                                warn(
+                                    resolver,
+                                    value.object().id(),
+                                    "xobject_dictionary_recovered",
+                                );
                                 return Ok(None);
                             }
                             None => return Err(bad("xobject_dictionary")),
@@ -1362,7 +1650,9 @@ impl Builder<'_> {
                         let subtype = subtype.as_ref().and_then(|value| value.get().as_name());
                         if subtype.is_some_and(|name| name.eq_bytes(b"Image")) {
                             if let Some(id) = value.object().id() {
-                                if !self.graphics.ctm.is_finite() { return Err(bad("image_matrix")); }
+                                if !self.graphics.ctm.is_finite() {
+                                    return Err(bad("image_matrix"));
+                                }
                                 self.emit(Item::Image {
                                     image: ImageSource::Object(id),
                                     transform: self.graphics.ctm,
@@ -1373,7 +1663,9 @@ impl Builder<'_> {
                             return Ok(Some(Action::Form(Invocation {
                                 object: value.object().clone(),
                                 inherited: context.resources.clone(),
-                                matrix: None, bbox: None, type3_mode: None,
+                                matrix: None,
+                                bbox: None,
+                                type3_mode: None,
                             })));
                         } else {
                             warn(resolver, value.object().id(), "xobject_unsupported");
@@ -1417,9 +1709,9 @@ impl Builder<'_> {
                     self.graphics.text.size = finite(*size).ok_or_else(|| bad("font_size"))?;
                     self.graphics.text.font = None;
                     let name = decode_name(name, &mut self.names, self.limits.max_object_bytes)?;
-                    if let Some(value) = resource(
-                        resolver, context.resources.as_ref(), b"Font", name,
-                    )? {
+                    if let Some(value) =
+                        resource(resolver, context.resources.as_ref(), b"Font", name)?
+                    {
                         self.graphics.text.font = Some(self.select_font(resolver, value)?);
                     } else {
                         warn(resolver, context.id, "font_missing");
@@ -1434,7 +1726,9 @@ impl Builder<'_> {
             }
             b"Td" | b"TD" => {
                 if let Some([x, y]) = numbers::<2>(args) {
-                    if op.name == b"TD" { self.graphics.text.leading = -y; }
+                    if op.name == b"TD" {
+                        self.graphics.text.leading = -y;
+                    }
                     self.move_line(x, y);
                 }
             }
@@ -1448,9 +1742,13 @@ impl Builder<'_> {
                 }
             }
             b"\"" => {
-                if let [Operand::Number(word), Operand::Number(character), Operand::String(raw)] = args {
-                    self.graphics.text.word_space = finite(*word).ok_or_else(|| bad("text_spacing"))?;
-                    self.graphics.text.character_space = finite(*character).ok_or_else(|| bad("text_spacing"))?;
+                if let [Operand::Number(word), Operand::Number(character), Operand::String(raw)] =
+                    args
+                {
+                    self.graphics.text.word_space =
+                        finite(*word).ok_or_else(|| bad("text_spacing"))?;
+                    self.graphics.text.character_space =
+                        finite(*character).ok_or_else(|| bad("text_spacing"))?;
                     self.next_line();
                     if self.in_text {
                         return Ok(Some(Action::Show(borrowed_range(&context.bytes, raw)?)));
@@ -1472,19 +1770,18 @@ impl Builder<'_> {
                     }
                 }
             }
-            b"ri" | b"i" | b"BI" | b"EI" | b"d0" | b"d1"
-                | b"BMC" | b"BDC" | b"EMC" | b"MP" | b"DP" | b"BX" | b"EX" => {}
+            b"ri" | b"i" | b"BI" | b"EI" | b"d0" | b"d1" | b"BMC" | b"BDC" | b"EMC" | b"MP"
+            | b"DP" | b"BX" | b"EX" => {}
             _ => warn(resolver, context.id, "render_operator_unsupported"),
         }
         Ok(None)
     }
 
-    fn curve(&mut self, a: (f32, f32), b: (f32, f32), c: (f32, f32))
-        -> Result<(), DocError>
-    {
+    fn curve(&mut self, a: (f32, f32), b: (f32, f32), c: (f32, f32)) -> Result<(), DocError> {
         if self.path.point.is_some() {
             path_push(
-                &mut self.path.path, PathEl::CubicTo(a.0, a.1, b.0, b.1, c.0, c.1),
+                &mut self.path.path,
+                PathEl::CubicTo(a.0, a.1, b.0, b.1, c.0, c.1),
                 &mut self.budget,
             )?;
             self.path.point = Some(c);
@@ -1508,17 +1805,25 @@ impl Builder<'_> {
         rule: FillRule,
     ) -> Result<(), DocError> {
         let current = core::mem::take(&mut self.path);
-        let clip = current.clip.map(|_| copy_path(&current.path, &mut self.budget)).transpose()?;
+        let clip = current
+            .clip
+            .map(|_| copy_path(&current.path, &mut self.budget))
+            .transpose()?;
         let second = if fill && stroke {
             Some(copy_path(&current.path, &mut self.budget)?)
         } else {
             None
         };
         if fill {
-            let paint = self.graphics.fill.paint(
-                resolver, self.pattern_ctm, self.graphics.fill_alpha,
-            )?;
-            self.emit(Item::Fill { path: current.path, rule, paint })?;
+            let paint =
+                self.graphics
+                    .fill
+                    .paint(resolver, self.pattern_ctm, self.graphics.fill_alpha)?;
+            self.emit(Item::Fill {
+                path: current.path,
+                rule,
+                paint,
+            })?;
             if let Some(path) = second {
                 self.emit_stroke(resolver, path)?;
             }
@@ -1531,54 +1836,78 @@ impl Builder<'_> {
         Ok(())
     }
 
-    fn emit_stroke(&mut self, resolver: &mut Resolver<'_>, path: Path)
-        -> Result<(), DocError>
-    {
+    fn emit_stroke(&mut self, resolver: &mut Resolver<'_>, path: Path) -> Result<(), DocError> {
         let stroke = self.device_stroke()?;
         let dash = self.device_dash()?;
         let paint = self.graphics.stroke_color.paint(
-            resolver, self.pattern_ctm, self.graphics.stroke_alpha,
+            resolver,
+            self.pattern_ctm,
+            self.graphics.stroke_alpha,
         )?;
-        self.emit(Item::Stroke { path, stroke, dash, paint })
+        self.emit(Item::Stroke {
+            path,
+            stroke,
+            dash,
+            paint,
+        })
     }
 
     fn device_stroke(&self) -> Result<Stroke, DocError> {
         let width = self.graphics.stroke.width * self.graphics.ctm.mean_scale();
-        if !width.is_finite() { return Err(bad("stroke_geometry")); }
-        Ok(Stroke { width, ..self.graphics.stroke })
+        if !width.is_finite() {
+            return Err(bad("stroke_geometry"));
+        }
+        Ok(Stroke {
+            width,
+            ..self.graphics.stroke
+        })
     }
 
     fn device_dash(&mut self) -> Result<Option<Dash>, DocError> {
-        let Some(dash) = self.graphics.dash.as_ref() else { return Ok(None) };
+        let Some(dash) = self.graphics.dash.as_ref() else {
+            return Ok(None);
+        };
         let scale = self.graphics.ctm.mean_scale();
         let phase = dash.phase * scale;
-        if !scale.is_finite() || !phase.is_finite() { return Err(bad("dash_geometry")); }
+        if !scale.is_finite() || !phase.is_finite() {
+            return Err(bad("dash_geometry"));
+        }
         let mut array = Vec::new();
         self.budget.reserve(&mut array, dash.array.len())?;
         for value in &dash.array {
             let value = *value * scale;
-            if !value.is_finite() { return Err(bad("dash_geometry")); }
+            if !value.is_finite() {
+                return Err(bad("dash_geometry"));
+            }
             array.push(value);
         }
         Ok(Some(Dash { array, phase }))
     }
 
     fn set_dash(&mut self, array: Vec<f32>, phase: f32) -> Result<(), DocError> {
-        if !phase.is_finite() || !array.iter().all(|value| value.is_finite() && *value >= 0.0)
+        if !phase.is_finite()
+            || !array.iter().all(|value| value.is_finite() && *value >= 0.0)
             || (!array.is_empty() && array.iter().all(|value| *value == 0.0))
         {
             return Err(bad("dash_array"));
         }
-        self.graphics.dash = if array.is_empty() { None } else { Some(Arc::new(Dash { array, phase })) };
+        self.graphics.dash = if array.is_empty() {
+            None
+        } else {
+            Some(Arc::new(Dash { array, phase }))
+        };
         Ok(())
     }
 
-    fn ext_gstate(&mut self, resolver: &mut Resolver<'_>, value: &Value)
-        -> Result<(), DocError>
-    {
-        let dict = value.get().as_dict().ok_or_else(|| bad("ext_gstate_dictionary"))?;
+    fn ext_gstate(&mut self, resolver: &mut Resolver<'_>, value: &Value) -> Result<(), DocError> {
+        let dict = value
+            .get()
+            .as_dict()
+            .ok_or_else(|| bad("ext_gstate_dictionary"))?;
         if let Some(width) = number(resolver, dict, b"LW")? {
-            if width < 0.0 { return Err(bad("stroke_width")); }
+            if width < 0.0 {
+                return Err(bad("stroke_width"));
+            }
             self.graphics.stroke.width = width;
         }
         for key in [b"LC".as_slice(), b"LJ".as_slice()] {
@@ -1586,12 +1915,17 @@ impl Builder<'_> {
                 if !(0.0..=2.0).contains(&value) || value != f32::from(value as u8) {
                     return Err(bad("stroke_style"));
                 }
-                if key == b"LC" { self.graphics.stroke.cap = value as u8; }
-                else { self.graphics.stroke.join = value as u8; }
+                if key == b"LC" {
+                    self.graphics.stroke.cap = value as u8;
+                } else {
+                    self.graphics.stroke.join = value as u8;
+                }
             }
         }
         if let Some(value) = number(resolver, dict, b"ML")? {
-            if value < 1.0 { return Err(bad("stroke_miter")); }
+            if value < 1.0 {
+                return Err(bad("stroke_miter"));
+            }
             self.graphics.stroke.miter = value;
         }
         if let Some(value) = number(resolver, dict, b"CA")? {
@@ -1604,37 +1938,63 @@ impl Builder<'_> {
             self.graphics.blend = mode;
         }
         if let Some(value) = resolver.resolve_dict_key(dict, b"D")? {
-            let pair = value.get().as_array().filter(|array| array.len() == 2)
+            let pair = value
+                .get()
+                .as_array()
+                .filter(|array| array.len() == 2)
                 .ok_or_else(|| bad("ext_gstate_dash"))?;
             let array = resolver.resolve(pair.get(0).ok_or_else(|| bad("ext_gstate_dash"))?)?;
             let phase = resolver.resolve(pair.get(1).ok_or_else(|| bad("ext_gstate_dash"))?)?;
-            let phase = phase.get().as_f64().and_then(finite).ok_or_else(|| bad("dash_phase"))?;
+            let phase = phase
+                .get()
+                .as_f64()
+                .and_then(finite)
+                .ok_or_else(|| bad("dash_phase"))?;
             let array = array.get().as_array().ok_or_else(|| bad("dash_array"))?;
             let mut values = Vec::new();
             self.budget.reserve(&mut values, array.len())?;
             for value in array.iter() {
                 self.step()?;
                 let value = resolver.resolve(value)?;
-                values.push(value.get().as_f64().and_then(finite)
-                    .filter(|value| *value >= 0.0).ok_or_else(|| bad("dash_array"))?);
+                values.push(
+                    value
+                        .get()
+                        .as_f64()
+                        .and_then(finite)
+                        .filter(|value| *value >= 0.0)
+                        .ok_or_else(|| bad("dash_array"))?,
+                );
             }
             self.set_dash(values, phase)?;
         }
         if let Some(value) = resolver.resolve_dict_key(dict, b"Font")? {
-            let array = value.get().as_array().filter(|array| array.len() == 2)
+            let array = value
+                .get()
+                .as_array()
+                .filter(|array| array.len() == 2)
                 .ok_or_else(|| bad("ext_gstate_font"))?;
             let font = resolver.resolve(array.get(0).ok_or_else(|| bad("ext_gstate_font"))?)?;
             let size = resolver.resolve(array.get(1).ok_or_else(|| bad("ext_gstate_font"))?)?;
-            self.graphics.text.size = size.get().as_f64().and_then(finite)
+            self.graphics.text.size = size
+                .get()
+                .as_f64()
+                .and_then(finite)
                 .ok_or_else(|| bad("font_size"))?;
             self.graphics.text.font = None;
             self.graphics.text.font = Some(self.select_font(resolver, font)?);
         }
         if let Some(mask) = resolver.resolve_dict_key(dict, b"SMask")? {
             if !mask.get().is_null()
-                && !mask.get().as_name().is_some_and(|name| name.eq_bytes(b"None"))
+                && !mask
+                    .get()
+                    .as_name()
+                    .is_some_and(|name| name.eq_bytes(b"None"))
             {
-                warn(resolver, value.object().id(), "render_soft_mask_unsupported");
+                warn(
+                    resolver,
+                    value.object().id(),
+                    "render_soft_mask_unsupported",
+                );
             }
         }
         Ok(())
@@ -1654,7 +2014,9 @@ impl Builder<'_> {
         let mut unsupported = bpc != Some(8.0);
         let mut decode = None;
         for pair in header.chunks_exact(2) {
-            let Some(Operand::Name(key)) = pair.first() else { continue };
+            let Some(Operand::Name(key)) = pair.first() else {
+                continue;
+            };
             let value = pair.get(1).copied().unwrap_or(Operand::Null);
             if name_eq(key, b"F") || name_eq(key, b"Filter") {
                 unsupported |= !matches!(value, Operand::Null);
@@ -1663,13 +2025,21 @@ impl Builder<'_> {
             } else if name_eq(key, b"CS") || name_eq(key, b"ColorSpace") {
                 channels = match value {
                     Operand::Name(name) if name_eq(name, b"G") || name_eq(name, b"DeviceGray") => 1,
-                    Operand::Name(name) if name_eq(name, b"RGB") || name_eq(name, b"DeviceRGB") => 3,
-                    _ => { unsupported = true; 1 }
+                    Operand::Name(name) if name_eq(name, b"RGB") || name_eq(name, b"DeviceRGB") => {
+                        3
+                    }
+                    _ => {
+                        unsupported = true;
+                        1
+                    }
                 };
             } else if name_eq(key, b"D") || name_eq(key, b"Decode") {
                 decode = match value {
                     Operand::Array(raw) => Some(raw),
-                    _ => { unsupported = true; None }
+                    _ => {
+                        unsupported = true;
+                        None
+                    }
                 };
             }
         }
@@ -1677,25 +2047,55 @@ impl Builder<'_> {
             warn(resolver, id, "inline_image_unsupported");
             return Ok(());
         }
-        let pixels = u64::from(width).checked_mul(u64::from(height))
-            .ok_or_else(|| refusal(LimitKind::DecodedBytes, u64::MAX, self.limits.max_decoded_bytes))?;
-        let rgba_length = pixels.checked_mul(4)
-            .ok_or_else(|| refusal(LimitKind::DecodedBytes, u64::MAX, self.limits.max_decoded_bytes))?;
-        check(LimitKind::DecodedBytes, rgba_length, self.limits.max_decoded_bytes)?;
-        let length = usize::try_from(pixels).ok().and_then(|pixels| pixels.checked_mul(channels))
-            .ok_or_else(|| refusal(LimitKind::DecodedBytes, u64::MAX, self.limits.max_decoded_bytes))?;
+        let pixels = u64::from(width)
+            .checked_mul(u64::from(height))
+            .ok_or_else(|| {
+                refusal(
+                    LimitKind::DecodedBytes,
+                    u64::MAX,
+                    self.limits.max_decoded_bytes,
+                )
+            })?;
+        let rgba_length = pixels.checked_mul(4).ok_or_else(|| {
+            refusal(
+                LimitKind::DecodedBytes,
+                u64::MAX,
+                self.limits.max_decoded_bytes,
+            )
+        })?;
+        check(
+            LimitKind::DecodedBytes,
+            rgba_length,
+            self.limits.max_decoded_bytes,
+        )?;
+        let length = usize::try_from(pixels)
+            .ok()
+            .and_then(|pixels| pixels.checked_mul(channels))
+            .ok_or_else(|| {
+                refusal(
+                    LimitKind::DecodedBytes,
+                    u64::MAX,
+                    self.limits.max_decoded_bytes,
+                )
+            })?;
         let mut pairs = [(0.0f32, 1.0f32); 3];
         if let Some(raw) = decode {
             let mut values = Values::new(container_body(raw), &self.limits);
             for pair in pairs.iter_mut().take(channels) {
-                let Some(Operand::Number(low)) = values.next_value()? else { return Err(bad("inline_decode")) };
-                let Some(Operand::Number(high)) = values.next_value()? else { return Err(bad("inline_decode")) };
+                let Some(Operand::Number(low)) = values.next_value()? else {
+                    return Err(bad("inline_decode"));
+                };
+                let Some(Operand::Number(high)) = values.next_value()? else {
+                    return Err(bad("inline_decode"));
+                };
                 *pair = (
                     finite(low).ok_or_else(|| bad("inline_decode"))?,
                     finite(high).ok_or_else(|| bad("inline_decode"))?,
                 );
             }
-            if values.next_value()?.is_some() { return Err(bad("inline_decode")); }
+            if values.next_value()?.is_some() {
+                return Err(bad("inline_decode"));
+            }
         }
         let samples = reader.inline_bytes(length)?;
         let capacity = usize::try_from(rgba_length)
@@ -1714,9 +2114,15 @@ impl Builder<'_> {
             }
             rgba.extend_from_slice(&[rgb[0], rgb[1], rgb[2], 255]);
         }
-        if !self.graphics.ctm.is_finite() { return Err(bad("image_matrix")); }
+        if !self.graphics.ctm.is_finite() {
+            return Err(bad("image_matrix"));
+        }
         self.emit(Item::Image {
-            image: ImageSource::Inline { width, height, rgba },
+            image: ImageSource::Inline {
+                width,
+                height,
+                rgba,
+            },
             transform: self.graphics.ctm,
             alpha: self.graphics.fill_alpha,
         })
@@ -1747,18 +2153,29 @@ impl Builder<'_> {
     }
 
     fn adjust(&mut self, value: f32) {
-        let vertical = self.graphics.text.font.and_then(|index| self.fonts.get(index))
-            .map(|entry| entry.font.is_vertical()).unwrap_or(false);
+        let vertical = self
+            .graphics
+            .text
+            .font
+            .and_then(|index| self.fonts.get(index))
+            .map(|entry| entry.font.is_vertical())
+            .unwrap_or(false);
         let shift = -value / 1000.0 * self.graphics.text.size;
-        if vertical { self.advance(0.0, shift); }
-        else { self.advance(shift * self.graphics.text.horizontal_scale, 0.0); }
+        if vertical {
+            self.advance(0.0, shift);
+        } else {
+            self.advance(shift * self.graphics.text.horizontal_scale, 0.0);
+        }
     }
 }
 
-fn load_type3(resolver: &mut Resolver<'_>, dict: DictRef<'_>, budget: &mut Budget)
-    -> Result<Type3, DocError>
-{
-    let procs = resolver.resolve_dict_key(dict, b"CharProcs")?
+fn load_type3(
+    resolver: &mut Resolver<'_>,
+    dict: DictRef<'_>,
+    budget: &mut Budget,
+) -> Result<Type3, DocError> {
+    let procs = resolver
+        .resolve_dict_key(dict, b"CharProcs")?
         .filter(|value| value.get().as_dict().is_some())
         .ok_or_else(|| bad("type3_charprocs"))?;
     let encoding = resolver.resolve_dict_key(dict, b"Encoding")?;
@@ -1769,7 +2186,9 @@ fn load_type3(resolver: &mut Resolver<'_>, dict: DictRef<'_>, budget: &mut Budge
             base = BaseEncoding::from_name(name.decoded().as_ref()).unwrap_or(base);
         } else if let Some(dict) = encoding.get().as_dict() {
             if let Some(value) = resolver.resolve_dict_key(dict, b"BaseEncoding")? {
-                base = value.get().as_name()
+                base = value
+                    .get()
+                    .as_name()
                     .and_then(|name| BaseEncoding::from_name(name.decoded().as_ref()))
                     .unwrap_or(base);
             }
@@ -1777,10 +2196,14 @@ fn load_type3(resolver: &mut Resolver<'_>, dict: DictRef<'_>, budget: &mut Budge
         }
     }
     let mut names = core::array::from_fn(|index| {
-        base.glyph_name(index as u8).map(|name| GlyphName::Static(name.as_bytes()))
+        base.glyph_name(index as u8)
+            .map(|name| GlyphName::Static(name.as_bytes()))
             .unwrap_or(GlyphName::Missing)
     });
-    if let Some(array) = differences.as_ref().and_then(|value| value.get().as_array()) {
+    if let Some(array) = differences
+        .as_ref()
+        .and_then(|value| value.get().as_array())
+    {
         let mut code = None;
         for value in array.iter() {
             let value = resolver.resolve(value)?;
@@ -1795,7 +2218,9 @@ fn load_type3(resolver: &mut Resolver<'_>, dict: DictRef<'_>, budget: &mut Budge
                     } else {
                         GlyphName::Pdf(value.clone())
                     };
-                    if let Some(slot) = names.get_mut(usize::from(byte)) { *slot = mapped; }
+                    if let Some(slot) = names.get_mut(usize::from(byte)) {
+                        *slot = mapped;
+                    }
                     code = byte.checked_add(1);
                 }
             } else {
@@ -1804,8 +2229,10 @@ fn load_type3(resolver: &mut Resolver<'_>, dict: DictRef<'_>, budget: &mut Budge
         }
     }
     Ok(Type3 {
-        names, procs,
-        resources: resolver.resolve_dict_key(dict, b"Resources")?
+        names,
+        procs,
+        resources: resolver
+            .resolve_dict_key(dict, b"Resources")?
             .filter(|value| value.get().as_dict().is_some()),
         bbox: read_array::<4>(resolver, dict, b"FontBBox")?,
     })
@@ -1814,7 +2241,10 @@ fn load_type3(resolver: &mut Resolver<'_>, dict: DictRef<'_>, budget: &mut Budge
 fn page_matrix(page: &Page, scale: f32) -> Result<(Matrix, u32, u32), DocError> {
     let [x0, y0, x1, y1] = page.crop_box;
     let unit = page.user_unit * f64::from(scale);
-    if !scale.is_finite() || scale <= 0.0 || !unit.is_finite() || unit <= 0.0
+    if !scale.is_finite()
+        || scale <= 0.0
+        || !unit.is_finite()
+        || unit <= 0.0
         || !page.crop_box.iter().all(|value| value.is_finite())
     {
         return Err(bad("page_display_geometry"));
@@ -1822,16 +2252,36 @@ fn page_matrix(page: &Page, scale: f32) -> Result<(Matrix, u32, u32), DocError> 
     let width = (x1 - x0).max(0.0) * unit;
     let height = (y1 - y0).max(0.0) * unit;
     let (matrix, width, height) = match page.rotate % 360 {
-        90 => ([0.0, unit, unit, 0.0, -y0 * unit, -x0 * unit], height, width),
-        180 => ([-unit, 0.0, 0.0, unit, x1 * unit, -y0 * unit], width, height),
-        270 => ([0.0, -unit, -unit, 0.0, y1 * unit, x1 * unit], height, width),
-        _ => ([unit, 0.0, 0.0, -unit, -x0 * unit, y1 * unit], width, height),
+        90 => (
+            [0.0, unit, unit, 0.0, -y0 * unit, -x0 * unit],
+            height,
+            width,
+        ),
+        180 => (
+            [-unit, 0.0, 0.0, unit, x1 * unit, -y0 * unit],
+            width,
+            height,
+        ),
+        270 => (
+            [0.0, -unit, -unit, 0.0, y1 * unit, x1 * unit],
+            height,
+            width,
+        ),
+        _ => (
+            [unit, 0.0, 0.0, -unit, -x0 * unit, y1 * unit],
+            width,
+            height,
+        ),
     };
     let mut result = [0.0; 6];
     for (slot, value) in result.iter_mut().zip(matrix) {
         *slot = finite(value).ok_or_else(|| bad("page_display_geometry"))?;
     }
-    Ok((Matrix(result), ceil_dimension(width)?, ceil_dimension(height)?))
+    Ok((
+        Matrix(result),
+        ceil_dimension(width)?,
+        ceil_dimension(height)?,
+    ))
 }
 
 fn ceil_dimension(value: f64) -> Result<u32, DocError> {
@@ -1840,17 +2290,22 @@ fn ceil_dimension(value: f64) -> Result<u32, DocError> {
     }
     let integer = value as u32;
     if f64::from(integer) < value {
-        integer.checked_add(1).ok_or_else(|| bad("page_display_geometry"))
+        integer
+            .checked_add(1)
+            .ok_or_else(|| bad("page_display_geometry"))
     } else {
         Ok(integer)
     }
 }
 
 fn inline_dimension(value: Option<f64>) -> Result<u32, DocError> {
-    let value = value.filter(|value| value.is_finite() && *value >= 1.0
-        && *value <= f64::from(u32::MAX)).ok_or_else(|| bad("inline_image_dimension"))?;
+    let value = value
+        .filter(|value| value.is_finite() && *value >= 1.0 && *value <= f64::from(u32::MAX))
+        .ok_or_else(|| bad("inline_image_dimension"))?;
     let integer = value as u32;
-    if f64::from(integer) != value { return Err(bad("inline_image_dimension")); }
+    if f64::from(integer) != value {
+        return Err(bad("inline_image_dimension"));
+    }
     Ok(integer)
 }
 
@@ -1859,33 +2314,49 @@ fn translation(x: f32, y: f32) -> Matrix {
 }
 
 fn borrowed_range(owner: &[u8], bytes: &[u8]) -> Result<Range<usize>, DocError> {
-    let start = (bytes.as_ptr() as usize).checked_sub(owner.as_ptr() as usize)
+    let start = (bytes.as_ptr() as usize)
+        .checked_sub(owner.as_ptr() as usize)
         .ok_or_else(|| bad("content_range"))?;
-    let end = start.checked_add(bytes.len()).filter(|end| *end <= owner.len())
+    let end = start
+        .checked_add(bytes.len())
+        .filter(|end| *end <= owner.len())
         .ok_or_else(|| bad("content_range"))?;
     Ok(start..end)
 }
 
 pub(crate) fn checked_point(matrix: Matrix, x: f32, y: f32) -> Result<(f32, f32), DocError> {
     let point = matrix.point(x, y);
-    if point.0.is_finite() && point.1.is_finite() { Ok(point) }
-    else { Err(bad("path_geometry")) }
+    if point.0.is_finite() && point.1.is_finite() {
+        Ok(point)
+    } else {
+        Err(bad("path_geometry"))
+    }
 }
 
 fn path_push(path: &mut Path, element: PathEl, budget: &mut Budget) -> Result<(), DocError> {
-    check(LimitKind::Tokens, path.els.len().saturating_add(1) as u64, PATH_ELEMENTS)?;
+    check(
+        LimitKind::Tokens,
+        path.els.len().saturating_add(1) as u64,
+        PATH_ELEMENTS,
+    )?;
     budget.push(&mut path.els, element)
 }
 
 fn account_path(path: &Path, budget: &mut Budget) -> Result<(), DocError> {
     check(LimitKind::Tokens, path.els.len() as u64, PATH_ELEMENTS)?;
-    let bytes = path.els.len().checked_mul(core::mem::size_of::<PathEl>())
+    let bytes = path
+        .els
+        .len()
+        .checked_mul(core::mem::size_of::<PathEl>())
         .ok_or_else(|| refusal(LimitKind::Tokens, u64::MAX, PATH_ELEMENTS))?;
     budget.charge(bytes)
 }
 
 fn append_path(target: &mut Path, source: &Path, budget: &mut Budget) -> Result<(), DocError> {
-    let requested = target.els.len().checked_add(source.els.len())
+    let requested = target
+        .els
+        .len()
+        .checked_add(source.els.len())
         .ok_or_else(|| refusal(LimitKind::Tokens, u64::MAX, PATH_ELEMENTS))?;
     check(LimitKind::Tokens, requested as u64, PATH_ELEMENTS)?;
     budget.reserve(&mut target.els, source.els.len())?;
@@ -1902,20 +2373,28 @@ fn copy_path(path: &Path, budget: &mut Budget) -> Result<Path, DocError> {
 fn rect_path(bbox: [f32; 4], matrix: Matrix, budget: &mut Budget) -> Result<Path, DocError> {
     let [x0, y0, x1, y1] = bbox;
     let points = [
-        checked_point(matrix, x0, y0)?, checked_point(matrix, x1, y0)?,
-        checked_point(matrix, x1, y1)?, checked_point(matrix, x0, y1)?,
+        checked_point(matrix, x0, y0)?,
+        checked_point(matrix, x1, y0)?,
+        checked_point(matrix, x1, y1)?,
+        checked_point(matrix, x0, y1)?,
     ];
     let mut path = Path::default();
     budget.reserve(&mut path.els, 5)?;
     for (index, (x, y)) in points.into_iter().enumerate() {
-        path.els.push(if index == 0 { PathEl::MoveTo(x, y) } else { PathEl::LineTo(x, y) });
+        path.els.push(if index == 0 {
+            PathEl::MoveTo(x, y)
+        } else {
+            PathEl::LineTo(x, y)
+        });
     }
     path.els.push(PathEl::Close);
     Ok(path)
 }
 
 fn transform_path(path: &mut Path, matrix: Matrix) -> Result<(), DocError> {
-    if !matrix.is_finite() { return Err(bad("text_geometry")); }
+    if !matrix.is_finite() {
+        return Err(bad("text_geometry"));
+    }
     for element in &mut path.els {
         *element = match *element {
             PathEl::MoveTo(x, y) => {
@@ -1944,10 +2423,14 @@ fn same_value(left: &Value, right: &Value) -> bool {
 }
 
 fn numbers<const N: usize>(operands: &[Operand<'_>]) -> Option<[f32; N]> {
-    if operands.len() != N { return None; }
+    if operands.len() != N {
+        return None;
+    }
     let mut result = [0.0; N];
     for (slot, operand) in result.iter_mut().zip(operands) {
-        let Operand::Number(value) = operand else { return None };
+        let Operand::Number(value) = operand else {
+            return None;
+        };
         *slot = finite(*value)?;
     }
     Some(result)
@@ -1958,13 +2441,22 @@ pub(crate) fn read_array<const N: usize>(
     dict: DictRef<'_>,
     key: &[u8],
 ) -> Result<Option<[f32; N]>, DocError> {
-    let Some(value) = resolver.resolve_dict_key(dict, key)? else { return Ok(None) };
-    let array = value.get().as_array().filter(|array| array.len() == N)
+    let Some(value) = resolver.resolve_dict_key(dict, key)? else {
+        return Ok(None);
+    };
+    let array = value
+        .get()
+        .as_array()
+        .filter(|array| array.len() == N)
         .ok_or_else(|| bad("render_number_array"))?;
     let mut result = [0.0; N];
     for (slot, value) in result.iter_mut().zip(array.iter()) {
         let value = resolver.resolve(value)?;
-        *slot = value.get().as_f64().and_then(finite).ok_or_else(|| bad("render_number"))?;
+        *slot = value
+            .get()
+            .as_f64()
+            .and_then(finite)
+            .ok_or_else(|| bad("render_number"))?;
     }
     Ok(Some(result))
 }
@@ -1983,19 +2475,30 @@ fn blend_mode(
             None
         }
     }
-    let Some(value) = resolver.resolve_dict_key(dict, b"BM")? else { return Ok(None) };
-    if let Some(mode) = supported(&value) { return Ok(Some(mode)); }
+    let Some(value) = resolver.resolve_dict_key(dict, b"BM")? else {
+        return Ok(None);
+    };
+    if let Some(mode) = supported(&value) {
+        return Ok(Some(mode));
+    }
     if let Some(array) = value.get().as_array() {
         check(
-            LimitKind::Tokens, array.len() as u64,
+            LimitKind::Tokens,
+            array.len() as u64,
             u64::from(resolver.document().limits().max_tokens_per_object).min(64),
         )?;
         for value in array.iter() {
             let value = resolver.resolve(value)?;
-            if let Some(mode) = supported(&value) { return Ok(Some(mode)); }
+            if let Some(mode) = supported(&value) {
+                return Ok(Some(mode));
+            }
         }
     }
-    warn(resolver, value.object().id(), "render_blend_mode_unsupported");
+    warn(
+        resolver,
+        value.object().id(),
+        "render_blend_mode_unsupported",
+    );
     Ok(Some(BlendMode::Normal))
 }
 
@@ -2004,8 +2507,15 @@ pub(crate) fn number(
     dict: DictRef<'_>,
     key: &[u8],
 ) -> Result<Option<f32>, DocError> {
-    let Some(value) = resolver.resolve_dict_key(dict, key)? else { return Ok(None) };
-    value.get().as_f64().and_then(finite).map(Some).ok_or_else(|| bad("render_number"))
+    let Some(value) = resolver.resolve_dict_key(dict, key)? else {
+        return Ok(None);
+    };
+    value
+        .get()
+        .as_f64()
+        .and_then(finite)
+        .map(Some)
+        .ok_or_else(|| bad("render_number"))
 }
 
 pub(crate) fn resource(
@@ -2014,35 +2524,58 @@ pub(crate) fn resource(
     category: &[u8],
     name: &[u8],
 ) -> Result<Option<Value>, DocError> {
-    let Some(dict) = resources.and_then(|value| value.get().as_dict()) else { return Ok(None) };
-    let Some(category) = resolver.resolve_dict_key(dict, category)? else { return Ok(None) };
-    let Some(dict) = category.get().as_dict() else { return Ok(None) };
+    let Some(dict) = resources.and_then(|value| value.get().as_dict()) else {
+        return Ok(None);
+    };
+    let Some(category) = resolver.resolve_dict_key(dict, category)? else {
+        return Ok(None);
+    };
+    let Some(dict) = category.get().as_dict() else {
+        return Ok(None);
+    };
     resolver.resolve_dict_key(dict, name)
 }
 
 pub(crate) fn finite(value: f64) -> Option<f32> {
-    if value.is_finite() && value.abs() <= f64::from(f32::MAX) { Some(value as f32) }
-    else { None }
+    if value.is_finite() && value.abs() <= f64::from(f32::MAX) {
+        Some(value as f32)
+    } else {
+        None
+    }
 }
 
 fn norm(x: f64, y: f64) -> f64 {
     let large = x.abs().max(y.abs());
     let small = x.abs().min(y.abs());
-    if !large.is_finite() || !small.is_finite() { return f64::NAN; }
-    if large == 0.0 { return 0.0; }
+    if !large.is_finite() || !small.is_finite() {
+        return f64::NAN;
+    }
+    if large == 0.0 {
+        return 0.0;
+    }
     let ratio = small / large;
     let square = 1.0 + ratio * ratio;
     let mut root = 1.5;
-    for _ in 0..8 { root = 0.5 * (root + square / root); }
+    for _ in 0..8 {
+        root = 0.5 * (root + square / root);
+    }
     large * root
 }
 
 pub(crate) fn check(kind: LimitKind, requested: u64, maximum: u64) -> Result<(), DocError> {
-    if requested > maximum { Err(refusal(kind, requested, maximum)) } else { Ok(()) }
+    if requested > maximum {
+        Err(refusal(kind, requested, maximum))
+    } else {
+        Ok(())
+    }
 }
 
 pub(crate) fn refusal(limit: LimitKind, requested: u64, maximum: u64) -> DocError {
-    DocError::Refused(Refusal { limit, requested, maximum })
+    DocError::Refused(Refusal {
+        limit,
+        requested,
+        maximum,
+    })
 }
 
 pub(crate) fn bad(what: &'static str) -> DocError {
@@ -2050,7 +2583,11 @@ pub(crate) fn bad(what: &'static str) -> DocError {
 }
 
 pub(crate) fn warn(resolver: &mut Resolver<'_>, object: Option<ObjectRef>, what: &'static str) {
-    resolver.warn(Warning { offset: None, object, what });
+    resolver.warn(Warning {
+        offset: None,
+        object,
+        what,
+    });
 }
 
 fn recover(
@@ -2061,6 +2598,9 @@ fn recover(
 ) -> Result<(), DocError> {
     match error {
         error @ (DocError::Encrypted | DocError::Refused(_)) => Err(error),
-        _ => { warn(resolver, object, what); Ok(()) }
+        _ => {
+            warn(resolver, object, what);
+            Ok(())
+        }
     }
 }

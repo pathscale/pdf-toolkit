@@ -9,8 +9,8 @@ use crate::{encode, serialize_value, sha256, Dict, Value, Writer, XrefCompressio
 use crate::encrypt;
 mod annotations;
 mod author;
-mod encrypted;
 mod chacha;
+mod encrypted;
 mod jpx;
 mod jxl;
 mod render;
@@ -70,12 +70,7 @@ fn page_value(parent: u32, content: u32, extra: Dict) -> Value {
     Value::Dict(dict)
 }
 
-fn pages_value(
-    parent: Option<u32>,
-    kids: &[u32],
-    count: usize,
-    extra: Dict,
-) -> io::Result<Value> {
+fn pages_value(parent: Option<u32>, kids: &[u32], count: usize, extra: Dict) -> io::Result<Value> {
     let mut dict = vec![
         ("Type".to_owned(), name("Pages")),
         (
@@ -153,7 +148,12 @@ impl House {
         let catalog = writer.alloc()?;
         let pages = writer.alloc()?;
         let font = writer.alloc()?;
-        Ok(Self { writer, catalog, pages, font })
+        Ok(Self {
+            writer,
+            catalog,
+            pages,
+            font,
+        })
     }
 
     fn root_value(&self, kids: &[u32], count: usize) -> io::Result<Value> {
@@ -207,8 +207,13 @@ impl House {
         let content = self.writer.alloc()?;
         let (dict, bytes) = encoded(plain, encoding)?;
         let range = self.writer.stream(content, dict, &bytes)?;
-        self.writer.object(id, &page_value(parent, content, extra))?;
-        Ok(AuthoredPage { id, content, data_start: range.start })
+        self.writer
+            .object(id, &page_value(parent, content, extra))?;
+        Ok(AuthoredPage {
+            id,
+            content,
+            data_start: range.start,
+        })
     }
 
     fn table(&mut self, extra: Dict) -> io::Result<()> {
@@ -217,12 +222,16 @@ impl House {
     }
 
     fn stream(&mut self, compression: XrefCompression) -> io::Result<()> {
-        self.writer.finish_stream(self.catalog, compression, Vec::new())?;
+        self.writer
+            .finish_stream(self.catalog, compression, Vec::new())?;
         Ok(())
     }
 
     fn fixture(self, expected: String) -> Fixture {
-        Fixture { pdf: self.writer.into_bytes(), expected }
+        Fixture {
+            pdf: self.writer.into_bytes(),
+            expected,
+        }
     }
 }
 
@@ -329,11 +338,7 @@ fn fixture_resources(fonts: &[(&str, u32)], xobjects: &[(&str, u32)]) -> Value {
     Value::Dict(entries)
 }
 
-fn add_type1_font(
-    house: &mut House,
-    base_font: &str,
-    encoding: Option<Value>,
-) -> io::Result<u32> {
+fn add_type1_font(house: &mut House, base_font: &str, encoding: Option<Value>) -> io::Result<u32> {
     let font = house.writer.alloc()?;
     let mut entries = vec![
         ("Type".to_owned(), name("Font")),
@@ -507,11 +512,9 @@ fn compressed_document(count: usize, hybrid: bool) -> io::Result<Fixture> {
     house.writer.object_stream(object_stream, &members, true)?;
     let kind = if hybrid { "hybrid" } else { "stream" };
     if hybrid {
-        let offset = house.writer.xref_stream(
-            house.catalog,
-            XrefCompression::Flate,
-            Vec::new(),
-        )?;
+        let offset = house
+            .writer
+            .xref_stream(house.catalog, XrefCompression::Flate, Vec::new())?;
         let offset = i64::try_from(offset).map_err(|_| {
             io::Error::new(io::ErrorKind::InvalidInput, "hybrid offset exceeds i64")
         })?;
@@ -543,9 +546,9 @@ fn incremental() -> io::Result<Fixture> {
     kids.push(third.id);
     let root = house.root_value(&kids, 3)?;
     house.writer.object(house.pages, &root)?;
-    let first = pages.first().ok_or_else(|| {
-        io::Error::new(io::ErrorKind::InvalidData, "missing authored first page")
-    })?;
+    let first = pages
+        .first()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "missing authored first page"))?;
     house.writer.object(
         first.id,
         &page_value(
@@ -805,7 +808,9 @@ fn bad_startxref() -> io::Result<Fixture> {
     let target = page.data_start.checked_add(8192).ok_or_else(|| {
         io::Error::new(io::ErrorKind::InvalidInput, "bad startxref target overflow")
     })?;
-    house.writer.finish_bad_startxref(house.catalog, target as u64)?;
+    house
+        .writer
+        .finish_bad_startxref(house.catalog, target as u64)?;
     Ok(house.fixture("version=1.4\nrefusal=malformed\n".to_owned()))
 }
 
@@ -1044,8 +1049,8 @@ fn text_type0() -> io::Result<Fixture> {
         72,
         710,
         &[
-            0x00, 0x01, 0x00, 0x02, 0x00, 0x03, 0x00, 0x04, 0x00, 0x20, 0x00, 0x10, 0x00,
-            0x11, 0x00, 0x12, 0x00, 0x20, 0x00, 0x30,
+            0x00, 0x01, 0x00, 0x02, 0x00, 0x03, 0x00, 0x04, 0x00, 0x20, 0x00, 0x10, 0x00, 0x11,
+            0x00, 0x12, 0x00, 0x20, 0x00, 0x30,
         ],
     )?;
     text_fixture(
@@ -1100,14 +1105,7 @@ fn two_columns() -> io::Result<Fixture> {
 fn form_xobject() -> io::Result<Fixture> {
     let mut house = House::new("1.4")?;
     let mut form_content = Vec::new();
-    append_text_line(
-        &mut form_content,
-        "F1",
-        11,
-        0,
-        0,
-        b"Repeated form line.",
-    )?;
+    append_text_line(&mut form_content, "F1", 11, 0, 0, b"Repeated form line.")?;
     let form = house.writer.alloc()?;
     house.writer.stream(
         form,
@@ -1291,12 +1289,7 @@ fn image_dictionary(
     entries
 }
 
-fn image_truth(
-    expected: &mut String,
-    object: u32,
-    kind: &str,
-    rgba: Option<&[u8]>,
-) {
+fn image_truth(expected: &mut String, object: u32, kind: &str, rgba: Option<&[u8]>) {
     expected.push_str(&format!("image.{object}.kind={kind}\n"));
     if let Some(rgba) = rgba {
         expected.push_str(&format!(
@@ -1356,10 +1349,7 @@ fn links_outline() -> io::Result<Fixture> {
             [72.0, 660.0, 200.0, 682.0],
             Value::Dict(vec![
                 ("S".to_owned(), name("Launch")),
-                (
-                    "F".to_owned(),
-                    Value::Str(b"ignored-document.pdf".to_vec()),
-                ),
+                ("F".to_owned(), Value::Str(b"ignored-document.pdf".to_vec())),
             ]),
         ),
     )?;
@@ -1428,10 +1418,7 @@ fn links_outline() -> io::Result<Fixture> {
     house.writer.object(
         introduction,
         &Value::Dict(vec![
-            (
-                "Title".to_owned(),
-                Value::Str(b"Introduction".to_vec()),
-            ),
+            ("Title".to_owned(), Value::Str(b"Introduction".to_vec())),
             ("Parent".to_owned(), reference(outline_root)),
             ("Next".to_owned(), reference(destination)),
             ("First".to_owned(), reference(first_detail)),
@@ -1553,8 +1540,8 @@ fn images() -> io::Result<Fixture> {
     let jpeg = house.writer.alloc()?;
 
     let rgb_samples = [
-        255, 0, 0, 0, 255, 0, 0, 0, 255, 255, 255, 0, 0, 255, 255, 255, 0, 255, 32, 64, 96,
-        96, 128, 160, 192, 224, 255, 17, 34, 51, 68, 85, 102, 119, 136, 153,
+        255, 0, 0, 0, 255, 0, 0, 0, 255, 255, 255, 0, 0, 255, 255, 255, 0, 255, 32, 64, 96, 96,
+        128, 160, 192, 224, 255, 17, 34, 51, 68, 85, 102, 119, 136, 153,
     ];
     let alpha_samples = [255, 192, 128, 64, 0, 255, 255, 192, 128, 64, 32, 16];
     let mut rgb_rgba = Vec::with_capacity(48);
@@ -1616,9 +1603,7 @@ fn images() -> io::Result<Fixture> {
         &encode::flate(&gray_samples),
     )?;
 
-    let palette = [
-        255, 0, 0, 0, 255, 0, 0, 0, 255, 255, 255, 255,
-    ];
+    let palette = [255, 0, 0, 0, 255, 0, 0, 0, 255, 255, 255, 255];
     let indexed_samples = [0b0001_1011];
     let indexed_rgba = [
         255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 255, 255,
@@ -1642,9 +1627,7 @@ fn images() -> io::Result<Fixture> {
 
     // Each row is padded to a whole byte: row 0 is "01", row 1 is "10".
     let stencil_samples = [0b0100_0000, 0b1000_0000];
-    let stencil_rgba = [
-        0, 0, 0, 255, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 255,
-    ];
+    let stencil_rgba = [0, 0, 0, 255, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 255];
     house.writer.stream(
         stencil,
         image_dictionary(
@@ -1716,12 +1699,7 @@ fn images() -> io::Result<Fixture> {
         "pixels",
         Some(alpha_rgba.as_slice()),
     );
-    image_truth(
-        &mut fixture.expected,
-        gray,
-        "pixels",
-        Some(&gray_rgba[..]),
-    );
+    image_truth(&mut fixture.expected, gray, "pixels", Some(&gray_rgba[..]));
     image_truth(
         &mut fixture.expected,
         indexed,
@@ -1833,7 +1811,10 @@ pub fn write_fixtures(out: &Path) -> io::Result<usize> {
     for (name, build) in builders {
         let fixture = build()?;
         fs::write(out.join(format!("{name}.pdf")), &fixture.pdf)?;
-        fs::write(out.join(format!("{name}.expect")), fixture.expected.as_bytes())?;
+        fs::write(
+            out.join(format!("{name}.expect")),
+            fixture.expected.as_bytes(),
+        )?;
     }
     Ok(builders.len())
 }

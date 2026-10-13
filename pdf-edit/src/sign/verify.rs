@@ -263,7 +263,9 @@ fn pdf_date_iso(raw: &str) -> Option<String> {
     let field = |at: usize, default: &str| {
         body.get(at..at + 2)
             .filter(|_| at + 2 <= digits)
-            .map_or(default.to_owned(), |pair| String::from_utf8_lossy(pair).into_owned())
+            .map_or(default.to_owned(), |pair| {
+                String::from_utf8_lossy(pair).into_owned()
+            })
     };
     let year = String::from_utf8_lossy(&body[..4]);
     let date = format!(
@@ -279,12 +281,18 @@ fn pdf_date_iso(raw: &str) -> Option<String> {
         None => String::new(),
         Some(b'Z') => "Z".to_owned(),
         Some(&sign @ (b'+' | b'-')) => {
-            let numbers: Vec<u8> = zone[1..].iter().copied().filter(u8::is_ascii_digit).collect();
+            let numbers: Vec<u8> = zone[1..]
+                .iter()
+                .copied()
+                .filter(u8::is_ascii_digit)
+                .collect();
             if numbers.len() != 2 && numbers.len() != 4 {
                 return None;
             }
             let hours = String::from_utf8_lossy(&numbers[..2]);
-            let minutes = numbers.get(2..4).map_or("00".into(), String::from_utf8_lossy);
+            let minutes = numbers
+                .get(2..4)
+                .map_or("00".into(), String::from_utf8_lossy);
             if hours == "00" && minutes == "00" {
                 "Z".to_owned()
             } else {

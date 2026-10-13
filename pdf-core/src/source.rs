@@ -114,7 +114,10 @@ impl fmt::Display for SourceError {
             ),
             Self::MissingHeader => formatter.write_str("PDF header was not found"),
             Self::InvalidHeaderVersion { offset } => {
-                write!(formatter, "PDF header at byte {offset} has an invalid version")
+                write!(
+                    formatter,
+                    "PDF header at byte {offset} has an invalid version"
+                )
             }
             Self::SliceOutOfBounds { start, end, len } => write!(
                 formatter,
@@ -142,10 +145,7 @@ impl PdfSource {
     }
 
     /// Creates a source with a caller-supplied revision number.
-    pub fn with_revision(
-        bytes: impl Into<Arc<[u8]>>,
-        revision: u64,
-    ) -> Result<Self, SourceError> {
+    pub fn with_revision(bytes: impl Into<Arc<[u8]>>, revision: u64) -> Result<Self, SourceError> {
         let bytes = bytes.into();
         let header = parse_header(&bytes)?;
         Ok(Self {
@@ -176,12 +176,22 @@ impl PdfSource {
                         && (offset == 0 || crate::object::whitespace(body[offset - 1]))
                         && crate::xref::header_at(body, offset).is_some()
                 });
-                if !found { return Err(SourceError::MissingHeader); }
-                PdfHeader { offset: 0, version: RECOVERED_VERSION, recovered: true }
+                if !found {
+                    return Err(SourceError::MissingHeader);
+                }
+                PdfHeader {
+                    offset: 0,
+                    version: RECOVERED_VERSION,
+                    recovered: true,
+                }
             }
             Err(error) => return Err(error),
         };
-        Ok(Self { bytes, header, revision })
+        Ok(Self {
+            bytes,
+            header,
+            revision,
+        })
     }
 
     /// Returns the complete source byte slice.
@@ -271,7 +281,11 @@ fn parse_header(bytes: &[u8]) -> Result<PdfHeader, SourceError> {
     let first = candidates.next();
 
     // The first well-formed `%PDF-d.d` wins, so `%P%PDF-1%PDF-1.4` still reads as 1.4.
-    if let Some(offset) = first.into_iter().chain(candidates).find(|&offset| well_formed(offset)) {
+    if let Some(offset) = first
+        .into_iter()
+        .chain(candidates)
+        .find(|&offset| well_formed(offset))
+    {
         return Ok(PdfHeader {
             offset,
             version: PdfVersion::new(bytes[offset + 5] - b'0', bytes[offset + 7] - b'0'),
@@ -279,7 +293,13 @@ fn parse_header(bytes: &[u8]) -> Result<PdfHeader, SourceError> {
         });
     }
 
-    let recovered = |offset| Ok(PdfHeader { offset, version: RECOVERED_VERSION, recovered: true });
+    let recovered = |offset| {
+        Ok(PdfHeader {
+            offset,
+            version: RECOVERED_VERSION,
+            recovered: true,
+        })
+    };
     if let Some(offset) = first {
         let available = bytes.len() - offset;
         if available < HEADER_LENGTH {
@@ -293,7 +313,10 @@ fn parse_header(bytes: &[u8]) -> Result<PdfHeader, SourceError> {
         return recovered(offset);
     }
     if bytes.len() < HEADER_LENGTH {
-        return Err(SourceError::TruncatedHeader { offset: 0, available: bytes.len() });
+        return Err(SourceError::TruncatedHeader {
+            offset: 0,
+            available: bytes.len(),
+        });
     }
     // No marker at all: still a PDF body if an object header appears early on.
     let body = &bytes[..bytes.len().min(OBJECT_SEARCH_LIMIT)];

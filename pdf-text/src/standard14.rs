@@ -60,19 +60,28 @@ pub(crate) fn family(name: &[u8]) -> Option<Family> {
 }
 
 pub(crate) fn contains(name: &[u8], hint: &[u8]) -> bool {
-    !hint.is_empty() && name.windows(hint.len()).any(|part| {
-        part.iter().zip(hint).all(|(left, right)| left.eq_ignore_ascii_case(right))
-    })
+    !hint.is_empty()
+        && name.windows(hint.len()).any(|part| {
+            part.iter()
+                .zip(hint)
+                .all(|(left, right)| left.eq_ignore_ascii_case(right))
+        })
 }
 
 fn starts(name: &[u8], prefix: &[u8]) -> bool {
-    name.get(..prefix.len()).map(|part| {
-        part.iter().zip(prefix).all(|(left, right)| left.eq_ignore_ascii_case(right))
-    }).unwrap_or(false)
+    name.get(..prefix.len())
+        .map(|part| {
+            part.iter()
+                .zip(prefix)
+                .all(|(left, right)| left.eq_ignore_ascii_case(right))
+        })
+        .unwrap_or(false)
 }
 
 fn strip_subset(name: &[u8]) -> &[u8] {
-    if name.get(..6).is_some_and(|tag| tag.iter().all(u8::is_ascii_uppercase))
+    if name
+        .get(..6)
+        .is_some_and(|tag| tag.iter().all(u8::is_ascii_uppercase))
         && name.get(6) == Some(&b'+')
     {
         name.get(7..).unwrap_or(&[])
@@ -80,4 +89,3 @@ fn strip_subset(name: &[u8]) -> &[u8] {
         name
     }
 }
-

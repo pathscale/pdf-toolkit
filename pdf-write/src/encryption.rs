@@ -43,7 +43,8 @@ impl Encryption {
         match &mut self.nonces {
             Nonces::Random => random_nonce(),
             Nonces::Fixture(counter) => {
-                let next = counter.checked_add(1)
+                let next = counter
+                    .checked_add(1)
                     .ok_or_else(|| invalid("fixture nonce overflow"))?;
                 let mut nonce = [0x4eu8; 24];
                 nonce[16..].copy_from_slice(&counter.to_le_bytes());
@@ -63,7 +64,8 @@ impl Encryption {
             return Err(invalid("cannot replace the PSChaCha security dictionary"));
         }
         let nonce = self.nonce()?;
-        self.key.seal(ObjectRef::new(number, generation), nonce, plain)
+        self.key
+            .seal(ObjectRef::new(number, generation), nonce, plain)
             .map_err(|error| invalid(&error.to_string()))
     }
 
@@ -87,10 +89,14 @@ impl Encryption {
         }
         set(extra, "Encrypt", Value::Ref(self.encrypt_id, 0));
         if !extra.iter().any(|(key, _)| key == "ID") {
-            set(extra, "ID", Value::Array(vec![
-                Value::HexStr(self.identifier.to_vec()),
-                Value::HexStr(self.identifier.to_vec()),
-            ]));
+            set(
+                extra,
+                "ID",
+                Value::Array(vec![
+                    Value::HexStr(self.identifier.to_vec()),
+                    Value::HexStr(self.identifier.to_vec()),
+                ]),
+            );
         }
         Ok(())
     }
@@ -106,8 +112,12 @@ impl Writer {
         costs: Option<KdfParams>,
     ) -> io::Result<Self> {
         Self::with_encryption(
-            version, password, costs.unwrap_or_default(),
-            random()?, random()?, Nonces::Random,
+            version,
+            password,
+            costs.unwrap_or_default(),
+            random()?,
+            random()?,
+            Nonces::Random,
         )
     }
 
@@ -120,45 +130,53 @@ impl Writer {
         nonces: Nonces,
     ) -> io::Result<Self> {
         let mut writer = Self::new(version)?;
-        let key = Arc::new(ChaChaKey::derive(password, &salt, costs, &Limits::default())
-            .map_err(|error| invalid(&error.to_string()))?);
-        let token = key.password_check(&salt, costs)
+        let key = Arc::new(
+            ChaChaKey::derive(password, &salt, costs, &Limits::default())
+                .map_err(|error| invalid(&error.to_string()))?,
+        );
+        let token = key
+            .password_check(&salt, costs)
             .map_err(|error| invalid(&error.to_string()))?;
         let encrypt_id = writer.alloc()?;
-        writer.object(encrypt_id, &Value::Dict(vec![
-            ("Filter".to_owned(), Value::Name("PSChaCha".to_owned())),
-            ("V".to_owned(), Value::Int(1)),
-            ("Length".to_owned(), Value::Int(256)),
-            ("Salt".to_owned(), Value::HexStr(salt.to_vec())),
-            ("KDF".to_owned(), Value::Name("Argon2id".to_owned())),
-            ("M".to_owned(), Value::Int(i64::from(costs.memory_kib))),
-            ("T".to_owned(), Value::Int(i64::from(costs.iterations))),
-            ("P".to_owned(), Value::Int(i64::from(costs.parallelism))),
-            ("Check".to_owned(), Value::HexStr(token.to_vec())),
-        ]))?;
-        writer.encryption = Some(Encryption { key, encrypt_id, identifier, nonces });
+        writer.object(
+            encrypt_id,
+            &Value::Dict(vec![
+                ("Filter".to_owned(), Value::Name("PSChaCha".to_owned())),
+                ("V".to_owned(), Value::Int(1)),
+                ("Length".to_owned(), Value::Int(256)),
+                ("Salt".to_owned(), Value::HexStr(salt.to_vec())),
+                ("KDF".to_owned(), Value::Name("Argon2id".to_owned())),
+                ("M".to_owned(), Value::Int(i64::from(costs.memory_kib))),
+                ("T".to_owned(), Value::Int(i64::from(costs.iterations))),
+                ("P".to_owned(), Value::Int(i64::from(costs.parallelism))),
+                ("Check".to_owned(), Value::HexStr(token.to_vec())),
+            ]),
+        )?;
+        writer.encryption = Some(Encryption {
+            key,
+            encrypt_id,
+            identifier,
+            nonces,
+        });
         Ok(writer)
     }
 
     // Fixed entropy is confined to the house-fixture generator.
-    pub(crate) fn new_encrypted_fixture(
-        version: &str,
-        password: &[u8],
-    ) -> io::Result<Self> {
+    pub(crate) fn new_encrypted_fixture(version: &str, password: &[u8]) -> io::Result<Self> {
         Self::with_encryption(
-            version, password, KdfParams::default(),
-            [0x53; 16], [0x49; 16], Nonces::Fixture(1),
+            version,
+            password,
+            KdfParams::default(),
+            [0x53; 16],
+            [0x49; 16],
+            Nonces::Fixture(1),
         )
     }
 }
 
 /// Encrypt strings in a direct value for an incremental object.
 /// The caller supplies the existing authenticated file key and actual generation.
-pub fn encrypt_value(
-    key: &ChaChaKey,
-    id: ObjectRef,
-    value: &Value,
-) -> io::Result<Value> {
+pub fn encrypt_value(key: &ChaChaKey, id: ObjectRef, value: &Value) -> io::Result<Value> {
     transform(value, &mut |plain| {
         key.seal(id, random_nonce()?, plain)
             .map_err(|error| invalid(&error.to_string()))
@@ -166,11 +184,7 @@ pub fn encrypt_value(
 }
 
 /// Encrypt already-filtered stream data for an incremental object.
-pub fn encrypt_stream(
-    key: &ChaChaKey,
-    id: ObjectRef,
-    data: &[u8],
-) -> io::Result<Vec<u8>> {
+pub fn encrypt_stream(key: &ChaChaKey, id: ObjectRef, data: &[u8]) -> io::Result<Vec<u8>> {
     key.seal(id, random_nonce()?, data)
         .map_err(|error| invalid(&error.to_string()))
 }
@@ -190,13 +204,17 @@ where
     while let Some(task) = tasks.pop() {
         match task {
             Task::Array(count) => {
-                let start = values.len().checked_sub(count)
+                let start = values
+                    .len()
+                    .checked_sub(count)
                     .ok_or_else(|| invalid("encryption value stack"))?;
                 let children = values.split_off(start);
                 values.push(Value::Array(children));
             }
             Task::Dict(keys) => {
-                let start = values.len().checked_sub(keys.len())
+                let start = values
+                    .len()
+                    .checked_sub(keys.len())
                     .ok_or_else(|| invalid("encryption dictionary stack"))?;
                 let children = values.split_off(start);
                 values.push(Value::Dict(keys.into_iter().zip(children).collect()));
@@ -231,5 +249,7 @@ where
             }
         }
     }
-    values.pop().ok_or_else(|| invalid("empty encryption value stack"))
+    values
+        .pop()
+        .ok_or_else(|| invalid("empty encryption value stack"))
 }

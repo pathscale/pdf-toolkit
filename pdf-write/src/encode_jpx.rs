@@ -64,12 +64,15 @@ fn limit(kind: &str, requested: usize, maximum: usize) -> io::Result<()> {
 }
 
 fn at<T: Copy>(values: &[T], index: usize) -> io::Result<T> {
-    values.get(index).copied()
+    values
+        .get(index)
+        .copied()
         .ok_or_else(|| invalid("JPEG 2000 encoder internal bounds"))
 }
 
 fn put<T>(values: &mut [T], index: usize, value: T) -> io::Result<()> {
-    let slot = values.get_mut(index)
+    let slot = values
+        .get_mut(index)
         .ok_or_else(|| invalid("JPEG 2000 encoder internal bounds"))?;
     *slot = value;
     Ok(())
@@ -90,8 +93,7 @@ fn half(value: usize) -> usize {
 }
 
 fn narrow(value: i64) -> io::Result<i32> {
-    i32::try_from(value)
-        .map_err(|_| invalid("JPEG 2000 coefficient overflow"))
+    i32::try_from(value).map_err(|_| invalid("JPEG 2000 coefficient overflow"))
 }
 
 fn u16be(out: &mut Vec<u8>, value: u16) {
@@ -103,8 +105,8 @@ fn u32be(out: &mut Vec<u8>, value: u32) {
 }
 
 fn marker(out: &mut Vec<u8>, code: u8, payload: &[u8]) -> io::Result<()> {
-    let length = u16::try_from(sum(payload.len(), 2)?)
-        .map_err(|_| invalid("JPEG 2000 marker too long"))?;
+    let length =
+        u16::try_from(sum(payload.len(), 2)?).map_err(|_| invalid("JPEG 2000 marker too long"))?;
     out.extend_from_slice(&[0xff, code]);
     u16be(out, length);
     out.extend_from_slice(payload);
@@ -112,9 +114,12 @@ fn marker(out: &mut Vec<u8>, code: u8, payload: &[u8]) -> io::Result<()> {
 }
 
 fn box_bytes(out: &mut Vec<u8>, tag: &[u8; 4], payload: &[u8]) -> io::Result<()> {
-    let length = u32::try_from(sum(payload.len(), 8)?)
-        .map_err(|_| invalid("JP2 box too long"))?;
-    limit("jpx_encoder_bytes", sum(out.len(), length as usize)?, MAX_BYTES)?;
+    let length = u32::try_from(sum(payload.len(), 8)?).map_err(|_| invalid("JP2 box too long"))?;
+    limit(
+        "jpx_encoder_bytes",
+        sum(out.len(), length as usize)?,
+        MAX_BYTES,
+    )?;
     u32be(out, length);
     out.extend_from_slice(tag);
     out.extend_from_slice(payload);
@@ -165,7 +170,11 @@ fn lift(line: &[i32]) -> io::Result<Vec<i32>> {
         put(&mut work, index, value)?;
     }
     for index in (0..length).step_by(2) {
-        let left_index = if index == 0 { 1 } else { index.saturating_sub(1) };
+        let left_index = if index == 0 {
+            1
+        } else {
+            index.saturating_sub(1)
+        };
         let right_index = if index.saturating_add(1) < length {
             index.saturating_add(1)
         } else {
@@ -294,7 +303,9 @@ impl Mq {
     }
 
     fn byte_out(&mut self) -> io::Result<()> {
-        let previous = self.bytes.last_mut()
+        let previous = self
+            .bytes
+            .last_mut()
             .ok_or_else(|| invalid("MQ missing carry sentinel"))?;
         if *previous == 0xff {
             self.bytes.push((self.c >> 20) as u8);
@@ -324,7 +335,9 @@ impl Mq {
         while self.a < 0x8000 {
             self.a <<= 1;
             self.c = self.c.wrapping_shl(1);
-            self.ct = self.ct.checked_sub(1)
+            self.ct = self
+                .ct
+                .checked_sub(1)
                 .ok_or_else(|| invalid("MQ bit counter underflow"))?;
             if self.ct == 0 {
                 self.byte_out()?;
@@ -336,7 +349,9 @@ impl Mq {
     fn bit(&mut self, context: usize, value: bool) -> io::Result<()> {
         let (state, mps) = at(&self.contexts, context)?;
         let (qe, nmps, nlps, switch) = at(&MQ_STATES, state)?;
-        self.a = self.a.checked_sub(qe)
+        self.a = self
+            .a
+            .checked_sub(qe)
             .ok_or_else(|| invalid("MQ interval underflow"))?;
         if value == mps {
             if self.a < 0x8000 {
@@ -423,7 +438,11 @@ impl Tier1 {
     fn signed_neighbor(&self, x: isize, y: isize) -> i32 {
         match self.neighbor(x, y) {
             Some(sample) if sample.significant => {
-                if sample.value < 0 { -1 } else { 1 }
+                if sample.value < 0 {
+                    -1
+                } else {
+                    1
+                }
             }
             _ => 0,
         }
@@ -456,23 +475,59 @@ impl Tier1 {
         if self.orientation == 3 {
             let hv = h + v;
             match d {
-                0 => if hv == 0 { 0 } else if hv == 1 { 1 } else { 2 },
-                1 => if hv == 0 { 3 } else if hv == 1 { 4 } else { 5 },
-                2 => if hv == 0 { 6 } else { 7 },
+                0 => {
+                    if hv == 0 {
+                        0
+                    } else if hv == 1 {
+                        1
+                    } else {
+                        2
+                    }
+                }
+                1 => {
+                    if hv == 0 {
+                        3
+                    } else if hv == 1 {
+                        4
+                    } else {
+                        5
+                    }
+                }
+                2 => {
+                    if hv == 0 {
+                        6
+                    } else {
+                        7
+                    }
+                }
                 _ => 8,
             }
         } else {
             match h {
                 0 => match v {
-                    0 => if d == 0 { 0 } else if d == 1 { 1 } else { 2 },
+                    0 => {
+                        if d == 0 {
+                            0
+                        } else if d == 1 {
+                            1
+                        } else {
+                            2
+                        }
+                    }
                     1 => 3,
                     _ => 4,
                 },
-                1 => if v == 0 {
-                    if d == 0 { 5 } else { 6 }
-                } else {
-                    7
-                },
+                1 => {
+                    if v == 0 {
+                        if d == 0 {
+                            5
+                        } else {
+                            6
+                        }
+                    } else {
+                        7
+                    }
+                }
                 _ => 8,
             }
         }
@@ -483,10 +538,8 @@ impl Tier1 {
         let value = at(&self.samples, index)?.value;
         let x = x as isize;
         let y = y as isize;
-        let mut h = (self.signed_neighbor(x - 1, y)
-            + self.signed_neighbor(x + 1, y)).clamp(-1, 1);
-        let mut v = (self.signed_neighbor(x, y - 1)
-            + self.signed_neighbor(x, y + 1)).clamp(-1, 1);
+        let mut h = (self.signed_neighbor(x - 1, y) + self.signed_neighbor(x + 1, y)).clamp(-1, 1);
+        let mut v = (self.signed_neighbor(x, y - 1) + self.signed_neighbor(x, y + 1)).clamp(-1, 1);
         let prediction = h < 0 || (h == 0 && v < 0);
         if h < 0 {
             h = -h;
@@ -495,7 +548,11 @@ impl Tier1 {
             v = v.abs();
         }
         let context = if h == 0 {
-            if v == 0 { 9 } else { 10 }
+            if v == 0 {
+                9
+            } else {
+                10
+            }
         } else {
             match v {
                 -1 => 11,
@@ -574,9 +631,8 @@ impl Tier1 {
                 let mut aggregate = end.saturating_sub(stripe) == 4;
                 for y in stripe..end {
                     let sample = at(&self.samples, self.index(x, y)?)?;
-                    aggregate &= !sample.significant
-                        && !sample.visited
-                        && !self.has_neighbors(x, y);
+                    aggregate &=
+                        !sample.significant && !sample.visited && !self.has_neighbors(x, y);
                 }
                 let mut start = stripe;
                 if aggregate {
@@ -644,20 +700,26 @@ fn code_block(
         });
     }
     let planes = 32u32.saturating_sub(maximum.leading_zeros());
-    let zero_planes = nominal_planes.checked_sub(planes)
+    let zero_planes = nominal_planes
+        .checked_sub(planes)
         .ok_or_else(|| invalid("JPEG 2000 insufficient guard bits"))?;
-    let passes = planes.checked_mul(3).and_then(|v| v.checked_sub(2))
+    let passes = planes
+        .checked_mul(3)
+        .and_then(|v| v.checked_sub(2))
         .ok_or_else(|| invalid("JPEG 2000 pass count overflow"))?;
     let mut coder = Tier1 {
         width,
         height,
         orientation,
-        samples: values.into_iter().map(|value| Sample {
-            value,
-            significant: false,
-            visited: false,
-            refined: false,
-        }).collect(),
+        samples: values
+            .into_iter()
+            .map(|value| Sample {
+                value,
+                significant: false,
+                visited: false,
+                refined: false,
+            })
+            .collect(),
         mq: Mq::new(),
     };
     let highest = planes.saturating_sub(1);
@@ -671,7 +733,11 @@ fn code_block(
     if bytes.is_empty() {
         return Err(invalid("JPEG 2000 empty MQ segment"));
     }
-    Ok(CodeBlock { bytes, passes, zero_planes })
+    Ok(CodeBlock {
+        bytes,
+        passes,
+        zero_planes,
+    })
 }
 
 struct Band {
@@ -691,28 +757,31 @@ struct Region {
     orientation: u8,
 }
 
-fn band(
-    plane: &Plane,
-    region: Region,
-    bit_depth: u8,
-    block_size: usize,
-) -> io::Result<Band> {
+fn band(plane: &Plane, region: Region, bit_depth: u8, block_size: usize) -> io::Result<Band> {
     if region.width == 0 || region.height == 0 {
-        return Ok(Band { columns: 0, rows: 0, blocks: Vec::new() });
+        return Ok(Band {
+            columns: 0,
+            rows: 0,
+            blocks: Vec::new(),
+        });
     }
     let end_x = sum(region.origin_x, region.width)?;
     let end_y = sum(region.origin_y, region.height)?;
     let columns = (end_x.saturating_sub(1) / block_size)
-        .saturating_sub(region.origin_x / block_size).saturating_add(1);
+        .saturating_sub(region.origin_x / block_size)
+        .saturating_add(1);
     let rows = (end_y.saturating_sub(1) / block_size)
-        .saturating_sub(region.origin_y / block_size).saturating_add(1);
+        .saturating_sub(region.origin_y / block_size)
+        .saturating_add(1);
     let gain = match region.orientation {
         0 => 0,
         3 => 2,
         _ => 1,
     };
     let nominal_planes = u32::from(bit_depth)
-        .saturating_add(gain).saturating_add(GUARD_BITS).saturating_sub(1);
+        .saturating_add(gain)
+        .saturating_add(GUARD_BITS)
+        .saturating_sub(1);
     let mut blocks = Vec::with_capacity(product(columns, rows)?);
     let mut y = region.origin_y;
     while y < end_y {
@@ -732,13 +801,21 @@ fn band(
                 }
             }
             blocks.push(code_block(
-                values, width, height, region.orientation, nominal_planes,
+                values,
+                width,
+                height,
+                region.orientation,
+                nominal_planes,
             )?);
             x = next_x;
         }
         y = next_y;
     }
-    Ok(Band { columns, rows, blocks })
+    Ok(Band {
+        columns,
+        rows,
+        blocks,
+    })
 }
 
 fn component_bands(
@@ -753,7 +830,9 @@ fn component_bands(
         let depth = if resolution == 0 {
             usize::from(settings.levels)
         } else {
-            usize::from(settings.levels).saturating_sub(resolution).saturating_add(1)
+            usize::from(settings.levels)
+                .saturating_sub(resolution)
+                .saturating_add(1)
         };
         let (low_width, low_height) = at(&sizes, depth)?;
         let global_x = origin_x >> depth;
@@ -806,7 +885,9 @@ fn component_bands(
         let mut bands = Vec::new();
         for region in regions {
             bands.push(band(
-                &plane, region, settings.bit_depth,
+                &plane,
+                region,
+                settings.bit_depth,
                 usize::from(settings.code_block_size),
             )?);
         }
@@ -824,7 +905,12 @@ struct HeaderBits {
 
 impl HeaderBits {
     fn new() -> Self {
-        Self { bytes: Vec::new(), current: 0, used: 0, capacity: 8 }
+        Self {
+            bytes: Vec::new(),
+            current: 0,
+            used: 0,
+            capacity: 8,
+        }
     }
 
     fn bit(&mut self, value: bool) {
@@ -882,9 +968,14 @@ impl TagTree {
         if width == 0 || height == 0 {
             return Ok(Self { levels: Vec::new() });
         }
-        let nodes = values.into_iter().map(|value| Node {
-            value, low: 0, known: false,
-        }).collect();
+        let nodes = values
+            .into_iter()
+            .map(|value| Node {
+                value,
+                low: 0,
+                known: false,
+            })
+            .collect();
         let mut levels = vec![TreeLevel { width, nodes }];
         let mut width = width;
         let mut height = height;
@@ -892,10 +983,15 @@ impl TagTree {
             let parent_width = half(width);
             let parent_height = half(height);
             let mut parent = vec![
-                Node { value: u32::MAX, low: 0, known: false };
+                Node {
+                    value: u32::MAX,
+                    low: 0,
+                    known: false
+                };
                 product(parent_width, parent_height)?
             ];
-            let previous = levels.last()
+            let previous = levels
+                .last()
                 .ok_or_else(|| invalid("JPEG 2000 missing tag-tree level"))?;
             for y in 0..height {
                 for x in 0..width {
@@ -906,20 +1002,20 @@ impl TagTree {
                     put(&mut parent, index, node)?;
                 }
             }
-            levels.push(TreeLevel { width: parent_width, nodes: parent });
+            levels.push(TreeLevel {
+                width: parent_width,
+                nodes: parent,
+            });
             width = parent_width;
             height = parent_height;
         }
         Ok(Self { levels })
     }
 
-    fn encode(
-        &mut self,
-        leaf: usize,
-        threshold: u32,
-        bits: &mut HeaderBits,
-    ) -> io::Result<()> {
-        let leaves = self.levels.first()
+    fn encode(&mut self, leaf: usize, threshold: u32, bits: &mut HeaderBits) -> io::Result<()> {
+        let leaves = self
+            .levels
+            .first()
             .ok_or_else(|| invalid("JPEG 2000 empty tag tree"))?;
         if leaf >= leaves.nodes.len() {
             return Err(invalid("JPEG 2000 tag-tree leaf outside tree"));
@@ -935,9 +1031,13 @@ impl TagTree {
         let mut low = 0u32;
         for level_index in (0..self.levels.len()).rev() {
             let index = at(&path, level_index)?;
-            let level = self.levels.get_mut(level_index)
+            let level = self
+                .levels
+                .get_mut(level_index)
                 .ok_or_else(|| invalid("JPEG 2000 missing tag-tree level"))?;
-            let node = level.nodes.get_mut(index)
+            let node = level
+                .nodes
+                .get_mut(index)
                 .ok_or_else(|| invalid("JPEG 2000 tag-tree path outside tree"))?;
             low = low.max(node.low);
             while low < threshold {
@@ -980,7 +1080,9 @@ fn pass_count(bits: &mut HeaderBits, passes: u32) -> io::Result<()> {
 
 fn packet(out: &mut Vec<u8>, bands: &[Band]) -> io::Result<()> {
     let mut bits = HeaderBits::new();
-    let present = bands.iter().any(|band| band.blocks.iter().any(|b| b.passes != 0));
+    let present = bands
+        .iter()
+        .any(|band| band.blocks.iter().any(|b| b.passes != 0));
     bits.bit(present);
     if present {
         for band in bands {
@@ -990,7 +1092,10 @@ fn packet(out: &mut Vec<u8>, bands: &[Band]) -> io::Result<()> {
             let mut inclusion = TagTree::new(
                 band.columns,
                 band.rows,
-                band.blocks.iter().map(|b| u32::from(b.passes == 0)).collect(),
+                band.blocks
+                    .iter()
+                    .map(|b| u32::from(b.passes == 0))
+                    .collect(),
             )?;
             let mut zero_planes = TagTree::new(
                 band.columns,
@@ -1002,9 +1107,7 @@ fn packet(out: &mut Vec<u8>, bands: &[Band]) -> io::Result<()> {
                 if block.passes == 0 {
                     continue;
                 }
-                zero_planes.encode(
-                    index, block.zero_planes.saturating_add(1), &mut bits,
-                )?;
+                zero_planes.encode(index, block.zero_planes.saturating_add(1), &mut bits)?;
                 pass_count(&mut bits, block.passes)?;
                 let length = u32::try_from(block.bytes.len())
                     .map_err(|_| invalid("JPEG 2000 MQ segment too long"))?;
@@ -1058,11 +1161,18 @@ fn tile(
         for y in origin_y..sum(origin_y, tile_height)? {
             for x in origin_x..sum(origin_x, tile_width)? {
                 let value = at(source, sum(product(y, width)?, x)?)?;
-                data.push(i32::from(value).checked_sub(shift)
-                    .ok_or_else(|| invalid("JPEG 2000 level shift overflow"))?);
+                data.push(
+                    i32::from(value)
+                        .checked_sub(shift)
+                        .ok_or_else(|| invalid("JPEG 2000 level shift overflow"))?,
+                );
             }
         }
-        planes.push(Plane { width: tile_width, height: tile_height, data });
+        planes.push(Plane {
+            width: tile_width,
+            height: tile_height,
+            data,
+        });
     }
     if settings.rct {
         let [red, green, blue] = planes.as_mut_slice() else {
@@ -1072,11 +1182,12 @@ fn tile(
             let old_r = *r;
             let old_g = *g;
             let old_b = *b;
-            *r = narrow((i64::from(old_r) + 2 * i64::from(old_g)
-                + i64::from(old_b)) >> 2)?;
-            *g = old_b.checked_sub(old_g)
+            *r = narrow((i64::from(old_r) + 2 * i64::from(old_g) + i64::from(old_b)) >> 2)?;
+            *g = old_b
+                .checked_sub(old_g)
                 .ok_or_else(|| invalid("JPEG 2000 RCT overflow"))?;
-            *b = old_r.checked_sub(old_g)
+            *b = old_r
+                .checked_sub(old_g)
                 .ok_or_else(|| invalid("JPEG 2000 RCT overflow"))?;
         }
     }
@@ -1088,7 +1199,8 @@ fn tile(
     // LRCP with one layer and one precinct per resolution.
     for resolution in 0..=usize::from(settings.levels) {
         for component in &encoded {
-            let bands = component.get(resolution)
+            let bands = component
+                .get(resolution)
                 .ok_or_else(|| invalid("JPEG 2000 missing resolution"))?;
             packet(&mut out, bands)?;
         }
@@ -1110,8 +1222,10 @@ fn wrap_jp2(
     let mut ihdr = Vec::new();
     u32be(&mut ihdr, height);
     u32be(&mut ihdr, width);
-    u16be(&mut ihdr, u16::try_from(components)
-        .map_err(|_| invalid("JP2 component count overflow"))?);
+    u16be(
+        &mut ihdr,
+        u16::try_from(components).map_err(|_| invalid("JP2 component count overflow"))?,
+    );
     ihdr.extend_from_slice(&[settings.bit_depth.saturating_sub(1), 7, 0, 0]);
     box_bytes(&mut header, b"ihdr", &ihdr)?;
     let mut colr = vec![1, 0, 0];
@@ -1144,10 +1258,22 @@ fn wrap_jp2(
 
 fn coding_markers(out: &mut Vec<u8>, settings: Settings) -> io::Result<()> {
     let block_exponent = if settings.code_block_size == 32 { 3 } else { 4 };
-    marker(out, 0x52, &[
-        0, 0, 0, 1, u8::from(settings.rct),
-        settings.levels, block_exponent, block_exponent, 0, 1,
-    ])?;
+    marker(
+        out,
+        0x52,
+        &[
+            0,
+            0,
+            0,
+            1,
+            u8::from(settings.rct),
+            settings.levels,
+            block_exponent,
+            block_exponent,
+            0,
+            1,
+        ],
+    )?;
     // Reversible quantization exponents are precision plus subband gain.
     // Four guard bits cover two lifting levels, including transformed chroma.
     let mut qcd = vec![(GUARD_BITS as u8) << 5, settings.bit_depth << 3];
@@ -1187,10 +1313,8 @@ pub fn encode_with_tiles(
     settings: Settings,
     tile_coding: &[TileCoding],
 ) -> io::Result<Vec<u8>> {
-    let w = usize::try_from(width)
-        .map_err(|_| invalid("JPEG 2000 width conversion"))?;
-    let h = usize::try_from(height)
-        .map_err(|_| invalid("JPEG 2000 height conversion"))?;
+    let w = usize::try_from(width).map_err(|_| invalid("JPEG 2000 width conversion"))?;
+    let h = usize::try_from(height).map_err(|_| invalid("JPEG 2000 height conversion"))?;
     if w == 0 || h == 0 {
         return Err(invalid("JPEG 2000 dimensions must be nonzero"));
     }
@@ -1199,8 +1323,7 @@ pub fn encode_with_tiles(
     if !matches!(components.len(), 1 | 3 | 4) {
         return Err(invalid("unsupported:jpx_encoder_components"));
     }
-    if settings.bit_depth != 8
-        && !(matches!(settings.bit_depth, 12 | 16) && components.len() == 1)
+    if settings.bit_depth != 8 && !(matches!(settings.bit_depth, 12 | 16) && components.len() == 1)
     {
         return Err(invalid("unsupported:jpx_encoder_precision"));
     }
@@ -1221,7 +1344,11 @@ pub fn encode_with_tiles(
         return Err(invalid("unsupported:jpx_encoder_jp2_color"));
     }
     let pixels = product(w, h)?;
-    limit("jpx_encoder_samples", product(pixels, components.len())?, MAX_SAMPLES)?;
+    limit(
+        "jpx_encoder_samples",
+        product(pixels, components.len())?,
+        MAX_SAMPLES,
+    )?;
     let maximum = (1u32 << settings.bit_depth).saturating_sub(1);
     for component in components {
         if component.len() != pixels {
@@ -1278,8 +1405,11 @@ pub fn encode_with_tiles(
     for value in [width, height, 0, 0, tw as u32, th as u32, 0, 0] {
         u32be(&mut siz, value);
     }
-    u16be(&mut siz, u16::try_from(components.len())
-        .map_err(|_| invalid("JPEG 2000 component count overflow"))?);
+    u16be(
+        &mut siz,
+        u16::try_from(components.len())
+            .map_err(|_| invalid("JPEG 2000 component count overflow"))?,
+    );
     for _ in components {
         siz.extend_from_slice(&[settings.bit_depth.saturating_sub(1), 1, 1]);
     }
@@ -1300,11 +1430,16 @@ pub fn encode_with_tiles(
                 coding_markers(&mut header, local)?;
             }
             let data = tile(
-                w, components, x, y, tw.min(w.saturating_sub(x)),
-                th.min(h.saturating_sub(y)), local,
+                w,
+                components,
+                x,
+                y,
+                tw.min(w.saturating_sub(x)),
+                th.min(h.saturating_sub(y)),
+                local,
             )?;
-            let tile_id = u16::try_from(index)
-                .map_err(|_| invalid("JPEG 2000 tile index overflow"))?;
+            let tile_id =
+                u16::try_from(index).map_err(|_| invalid("JPEG 2000 tile index overflow"))?;
             let length = u32::try_from(sum(sum(data.len(), header.len())?, 14)?)
                 .map_err(|_| invalid("JPEG 2000 tile-part length overflow"))?;
             limit(

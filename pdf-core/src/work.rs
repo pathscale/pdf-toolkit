@@ -75,7 +75,10 @@ pub struct ObjectWork {
 
 impl ObjectWork {
     pub fn new(id: ObjectRef, candidate_range: Range<usize>) -> Self {
-        Self { id, candidate_range }
+        Self {
+            id,
+            candidate_range,
+        }
     }
 
     pub const fn id(&self) -> ObjectRef {
@@ -98,11 +101,7 @@ impl ObjectWork {
             .checked_sub(start)
             .ok_or(WorkError::InvertedRange { start, end })?;
 
-        if source
-            .bytes()
-            .get(self.candidate_range.clone())
-            .is_none()
-        {
+        if source.bytes().get(self.candidate_range.clone()).is_none() {
             return Err(WorkError::RangeOutOfBounds {
                 start,
                 end,
@@ -206,11 +205,7 @@ impl WorkBudget {
         Self::check_limit(WorkLimit::Operators, requested, self.max_operators)
     }
 
-    fn check_limit(
-        limit: WorkLimit,
-        requested: usize,
-        maximum: usize,
-    ) -> Result<(), WorkError> {
+    fn check_limit(limit: WorkLimit, requested: usize, maximum: usize) -> Result<(), WorkError> {
         if requested > maximum {
             Err(WorkError::BudgetExceeded {
                 limit,

@@ -163,7 +163,9 @@ impl SimpleEncoding {
 
     pub(crate) fn unicode(&self, code: u32) -> Option<GlyphText> {
         let index = usize::try_from(code).ok()?;
-        self.text.get(index).copied().filter(|text| !text.is_empty())
+        self.text
+            .get(index)
+            .copied()
+            .filter(|text| !text.is_empty())
     }
 }
-

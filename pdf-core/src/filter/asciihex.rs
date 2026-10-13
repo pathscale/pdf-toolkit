@@ -32,10 +32,5 @@ pub(super) fn decode(input: &[u8], max_output: u64) -> Result<Decoded, FilterErr
         output.push(high << 4)?;
     }
 
-    finish(
-        output.into_vec(),
-        !ended,
-        FilterKind::AsciiHex,
-        input.len(),
-    )
+    finish(output.into_vec(), !ended, FilterKind::AsciiHex, input.len())
 }

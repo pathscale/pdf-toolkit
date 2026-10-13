@@ -32,13 +32,13 @@ mod png;
 mod subset;
 mod text;
 
+pub use crate::encryption::KdfParams;
+pub use bounds::Refusal;
 use bounds::*;
 use font::TrueType;
 use image::Image;
-pub use crate::encryption::KdfParams;
-pub use bounds::Refusal;
-pub use page::{LineCap, LineJoin, PageBuilder, Paint, PathBuilder};
 pub(crate) use page::win_ansi;
+pub use page::{LineCap, LineJoin, PageBuilder, Paint, PathBuilder};
 pub use text::{Align, Flow, TextStyle};
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -49,8 +49,16 @@ pub struct Color {
 }
 
 impl Color {
-    pub const BLACK: Color = Color { r: 0.0, g: 0.0, b: 0.0 };
-    pub const WHITE: Color = Color { r: 1.0, g: 1.0, b: 1.0 };
+    pub const BLACK: Color = Color {
+        r: 0.0,
+        g: 0.0,
+        b: 0.0,
+    };
+    pub const WHITE: Color = Color {
+        r: 1.0,
+        g: 1.0,
+        b: 1.0,
+    };
 
     pub const fn rgb(r: f32, g: f32, b: f32) -> Self {
         Self { r, g, b }
@@ -58,8 +66,13 @@ impl Color {
 
     fn values(self) -> io::Result<[f32; 3]> {
         let values = [self.r, self.g, self.b];
-        if values.iter().any(|value| !value.is_finite() || !(0.0..=1.0).contains(value)) {
-            return Err(invalid("color components must be finite and between zero and one"));
+        if values
+            .iter()
+            .any(|value| !value.is_finite() || !(0.0..=1.0).contains(value))
+        {
+            return Err(invalid(
+                "color components must be finite and between zero and one",
+            ));
         }
         Ok(values)
     }
@@ -140,7 +153,10 @@ impl PageSize {
     /// The same size with width and height exchanged.
     pub fn landscape(self) -> Self {
         let (width, height) = self.dimensions();
-        Self::Custom { width: height, height: width }
+        Self::Custom {
+            width: height,
+            height: width,
+        }
     }
 }
 
@@ -154,7 +170,12 @@ pub struct Margins {
 
 impl Margins {
     pub const fn uniform(value: f32) -> Self {
-        Self { top: value, right: value, bottom: value, left: value }
+        Self {
+            top: value,
+            right: value,
+            bottom: value,
+            left: value,
+        }
     }
 }
 
@@ -230,7 +251,15 @@ pub struct PdfDate {
 
 impl PdfDate {
     pub const fn utc(year: u16, month: u8, day: u8, hour: u8, minute: u8, second: u8) -> Self {
-        Self { year, month, day, hour, minute, second, offset_minutes: 0 }
+        Self {
+            year,
+            month,
+            day,
+            hour,
+            minute,
+            second,
+            offset_minutes: 0,
+        }
     }
 
     /// `D:YYYYMMDDHHmmSSZ` or `D:YYYYMMDDHHmmSS+HH'mm'`.
@@ -244,8 +273,13 @@ impl PdfDate {
             2 => 28,
             _ => return Err(invalid("date month must be between 1 and 12")),
         };
-        if self.year > 9999 || self.day == 0 || self.day > days || self.hour > 23
-            || self.minute > 59 || self.second > 59 || self.offset_minutes.abs() > 1439
+        if self.year > 9999
+            || self.day == 0
+            || self.day > days
+            || self.hour > 23
+            || self.minute > 59
+            || self.second > 59
+            || self.offset_minutes.abs() > 1439
         {
             return Err(invalid("date field is out of range"));
         }
@@ -286,7 +320,11 @@ pub struct WriteOptions {
 
 impl Default for WriteOptions {
     fn default() -> Self {
-        Self { compress: true, object_streams: true, version: (1, 7) }
+        Self {
+            compress: true,
+            object_streams: true,
+            version: (1, 7),
+        }
     }
 }
 
@@ -313,7 +351,12 @@ struct Page {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Destination {
     /// Scroll to a position, optionally changing the zoom (1.0 is 100 percent).
-    Xyz { page: usize, left: Option<f32>, top: Option<f32>, zoom: Option<f32> },
+    Xyz {
+        page: usize,
+        left: Option<f32>,
+        top: Option<f32>,
+        zoom: Option<f32>,
+    },
     /// Fit the whole page in the window.
     Fit { page: usize },
     /// Fit the page width, with `top` at the top of the window.
@@ -329,7 +372,9 @@ impl Destination {
 
     fn validate(&self) -> io::Result<()> {
         match self {
-            Self::Xyz { left, top, zoom, .. } => {
+            Self::Xyz {
+                left, top, zoom, ..
+            } => {
                 for value in [left, top].into_iter().flatten() {
                     coordinate(*value)?;
                 }
@@ -429,7 +474,10 @@ impl DocumentBuilder {
         check("command_bytes", command.len(), MAX_COMMAND_BYTES)?;
         self.operation()?;
         self.charge(command.len())?;
-        let page = self.pages.get_mut(index).ok_or_else(|| invalid("page handle is invalid"))?;
+        let page = self
+            .pages
+            .get_mut(index)
+            .ok_or_else(|| invalid("page handle is invalid"))?;
         append(&mut page.content, command, MAX_BYTES)
     }
 
@@ -520,7 +568,11 @@ impl DocumentBuilder {
         let result = (|| {
             check("password_bytes", password.len(), 1 << 20)?;
             self.charge(add(password.len(), 256)?)?;
-            self.encrypt = Some(Encrypt { password: copied(password, 1 << 20)?, costs, fixture: false });
+            self.encrypt = Some(Encrypt {
+                password: copied(password, 1 << 20)?,
+                costs,
+                fixture: false,
+            });
             Ok(())
         })();
         if let Err(error) = result {
@@ -540,15 +592,17 @@ impl DocumentBuilder {
         if self.error.is_some() {
             return FontId(u32::MAX);
         }
-        if let Some(index) = self.fonts.iter().position(|entry| {
-            matches!(entry, Font::Standard(existing) if *existing == font)
-        }) {
+        if let Some(index) = self
+            .fonts
+            .iter()
+            .position(|entry| matches!(entry, Font::Standard(existing) if *existing == font))
+        {
             return FontId(index as u32);
         }
         let result = (|| {
             self.charge(256)?;
-            let id = u32::try_from(self.fonts.len())
-                .map_err(|_| invalid("font identifier overflow"))?;
+            let id =
+                u32::try_from(self.fonts.len()).map_err(|_| invalid("font identifier overflow"))?;
             push(&mut self.fonts, Font::Standard(font), "fonts", MAX_FONTS)?;
             Ok(FontId(id))
         })();
@@ -572,14 +626,20 @@ impl DocumentBuilder {
         let bytes = ttf.len();
         let font = TrueType::new(ttf)?;
         self.charge(add(bytes, 2 << 20)?)?;
-        let id = u32::try_from(self.fonts.len())
-            .map_err(|_| invalid("font identifier overflow"))?;
+        let id =
+            u32::try_from(self.fonts.len()).map_err(|_| invalid("font identifier overflow"))?;
         push(&mut self.fonts, Font::TrueType(font), "fonts", MAX_FONTS)?;
         Ok(FontId(id))
     }
 
     /// The advance width of `text` in points, as `paragraph` measures it.
-    pub fn text_width(&self, font: FontId, size: f32, text: &str, kerning: bool) -> io::Result<f32> {
+    pub fn text_width(
+        &self,
+        font: FontId,
+        size: f32,
+        text: &str,
+        kerning: bool,
+    ) -> io::Result<f32> {
         text::measure(self, font, size, text, kerning)
     }
 
@@ -610,7 +670,11 @@ impl DocumentBuilder {
         }
         let result = (|| {
             check("images", add(self.images.len(), 1)?, MAX_IMAGES)?;
-            check("document_bytes", add(self.bytes, add(data.len(), 256)?)?, MAX_BYTES)?;
+            check(
+                "document_bytes",
+                add(self.bytes, add(data.len(), 256)?)?,
+                MAX_BYTES,
+            )?;
             Image::jpeg(data, width, height, components)
         })();
         self.register_image(result)
@@ -634,7 +698,11 @@ impl DocumentBuilder {
         }
         let result = (|| {
             check("images", add(self.images.len(), 1)?, MAX_IMAGES)?;
-            check("document_bytes", add(self.bytes, add(rgba.len(), 256)?)?, MAX_BYTES)?;
+            check(
+                "document_bytes",
+                add(self.bytes, add(rgba.len(), 256)?)?,
+                MAX_BYTES,
+            )?;
             Image::rgba(width, height, rgba)
         })();
         self.register_image(result)
@@ -650,7 +718,11 @@ impl DocumentBuilder {
         let result = (|| {
             check("images", add(self.images.len(), 1)?, MAX_IMAGES)?;
             let (width, height, rgba) = png::decode(data)?;
-            check("document_bytes", add(self.bytes, add(rgba.len(), 256)?)?, MAX_BYTES)?;
+            check(
+                "document_bytes",
+                add(self.bytes, add(rgba.len(), 256)?)?,
+                MAX_BYTES,
+            )?;
             Image::rgba(width, height, &rgba)
         })();
         self.register_image(result)
@@ -659,7 +731,9 @@ impl DocumentBuilder {
     /// Pixel width and height of a registered image.
     pub fn image_size(&self, image: ImageId) -> Option<(u32, u32)> {
         let index = usize::try_from(image.0).ok()?;
-        self.images.get(index).map(|image| (image.width, image.height))
+        self.images
+            .get(index)
+            .map(|image| (image.width, image.height))
     }
 
     pub fn page(&mut self, width: f32, height: f32) -> PageBuilder<'_> {
@@ -677,14 +751,21 @@ impl DocumentBuilder {
             if width <= 0.0 || height <= 0.0 {
                 return Err(invalid("page dimensions must be positive"));
             }
-            let boxes = [setup.crop_box, setup.bleed_box, setup.trim_box, setup.art_box];
+            let boxes = [
+                setup.crop_box,
+                setup.bleed_box,
+                setup.trim_box,
+                setup.art_box,
+            ];
             for rect in boxes.iter().flatten() {
                 for value in rect {
                     coordinate(*value)?;
                 }
                 let [x0, y0, x1, y1] = *rect;
                 if x0 >= x1 || y0 >= y1 || x0 < 0.0 || y0 < 0.0 || x1 > width || y1 > height {
-                    return Err(invalid("page boxes must be nonempty and inside the media box"));
+                    return Err(invalid(
+                        "page boxes must be nonempty and inside the media box",
+                    ));
                 }
             }
             let margins = setup.margins;
@@ -702,11 +783,19 @@ impl DocumentBuilder {
             push(
                 &mut self.pages,
                 Page {
-                    width, height, boxes, margins, depth: 0, content: Vec::new(),
-                    fonts: BTreeSet::new(), images: BTreeSet::new(), links: Vec::new(),
+                    width,
+                    height,
+                    boxes,
+                    margins,
+                    depth: 0,
+                    content: Vec::new(),
+                    fonts: BTreeSet::new(),
+                    images: BTreeSet::new(),
+                    links: Vec::new(),
                     annotations: Vec::new(),
                 },
-                "pages", MAX_PAGES,
+                "pages",
+                MAX_PAGES,
             )?;
             Ok(index)
         })();
@@ -738,7 +827,16 @@ impl DocumentBuilder {
     }
 
     pub fn outline(&mut self, title: &str, level: u8, page: usize, y: f32) {
-        self.outline_to(title, level, Destination::Xyz { page, left: None, top: Some(y), zoom: None });
+        self.outline_to(
+            title,
+            level,
+            Destination::Xyz {
+                page,
+                left: None,
+                top: Some(y),
+                zoom: None,
+            },
+        );
     }
 
     pub fn outline_to(&mut self, title: &str, level: u8, destination: Destination) {
@@ -747,11 +845,19 @@ impl DocumentBuilder {
         }
         let result = (|| {
             destination.validate()?;
-            let base = self.outlines.first().map(|item| item.level).unwrap_or(level);
+            let base = self
+                .outlines
+                .first()
+                .map(|item| item.level)
+                .unwrap_or(level);
             if base > 1 || level < base {
                 return Err(invalid("outline levels must start at zero or one"));
             }
-            check("outline_depth", add(usize::from(level - base), 1)?, MAX_DEPTH)?;
+            check(
+                "outline_depth",
+                add(usize::from(level - base), 1)?,
+                MAX_DEPTH,
+            )?;
             if let Some(previous) = self.outlines.last() {
                 if usize::from(level) > add(usize::from(previous.level), 1)? {
                     return Err(invalid("outline levels cannot skip a parent"));
@@ -761,8 +867,13 @@ impl DocumentBuilder {
             self.charge(add(title.len(), 256)?)?;
             push(
                 &mut self.outlines,
-                Outline { title, level, destination },
-                "outline_items", MAX_OUTLINES,
+                Outline {
+                    title,
+                    level,
+                    destination,
+                },
+                "outline_items",
+                MAX_OUTLINES,
             )
         })();
         if let Err(error) = result {
@@ -774,11 +885,7 @@ impl DocumentBuilder {
         emit::finish(self, options)
     }
 
-    pub fn finish_to(
-        self,
-        options: &WriteOptions,
-        sink: &mut dyn io::Write,
-    ) -> io::Result<u64> {
+    pub fn finish_to(self, options: &WriteOptions, sink: &mut dyn io::Write) -> io::Result<u64> {
         let bytes = self.finish(options)?;
         let length = u64::try_from(bytes.len()).map_err(|_| invalid("output length overflow"))?;
         sink.write_all(&bytes)?;

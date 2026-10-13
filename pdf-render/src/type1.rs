@@ -250,7 +250,11 @@ impl<'a> Reader<'a> {
     }
 
     fn advance(&mut self) -> Result<u8> {
-        let byte = self.data.get(self.position).copied().ok_or_else(malformed)?;
+        let byte = self
+            .data
+            .get(self.position)
+            .copied()
+            .ok_or_else(malformed)?;
         self.position = self.position.checked_add(1).ok_or_else(malformed)?;
         Ok(byte)
     }
@@ -274,9 +278,10 @@ impl<'a> Reader<'a> {
         if self.position == self.data.len() {
             return Ok(None);
         }
-        self.tokens = self.tokens.checked_add(1).ok_or_else(|| {
-            refusal(LimitKind::Tokens, usize::MAX, MAX_TOKENS)
-        })?;
+        self.tokens = self
+            .tokens
+            .checked_add(1)
+            .ok_or_else(|| refusal(LimitKind::Tokens, usize::MAX, MAX_TOKENS))?;
         check(LimitKind::Tokens, self.tokens, MAX_TOKENS)?;
 
         let start = self.position;
@@ -482,20 +487,15 @@ impl Parsed {
                             if value.kind != TokenKind::Word {
                                 return Err(malformed());
                             }
-                            let text = core::str::from_utf8(value.bytes)
-                                .map_err(|_| malformed())?;
+                            let text =
+                                core::str::from_utf8(value.bytes).map_err(|_| malformed())?;
                             let len_iv = text.parse::<i64>().map_err(|_| malformed())?;
                             if len_iv < -1 {
                                 return Err(malformed());
                             }
                             if len_iv >= 0 {
-                                let requested = usize::try_from(len_iv)
-                                    .map_err(|_| malformed())?;
-                                check(
-                                    LimitKind::ObjectBytes,
-                                    requested,
-                                    MAX_PROGRAM_BYTES,
-                                )?;
+                                let requested = usize::try_from(len_iv).map_err(|_| malformed())?;
+                                check(LimitKind::ObjectBytes, requested, MAX_PROGRAM_BYTES)?;
                             }
                             self.len_iv = len_iv;
                         }
@@ -507,9 +507,9 @@ impl Parsed {
                             let count = reader.unsigned()?;
                             check(LimitKind::Objects, count, MAX_SUBRS)?;
                             reader.require_word(b"array")?;
-                            self.subrs.try_reserve_exact(count).map_err(|_| {
-                                allocation(LimitKind::Objects, MAX_SUBRS)
-                            })?;
+                            self.subrs
+                                .try_reserve_exact(count)
+                                .map_err(|_| allocation(LimitKind::Objects, MAX_SUBRS))?;
                             self.subrs.resize(count, None);
                             in_subrs = true;
                         }
@@ -540,16 +540,12 @@ impl Parsed {
                 }
                 TokenKind::Word
                     if in_subrs
-                        && (token.word(b"def")
-                            || token.word(b"ND")
-                            || token.word(b"|-")) =>
+                        && (token.word(b"def") || token.word(b"ND") || token.word(b"|-")) =>
                 {
                     in_subrs = false;
                 }
                 // Synthetic and hybrid programs require PostScript execution.
-                TokenKind::Word
-                    if token.word(b"FontDirectory") || token.word(b"hires") =>
-                {
+                TokenKind::Word if token.word(b"FontDirectory") || token.word(b"hires") => {
                     return Err(DocError::Unsupported {
                         feature: "Type1 synthetic or hybrid font",
                     });
@@ -565,9 +561,9 @@ impl Parsed {
         let count = reader.unsigned()?;
         check(LimitKind::Objects, count, MAX_GLYPHS)?;
         reader.require_word(b"dict")?;
-        self.glyphs.try_reserve_exact(count).map_err(|_| {
-            allocation(LimitKind::Objects, MAX_GLYPHS)
-        })?;
+        self.glyphs
+            .try_reserve_exact(count)
+            .map_err(|_| allocation(LimitKind::Objects, MAX_GLYPHS))?;
 
         // Normal programs use "dup begin" or "begin" after the dictionary.
         loop {
@@ -591,8 +587,7 @@ impl Parsed {
             }
             match token.kind {
                 TokenKind::Name => {
-                    let requested = self.glyphs.len().checked_add(1)
-                        .ok_or_else(malformed)?;
+                    let requested = self.glyphs.len().checked_add(1).ok_or_else(malformed)?;
                     check(LimitKind::Objects, requested, MAX_GLYPHS)?;
                     if requested > count {
                         return Err(malformed());
@@ -621,22 +616,25 @@ impl Parsed {
         };
 
         let mut total = 0usize;
-        for span in self.subrs.iter().flatten()
+        for span in self
+            .subrs
+            .iter()
+            .flatten()
             .chain(self.glyphs.iter().map(|glyph| &glyph.code))
         {
             let length = span.len()?.checked_sub(skip).ok_or_else(malformed)?;
-            total = total.checked_add(length).ok_or_else(|| {
-                refusal(LimitKind::DecodedBytes, usize::MAX, MAX_FONT_BYTES)
-            })?;
+            total = total
+                .checked_add(length)
+                .ok_or_else(|| refusal(LimitKind::DecodedBytes, usize::MAX, MAX_FONT_BYTES))?;
             check(LimitKind::DecodedBytes, total, MAX_FONT_BYTES)?;
         }
 
         // One arena for all decoded charstrings. Subroutine calls and outline
         // construction borrow it and never allocate temporary program buffers.
         let mut bytes = Vec::new();
-        bytes.try_reserve_exact(total).map_err(|_| {
-            allocation(LimitKind::DecodedBytes, MAX_FONT_BYTES)
-        })?;
+        bytes
+            .try_reserve_exact(total)
+            .map_err(|_| allocation(LimitKind::DecodedBytes, MAX_FONT_BYTES))?;
         for span in self.subrs.iter_mut().flatten() {
             *span = decode_program(source, *span, self.len_iv, &mut bytes)?;
         }
@@ -644,7 +642,8 @@ impl Parsed {
             glyph.code = decode_program(source, glyph.code, self.len_iv, &mut bytes)?;
         }
 
-        self.glyphs.sort_unstable_by(|left, right| left.name.cmp(&right.name));
+        self.glyphs
+            .sort_unstable_by(|left, right| left.name.cmp(&right.name));
         for pair in self.glyphs.windows(2) {
             let left = pair.first().ok_or_else(malformed)?;
             let right = pair.get(1).ok_or_else(malformed)?;
@@ -671,7 +670,8 @@ fn read_encoding(reader: &mut Reader<'_>) -> Result<Option<Encoding>> {
     let known = if first.word(b"StandardEncoding") {
         for (code, slot) in encoding.iter_mut().enumerate() {
             let byte = u8::try_from(code).map_err(|_| malformed())?;
-            *slot = BaseEncoding::Standard.glyph_name(byte)
+            *slot = BaseEncoding::Standard
+                .glyph_name(byte)
                 .map(EncodingName::Static);
         }
         true
@@ -690,9 +690,7 @@ fn read_encoding(reader: &mut Reader<'_>) -> Result<Option<Encoding>> {
             *slot = Some(EncodingName::Owned(name));
             code = code.checked_add(1).ok_or_else(malformed)?;
         }
-    } else if first.kind == TokenKind::Word
-        && first.bytes.first().is_some_and(u8::is_ascii_digit)
-    {
+    } else if first.kind == TokenKind::Word && first.bytes.first().is_some_and(u8::is_ascii_digit) {
         if first.unsigned()? != 256 {
             return Err(malformed());
         }
@@ -752,8 +750,12 @@ fn parse_checked(data: &[u8], length1: usize, length2: usize) -> Result<Type1Fon
             } else {
                 // Length1 includes the cleartext separator. Never strip bytes
                 // from a length-delimited binary ciphertext.
-                if !clear.get(position..).ok_or_else(malformed)?
-                    .iter().copied().all(space)
+                if !clear
+                    .get(position..)
+                    .ok_or_else(malformed)?
+                    .iter()
+                    .copied()
+                    .all(space)
                 {
                     return Err(malformed());
                 }
@@ -783,7 +785,9 @@ impl Cipher {
     fn byte(&mut self, cipher: u8) -> u8 {
         let plain = cipher ^ (self.state >> 8) as u8;
         // The cipher's recurrence is explicitly arithmetic modulo 65536.
-        self.state = self.state.wrapping_add(u16::from(cipher))
+        self.state = self
+            .state
+            .wrapping_add(u16::from(cipher))
             .wrapping_mul(52_845)
             .wrapping_add(22_719);
         plain
@@ -799,9 +803,9 @@ fn decode_eexec(input: &[u8], infer_length: bool) -> Result<Vec<u8>> {
     }
 
     let mut output = Vec::new();
-    output.try_reserve_exact(input.len()).map_err(|_| {
-        allocation(LimitKind::DecodedBytes, MAX_FONT_BYTES)
-    })?;
+    output
+        .try_reserve_exact(input.len())
+        .map_err(|_| allocation(LimitKind::DecodedBytes, MAX_FONT_BYTES))?;
     let mut cipher = Cipher { state: 55_665 };
     let mut count = 0usize;
     let mut high = None;
@@ -842,12 +846,7 @@ fn decode_eexec(input: &[u8], infer_length: bool) -> Result<Vec<u8>> {
     Ok(output)
 }
 
-fn decode_program(
-    source: &[u8],
-    span: Span,
-    len_iv: i64,
-    output: &mut Vec<u8>,
-) -> Result<Span> {
+fn decode_program(source: &[u8], span: Span, len_iv: i64, output: &mut Vec<u8>) -> Result<Span> {
     let input = span.bytes(source)?;
     let start = output.len();
     if len_iv == -1 {
@@ -865,7 +864,10 @@ fn decode_program(
             }
         }
     }
-    Ok(Span { start, end: output.len() })
+    Ok(Span {
+        start,
+        end: output.len(),
+    })
 }
 
 struct FixedStack<T: Copy + Default, const N: usize> {
@@ -884,9 +886,10 @@ impl<T: Copy + Default, const N: usize> FixedStack<T, N> {
     }
 
     fn push(&mut self, value: T) -> Result<()> {
-        let requested = self.len.checked_add(1).ok_or_else(|| {
-            refusal(self.limit, usize::MAX, N)
-        })?;
+        let requested = self
+            .len
+            .checked_add(1)
+            .ok_or_else(|| refusal(self.limit, usize::MAX, N))?;
         check(self.limit, requested, N)?;
         let slot = self.values.get_mut(self.len).ok_or_else(malformed)?;
         *slot = value;
@@ -933,7 +936,9 @@ impl FixedStack<f64, MAX_OPERANDS> {
         check(LimitKind::Tokens, count, MAX_OPERANDS)?;
         let start = self.len.checked_sub(count).ok_or_else(malformed)?;
         let mut result = [0.0; MAX_OPERANDS];
-        result.get_mut(..count).ok_or_else(malformed)?
+        result
+            .get_mut(..count)
+            .ok_or_else(malformed)?
             .copy_from_slice(self.values.get(start..self.len).ok_or_else(malformed)?);
         self.len = start;
         Ok(result)
@@ -968,14 +973,16 @@ impl Frame {
             32..=246 => i32::from(first).saturating_sub(139),
             247..=250 => {
                 let second = self.byte(source)?;
-                i32::from(first).saturating_sub(247)
+                i32::from(first)
+                    .saturating_sub(247)
                     .saturating_mul(256)
                     .saturating_add(i32::from(second))
                     .saturating_add(108)
             }
             251..=254 => {
                 let second = self.byte(source)?;
-                let positive = i32::from(first).saturating_sub(251)
+                let positive = i32::from(first)
+                    .saturating_sub(251)
                     .saturating_mul(256)
                     .saturating_add(i32::from(second))
                     .saturating_add(108);
@@ -1048,7 +1055,8 @@ impl Builder<'_> {
         let [a, b, c, d, e, f] = self.matrix;
         let x = (a * x + c * y + e) * 1000.0;
         let y = (b * x_coordinate(point, self.offset)? + d * y + f) * 1000.0;
-        if !x.is_finite() || !y.is_finite()
+        if !x.is_finite()
+            || !y.is_finite()
             || x.abs() > f64::from(f32::MAX)
             || y.abs() > f64::from(f32::MAX)
         {
@@ -1058,17 +1066,22 @@ impl Builder<'_> {
     }
 
     fn emit(&mut self, element: PathEl) -> Result<()> {
-        let requested = self.path.els.len().checked_add(1).ok_or_else(|| {
-            refusal(LimitKind::ContentOps, usize::MAX, MAX_PATH_ELEMENTS)
-        })?;
+        let requested = self
+            .path
+            .els
+            .len()
+            .checked_add(1)
+            .ok_or_else(|| refusal(LimitKind::ContentOps, usize::MAX, MAX_PATH_ELEMENTS))?;
         check(LimitKind::ContentOps, requested, MAX_PATH_ELEMENTS)?;
         if self.path.els.len() == self.path.els.capacity() {
-            let remaining = MAX_PATH_ELEMENTS.checked_sub(self.path.els.len())
+            let remaining = MAX_PATH_ELEMENTS
+                .checked_sub(self.path.els.len())
                 .ok_or_else(malformed)?;
             let growth = self.path.els.capacity().max(256).min(remaining);
-            self.path.els.try_reserve_exact(growth).map_err(|_| {
-                allocation(LimitKind::ContentOps, MAX_PATH_ELEMENTS)
-            })?;
+            self.path
+                .els
+                .try_reserve_exact(growth)
+                .map_err(|_| allocation(LimitKind::ContentOps, MAX_PATH_ELEMENTS))?;
         }
         self.path.els.push(element);
         Ok(())
@@ -1184,14 +1197,21 @@ fn x_coordinate(point: Point, offset: Point) -> Result<f64> {
 
 impl FontProgram {
     fn glyph(&self, name: &str) -> Result<Span> {
-        let index = self.glyphs.binary_search_by(|glyph| glyph.name.as_str().cmp(name))
+        let index = self
+            .glyphs
+            .binary_search_by(|glyph| glyph.name.as_str().cmp(name))
             .map_err(|_| malformed())?;
-        self.glyphs.get(index).map(|glyph| glyph.code).ok_or_else(malformed)
+        self.glyphs
+            .get(index)
+            .map(|glyph| glyph.code)
+            .ok_or_else(malformed)
     }
 
     fn standard_glyph(&self, code: f64) -> Result<Span> {
         let code = u8::try_from(integer(code)?).map_err(|_| malformed())?;
-        let name = BaseEncoding::Standard.glyph_name(code).ok_or_else(malformed)?;
+        let name = BaseEncoding::Standard
+            .glyph_name(code)
+            .ok_or_else(malformed)?;
         self.glyph(name)
     }
 
@@ -1249,9 +1269,9 @@ impl FontProgram {
         let mut results = FixedStack::<f64, 2>::new(LimitKind::Tokens);
 
         loop {
-            *operations = operations.checked_add(1).ok_or_else(|| {
-                refusal(LimitKind::ContentOps, usize::MAX, MAX_OPS)
-            })?;
+            *operations = operations
+                .checked_add(1)
+                .ok_or_else(|| refusal(LimitKind::ContentOps, usize::MAX, MAX_OPS))?;
             check(LimitKind::ContentOps, *operations, MAX_OPS)?;
             let frame = frames.last_mut().ok_or_else(malformed)?;
             let first = frame.byte(&self.bytes)?;
@@ -1289,9 +1309,15 @@ impl FontProgram {
                 }
                 10 => {
                     let index = integer(stack.pop().ok_or_else(malformed)?)?;
-                    let code = self.subrs.get(index).copied().flatten()
+                    let code = self
+                        .subrs
+                        .get(index)
+                        .copied()
+                        .flatten()
                         .ok_or_else(malformed)?;
-                    let depth = component.depth.checked_add(frames.len)
+                    let depth = component
+                        .depth
+                        .checked_add(frames.len)
                         .ok_or_else(malformed)?;
                     check(LimitKind::Depth, depth, MAX_DEPTH)?;
                     frames.push(Frame::new(code))?;
@@ -1303,8 +1329,7 @@ impl FontProgram {
                     frames.pop();
                 }
                 12 => {
-                    let escape = frames.last_mut().ok_or_else(malformed)?
-                        .byte(&self.bytes)?;
+                    let escape = frames.last_mut().ok_or_else(malformed)?.byte(&self.bytes)?;
                     match escape {
                         0 => {
                             builder.metrics()?;
@@ -1325,7 +1350,11 @@ impl FontProgram {
                             let [sbx, sby] = builder.bearing;
                             let offset = finite_point([sbx + adx - asb, sby + ady])?;
                             builder.close()?;
-                            return Ok(Some(Accent { base, accent, offset }));
+                            return Ok(Some(Accent {
+                                base,
+                                accent,
+                                offset,
+                            }));
                         }
                         7 => {
                             let [sbx, sby, _, _] = stack.take::<4>()?;

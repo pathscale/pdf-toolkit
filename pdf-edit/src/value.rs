@@ -7,13 +7,9 @@ use crate::{check, malformed, refused};
 
 const MAX_VALUE_DEPTH: u64 = 128;
 
-pub(crate) fn add(
-    left: u64,
-    right: u64,
-    kind: LimitKind,
-    maximum: u64,
-) -> Result<u64, DocError> {
-    let requested = left.checked_add(right)
+pub(crate) fn add(left: u64, right: u64, kind: LimitKind, maximum: u64) -> Result<u64, DocError> {
+    let requested = left
+        .checked_add(right)
         .ok_or_else(|| refused(kind, u64::MAX, maximum))?;
     check(kind, requested, maximum)?;
     Ok(requested)
@@ -30,8 +26,7 @@ fn name_size(name: &str, maximum: u64) -> Result<u64, DocError> {
         let escaped = !(33..=126).contains(&byte)
             || matches!(
                 byte,
-                b'#' | b'(' | b')' | b'<' | b'>' | b'[' | b']'
-                    | b'{' | b'}' | b'/' | b'%'
+                b'#' | b'(' | b')' | b'<' | b'>' | b'[' | b']' | b'{' | b'}' | b'/' | b'%'
             );
         size = add(
             size,
@@ -87,7 +82,12 @@ pub(crate) fn measure(value: &Value, limits: &Limits) -> Result<u64, DocError> {
             Part::Dict(mut entries, depth) => {
                 if let Some((key, child)) = entries.next() {
                     tokens = add(tokens, 1, LimitKind::Tokens, max_tokens)?;
-                    size = add(size, name_size(key, maximum)?, LimitKind::ObjectBytes, maximum)?;
+                    size = add(
+                        size,
+                        name_size(key, maximum)?,
+                        LimitKind::ObjectBytes,
+                        maximum,
+                    )?;
                     stack.push(Part::Dict(entries, depth));
                     stack.push(Part::Value(child, depth));
                 }
@@ -116,12 +116,14 @@ pub(crate) fn measure(value: &Value, limits: &Limits) -> Result<u64, DocError> {
                     Value::Name(name) => name_size(name, maximum)?,
                     Value::Str(bytes) => string_size(bytes, maximum)?,
                     Value::HexStr(bytes) => {
-                        let digits = (bytes.len() as u64).checked_mul(2)
+                        let digits = (bytes.len() as u64)
+                            .checked_mul(2)
                             .ok_or_else(|| refused(LimitKind::ObjectBytes, u64::MAX, maximum))?;
                         add(digits, 2, LimitKind::ObjectBytes, maximum)?
                     }
                     Value::Array(items) => {
-                        let child_depth = depth.checked_add(1)
+                        let child_depth = depth
+                            .checked_add(1)
                             .ok_or_else(|| refused(LimitKind::Depth, u64::MAX, max_depth))?;
                         stack.push(Part::Array(items.iter(), child_depth));
                         add(
@@ -132,10 +134,12 @@ pub(crate) fn measure(value: &Value, limits: &Limits) -> Result<u64, DocError> {
                         )?
                     }
                     Value::Dict(entries) => {
-                        let child_depth = depth.checked_add(1)
+                        let child_depth = depth
+                            .checked_add(1)
                             .ok_or_else(|| refused(LimitKind::Depth, u64::MAX, max_depth))?;
                         stack.push(Part::Dict(entries.iter(), child_depth));
-                        let spaces = (entries.len() as u64).checked_mul(2)
+                        let spaces = (entries.len() as u64)
+                            .checked_mul(2)
                             .ok_or_else(|| refused(LimitKind::ObjectBytes, u64::MAX, maximum))?;
                         add(5, spaces, LimitKind::ObjectBytes, maximum)?
                     }
@@ -168,19 +172,27 @@ pub(crate) fn dispose(value: Value) {
 }
 
 pub(crate) fn text_string(text: &str, limits: &Limits) -> Result<Vec<u8>, DocError> {
-    check(LimitKind::ObjectBytes, text.len() as u64, limits.max_object_bytes)?;
+    check(
+        LimitKind::ObjectBytes,
+        text.len() as u64,
+        limits.max_object_bytes,
+    )?;
     if text.is_ascii() {
         return Ok(text.as_bytes().to_vec());
     }
     let units = text.encode_utf16().count() as u64;
-    let bytes = units.checked_mul(2)
+    let bytes = units
+        .checked_mul(2)
         .ok_or_else(|| refused(LimitKind::ObjectBytes, u64::MAX, limits.max_object_bytes))?;
     let size = add(bytes, 2, LimitKind::ObjectBytes, limits.max_object_bytes)?;
     let capacity = usize::try_from(size)
         .map_err(|_| refused(LimitKind::ObjectBytes, size, usize::MAX as u64))?;
     let mut result = Vec::new();
-    result.try_reserve_exact(capacity)
-        .map_err(|_| DocError::Unsupported { feature: "edit:allocation" })?;
+    result
+        .try_reserve_exact(capacity)
+        .map_err(|_| DocError::Unsupported {
+            feature: "edit:allocation",
+        })?;
     result.extend_from_slice(&[0xfe, 0xff]);
     for unit in text.encode_utf16() {
         result.extend_from_slice(&unit.to_be_bytes());
@@ -199,12 +211,14 @@ pub(crate) fn checked_object(obj: &Object, limits: &Limits) -> Result<Value, Doc
         if let Some(name) = node.as_name() {
             check_name(name)?;
         }
-        let child_depth = depth.checked_add(1)
+        let child_depth = depth
+            .checked_add(1)
             .ok_or_else(|| refused(LimitKind::Depth, u64::MAX, max_depth))?;
         if let Some(array) = node.as_array() {
             check(
                 LimitKind::Tokens,
-                seen.saturating_add(stack.len() as u64).saturating_add(array.len() as u64),
+                seen.saturating_add(stack.len() as u64)
+                    .saturating_add(array.len() as u64),
                 maximum,
             )?;
             for child in array.iter() {
@@ -213,7 +227,8 @@ pub(crate) fn checked_object(obj: &Object, limits: &Limits) -> Result<Value, Doc
         } else if let Some(dict) = node.as_dict() {
             check(
                 LimitKind::Tokens,
-                seen.saturating_add(stack.len() as u64).saturating_add(dict.len() as u64),
+                seen.saturating_add(stack.len() as u64)
+                    .saturating_add(dict.len() as u64),
                 maximum,
             )?;
             for (name, child) in dict.iter() {
@@ -229,7 +244,9 @@ pub(crate) fn checked_object(obj: &Object, limits: &Limits) -> Result<Value, Doc
 
 fn check_name(name: pdf_core::Name<'_>) -> Result<(), DocError> {
     if std::str::from_utf8(name.decoded().as_ref()).is_err() {
-        Err(DocError::Unsupported { feature: "edit:non_utf8_name" })
+        Err(DocError::Unsupported {
+            feature: "edit:non_utf8_name",
+        })
     } else {
         Ok(())
     }
@@ -269,9 +286,12 @@ fn to_value(obj: &pdf_core::Object) -> pdf_write::Value {
                 }
                 if let Some(dict) = node.as_dict() {
                     let entries: Vec<_> = dict.iter().collect();
-                    let keys = entries.iter().map(|(name, _)| {
-                        String::from_utf8_lossy(name.decoded().as_ref()).into_owned()
-                    }).collect();
+                    let keys = entries
+                        .iter()
+                        .map(|(name, _)| {
+                            String::from_utf8_lossy(name.decoded().as_ref()).into_owned()
+                        })
+                        .collect();
                     tasks.push(Task::Dict(keys));
                     for (_, child) in entries.into_iter().rev() {
                         tasks.push(Task::Visit(child));
@@ -317,4 +337,3 @@ fn to_value(obj: &pdf_core::Object) -> pdf_write::Value {
         None => Value::Null,
     }
 }
-

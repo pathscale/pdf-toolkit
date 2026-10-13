@@ -23,8 +23,8 @@ impl CodeSpace {
         }
         // PDF codespaces bound each byte independently.
         for index in 0..self.len {
-            let shift = u32::from(self.len.saturating_sub(index).saturating_sub(1))
-                .saturating_mul(8);
+            let shift =
+                u32::from(self.len.saturating_sub(index).saturating_sub(1)).saturating_mul(8);
             let byte = code.checked_shr(shift).unwrap_or(0) & 255;
             let low = self.start.checked_shr(shift).unwrap_or(0) & 255;
             let high = self.end.checked_shr(shift).unwrap_or(0) & 255;
@@ -97,7 +97,13 @@ impl UnicodeDestination {
 
     fn unicode(self, offset: u32) -> Option<GlyphText> {
         match self {
-            Self::Text(text) => if offset == 0 { Some(text) } else { None },
+            Self::Text(text) => {
+                if offset == 0 {
+                    Some(text)
+                } else {
+                    None
+                }
+            }
             Self::Sequential(destination) => destination.unicode(offset),
         }
     }
@@ -205,29 +211,39 @@ impl CMap {
     }
 
     fn unicode_range(&self, code: u32) -> Option<GlyphText> {
-        let index = self.unicode_ranges.partition_point(|range| range.end < code);
+        let index = self
+            .unicode_ranges
+            .partition_point(|range| range.end < code);
         let range = self.unicode_ranges.get(index)?;
         range.destination.unicode(code.checked_sub(range.start)?)
     }
 
     pub fn cid(&self, code: u32) -> u32 {
-        if let Ok(index) = self.cid_ranges.binary_search_by(|range| {
-            compare_range(range.start, range.end, code)
-        }) {
+        if let Ok(index) = self
+            .cid_ranges
+            .binary_search_by(|range| compare_range(range.start, range.end, code))
+        {
             if let Some(range) = self.cid_ranges.get(index) {
-                return code.checked_sub(range.start)
+                return code
+                    .checked_sub(range.start)
                     .and_then(|offset| range.destination.checked_add(offset))
                     .unwrap_or(0);
             }
         }
-        if self.identity_cid { code } else { 0 }
+        if self.identity_cid {
+            code
+        } else {
+            0
+        }
     }
 
     pub(crate) fn accepts(&self, code: u32, len: u8) -> bool {
         if len == 1 {
-            return usize::try_from(code).ok()
+            return usize::try_from(code)
+                .ok()
                 .and_then(|index| self.one_byte_spaces.get(index))
-                .copied().unwrap_or(false);
+                .copied()
+                .unwrap_or(false);
         }
         let index = usize::from(len);
         let (Some(&start), Some(&end)) = (
@@ -258,7 +274,10 @@ impl CMap {
         self.one_byte_spaces = [false; 256];
         let mut start = 0usize;
         for len in 1u8..=4 {
-            let count = self.spaces.get(start..).unwrap_or(&[])
+            let count = self
+                .spaces
+                .get(start..)
+                .unwrap_or(&[])
                 .partition_point(|space| space.len == len);
             let end = start.saturating_add(count);
             if let Some(bound) = self.space_bounds.get_mut(usize::from(len)) {
@@ -270,9 +289,13 @@ impl CMap {
                     maximum = maximum.max(space.end);
                     space.search_end = maximum;
                     if len == 1 {
-                        let slots = usize::try_from(space.start).ok()
-                            .zip(usize::try_from(space.end).ok()
-                                .and_then(|end| end.checked_add(1)))
+                        let slots = usize::try_from(space.start)
+                            .ok()
+                            .zip(
+                                usize::try_from(space.end)
+                                    .ok()
+                                    .and_then(|end| end.checked_add(1)),
+                            )
                             .and_then(|(start, end)| self.one_byte_spaces.get_mut(start..end));
                         if let Some(slots) = slots {
                             slots.fill(true);
@@ -420,7 +443,11 @@ impl Parser<'_> {
             return Err("cmap_malformed");
         }
         let mut code = 0u32;
-        for byte in value.bytes.get(..usize::from(value.len)).ok_or("cmap_malformed")? {
+        for byte in value
+            .bytes
+            .get(..usize::from(value.len))
+            .ok_or("cmap_malformed")?
+        {
             code = (code << 8) | u32::from(*byte);
         }
         self.inferred_lengths |= 1u8 << value.len.saturating_sub(1);
@@ -453,7 +480,12 @@ impl Parser<'_> {
                         return Err("cmap_limit");
                     }
                     let (start, end, len) = self.endpoints()?;
-                    let space = CodeSpace { start, end, len, search_end: 0 };
+                    let space = CodeSpace {
+                        start,
+                        end,
+                        len,
+                        search_end: 0,
+                    };
                     if !space.contains(start, len) || !space.contains(end, len) {
                         return Err("cmap_malformed");
                     }
@@ -479,7 +511,8 @@ impl Parser<'_> {
                         for offset in 0..count {
                             self.charge()?;
                             let destination = self.destination()?;
-                            let code = u64::from(start).checked_add(offset)
+                            let code = u64::from(start)
+                                .checked_add(offset)
                                 .and_then(|code| u32::try_from(code).ok())
                                 .ok_or("cmap_malformed")?;
                             self.map.unicode_ranges.push(UnicodeRange {
@@ -510,8 +543,7 @@ impl Parser<'_> {
                 Section::CidChar => {
                     self.charge()?;
                     let (code, _) = self.source()?;
-                    let destination = integer(self.reader.required()?)
-                        .ok_or("cmap_malformed")?;
+                    let destination = integer(self.reader.required()?).ok_or("cmap_malformed")?;
                     self.map.cid_ranges.push(CidRange {
                         start: code,
                         end: code,
@@ -521,12 +553,15 @@ impl Parser<'_> {
                 Section::CidRange => {
                     self.charge()?;
                     let (start, end, _) = self.endpoints()?;
-                    let destination = integer(self.reader.required()?)
-                        .ok_or("cmap_malformed")?;
+                    let destination = integer(self.reader.required()?).ok_or("cmap_malformed")?;
                     if destination.checked_add(end.saturating_sub(start)).is_none() {
                         return Err("cmap_malformed");
                     }
-                    self.map.cid_ranges.push(CidRange { start, end, destination });
+                    self.map.cid_ranges.push(CidRange {
+                        start,
+                        end,
+                        destination,
+                    });
                 }
             }
         }
@@ -539,7 +574,12 @@ impl Parser<'_> {
     fn finish(mut self) -> (CMap, Option<&'static str>) {
         if self.map.spaces.is_empty() {
             if self.map.identity_cid {
-                self.map.spaces.push(CodeSpace { start: 0, end: 65_535, len: 2, search_end: 0 });
+                self.map.spaces.push(CodeSpace {
+                    start: 0,
+                    end: 65_535,
+                    len: 2,
+                    search_end: 0,
+                });
             } else {
                 self.warn("cmap_codespace_missing");
                 for len in 1u8..=4 {
@@ -548,23 +588,40 @@ impl Parser<'_> {
                             u32::MAX
                         } else {
                             1u32.checked_shl(u32::from(len).saturating_mul(8))
-                                .unwrap_or(0).saturating_sub(1)
+                                .unwrap_or(0)
+                                .saturating_sub(1)
                         };
-                        self.map.spaces.push(CodeSpace { start: 0, end, len, search_end: 0 });
+                        self.map.spaces.push(CodeSpace {
+                            start: 0,
+                            end,
+                            len,
+                            search_end: 0,
+                        });
                     }
                 }
                 if self.map.spaces.is_empty() {
-                    self.map.spaces.push(CodeSpace { start: 0, end: 255, len: 1, search_end: 0 });
+                    self.map.spaces.push(CodeSpace {
+                        start: 0,
+                        end: 255,
+                        len: 1,
+                        search_end: 0,
+                    });
                 }
             }
         }
-        self.map.spaces.sort_unstable_by_key(|space| (space.len, space.start, space.end));
-        self.map.spaces.dedup_by_key(|space| (space.len, space.start, space.end));
+        self.map
+            .spaces
+            .sort_unstable_by_key(|space| (space.len, space.start, space.end));
+        self.map
+            .spaces
+            .dedup_by_key(|space| (space.len, space.start, space.end));
         self.map.index_spaces();
 
         // Overlapping mappings are malformed. Keep the first sorted range,
         // dropping overlaps so every lookup remains a binary search.
-        self.map.unicode_ranges.sort_by_key(|range| (range.start, range.end));
+        self.map
+            .unicode_ranges
+            .sort_by_key(|range| (range.start, range.end));
         let mut last = None;
         let mut overlap = false;
         self.map.unicode_ranges.retain(|range| {
@@ -576,7 +633,9 @@ impl Parser<'_> {
                 true
             }
         });
-        self.map.cid_ranges.sort_by_key(|range| (range.start, range.end));
+        self.map
+            .cid_ranges
+            .sort_by_key(|range| (range.start, range.end));
         last = None;
         self.map.cid_ranges.retain(|range| {
             if last.is_some_and(|end| range.start <= end) {
@@ -637,10 +696,14 @@ fn hex_string(token: Token<'_>) -> Result<HexText, &'static str> {
     if token.kind() != TokenKind::HexString {
         return Err("cmap_malformed");
     }
-    let input = token.bytes()
+    let input = token
+        .bytes()
         .get(1..token.bytes().len().saturating_sub(1))
         .ok_or("cmap_malformed")?;
-    let mut value = HexText { bytes: [0; 16], len: 0 };
+    let mut value = HexText {
+        bytes: [0; 16],
+        len: 0,
+    };
     let mut high = None;
     for byte in input {
         if matches!(byte, 0 | 9 | 10 | 12 | 13 | 32) {
@@ -648,7 +711,9 @@ fn hex_string(token: Token<'_>) -> Result<HexText, &'static str> {
         }
         let digit = hex(*byte).ok_or("cmap_malformed")?;
         if let Some(first) = high.take() {
-            let slot = value.bytes.get_mut(usize::from(value.len))
+            let slot = value
+                .bytes
+                .get_mut(usize::from(value.len))
                 .ok_or("cmap_text_too_long")?;
             *slot = (first << 4) | digit;
             value.len = value.len.saturating_add(1);
@@ -657,7 +722,9 @@ fn hex_string(token: Token<'_>) -> Result<HexText, &'static str> {
         }
     }
     if let Some(first) = high {
-        let slot = value.bytes.get_mut(usize::from(value.len))
+        let slot = value
+            .bytes
+            .get_mut(usize::from(value.len))
             .ok_or("cmap_text_too_long")?;
         *slot = first << 4;
         value.len = value.len.saturating_add(1);
@@ -674,8 +741,12 @@ fn name_eq(token: Token<'_>, expected: &[u8]) -> bool {
     while let Some((&first, rest)) = bytes.split_first() {
         let byte;
         if first == b'#' {
-            let Some(high) = rest.first().copied().and_then(hex) else { return false };
-            let Some(low) = rest.get(1).copied().and_then(hex) else { return false };
+            let Some(high) = rest.first().copied().and_then(hex) else {
+                return false;
+            };
+            let Some(low) = rest.get(1).copied().and_then(hex) else {
+                return false;
+            };
             byte = (high << 4) | low;
             bytes = rest.get(2..).unwrap_or(&[]);
         } else {
@@ -697,5 +768,3 @@ fn hex(byte: u8) -> Option<u8> {
         _ => None,
     }
 }
-
-

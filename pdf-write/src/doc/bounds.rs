@@ -41,7 +41,11 @@ impl std::error::Error for Refusal {}
 pub(super) fn refusal(kind: &'static str, requested: usize, maximum: usize) -> io::Error {
     io::Error::new(
         io::ErrorKind::InvalidInput,
-        Refusal { limit: kind, requested, maximum },
+        Refusal {
+            limit: kind,
+            requested,
+            maximum,
+        },
     )
 }
 
@@ -69,9 +73,8 @@ pub(super) fn mul(a: usize, b: usize) -> io::Result<usize> {
 
 pub(super) fn append(out: &mut Vec<u8>, bytes: &[u8], maximum: usize) -> io::Result<()> {
     check("buffer_bytes", add(out.len(), bytes.len())?, maximum)?;
-    out.try_reserve(bytes.len()).map_err(|_| {
-        refusal("allocation_bytes", maximum.saturating_add(1), maximum)
-    })?;
+    out.try_reserve(bytes.len())
+        .map_err(|_| refusal("allocation_bytes", maximum.saturating_add(1), maximum))?;
     out.extend_from_slice(bytes);
     Ok(())
 }
@@ -85,9 +88,8 @@ pub(super) fn copied(bytes: &[u8], maximum: usize) -> io::Result<Vec<u8>> {
 pub(super) fn zeroed(length: usize, maximum: usize) -> io::Result<Vec<u8>> {
     check("buffer_bytes", length, maximum)?;
     let mut out = Vec::new();
-    out.try_reserve_exact(length).map_err(|_| {
-        refusal("allocation_bytes", maximum.saturating_add(1), maximum)
-    })?;
+    out.try_reserve_exact(length)
+        .map_err(|_| refusal("allocation_bytes", maximum.saturating_add(1), maximum))?;
     out.resize(length, 0);
     Ok(out)
 }
@@ -100,9 +102,8 @@ pub(super) fn push<T>(
 ) -> io::Result<()> {
     let count = add(out.len(), 1)?;
     check(kind, count, maximum)?;
-    out.try_reserve(1).map_err(|_| {
-        refusal(kind, maximum.saturating_add(1), maximum)
-    })?;
+    out.try_reserve(1)
+        .map_err(|_| refusal(kind, maximum.saturating_add(1), maximum))?;
     out.push(value);
     Ok(())
 }
@@ -123,7 +124,11 @@ pub(super) fn coordinate(value: f32) -> io::Result<()> {
         return Err(invalid("coordinate must be finite"));
     }
     if value.abs() > 10_000_000.0 {
-        return Err(refusal("coordinate_points", value.abs() as usize, 10_000_000));
+        return Err(refusal(
+            "coordinate_points",
+            value.abs() as usize,
+            10_000_000,
+        ));
     }
     Ok(())
 }
@@ -152,4 +157,3 @@ pub(super) fn rect(x: f32, y: f32, w: f32, h: f32) -> io::Result<[f32; 4]> {
     coordinate(top)?;
     Ok([x, y, right, top])
 }
-

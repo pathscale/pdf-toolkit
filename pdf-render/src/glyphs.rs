@@ -43,15 +43,19 @@ pub struct GlyphSourceCache {
 }
 
 impl Default for GlyphSourceCache {
-    fn default() -> Self { Self::new(64 << 20) }
+    fn default() -> Self {
+        Self::new(64 << 20)
+    }
 }
 
 impl GlyphSourceCache {
     pub fn new(maximum_bytes: u64) -> Self {
         Self {
-            entries: Vec::new(), used: 0,
+            entries: Vec::new(),
+            used: 0,
             maximum: maximum_bytes.min(isize::MAX as u64),
-            document: None, fallback: None,
+            document: None,
+            fallback: None,
         }
     }
 
@@ -63,15 +67,23 @@ impl GlyphSourceCache {
     }
 
     pub fn bytes(&self) -> u64 {
-        self.used.saturating_add((self.entries.capacity() as u64)
-            .saturating_mul(core::mem::size_of::<GlyphSourceEntry>() as u64))
+        self.used.saturating_add(
+            (self.entries.capacity() as u64)
+                .saturating_mul(core::mem::size_of::<GlyphSourceEntry>() as u64),
+        )
     }
 
-    pub fn maximum_bytes(&self) -> u64 { self.maximum }
+    pub fn maximum_bytes(&self) -> u64 {
+        self.maximum
+    }
 
-    pub fn len(&self) -> usize { self.entries.len() }
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
 
-    pub fn is_empty(&self) -> bool { self.entries.is_empty() }
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
 
     /// `value` is the resolved dictionary from which `font` was loaded.
     /// Direct dictionaries and unavailable programs are never retained.
@@ -92,22 +104,26 @@ impl GlyphSourceCache {
             (Some(old), Some(new)) => Weak::ptr_eq(old, &Arc::downgrade(new)),
             _ => false,
         };
-        if !same_fallback || !self.document.as_ref().is_some_and(|(old, old_limits)| {
-            Weak::ptr_eq(old, &source) && *old_limits == limits
-        }) {
+        if !same_fallback
+            || !self.document.as_ref().is_some_and(|(old, old_limits)| {
+                Weak::ptr_eq(old, &source) && *old_limits == limits
+            })
+        {
             self.clear();
             self.document = Some((source, limits));
             self.fallback = fallback.map(Arc::downgrade);
         }
         let dict = value.get().as_dict().ok_or_else(failed)?;
-        let id = value.object().id().filter(|_| {
-            value.get().span() == value.object().root().span()
-        });
+        let id = value
+            .object()
+            .id()
+            .filter(|_| value.get().span() == value.object().root().span());
         if let Some(id) = id {
             let key = (id.number(), id.generation());
-            if let Ok(index) = self.entries.binary_search_by_key(&key, |entry| {
-                (entry.id.number(), entry.id.generation())
-            }) {
+            if let Ok(index) = self
+                .entries
+                .binary_search_by_key(&key, |entry| (entry.id.number(), entry.id.generation()))
+            {
                 if let Some(entry) = self.entries.get(index) {
                     for warning in &entry.source.data.warnings {
                         resolver.warn(warning.clone());
@@ -126,26 +142,43 @@ impl GlyphSourceCache {
     fn retain(&mut self, id: ObjectRef, source: &GlyphSource, maximum: u64) {
         let cost = source.data.cache_bytes;
         let entry_bytes = core::mem::size_of::<GlyphSourceEntry>() as u64;
-        if cost.saturating_add(entry_bytes) > maximum { return; }
-        let slots = self.entries.len().saturating_add(1).max(self.entries.capacity());
-        let requested = self.used.saturating_add(cost)
+        if cost.saturating_add(entry_bytes) > maximum {
+            return;
+        }
+        let slots = self
+            .entries
+            .len()
+            .saturating_add(1)
+            .max(self.entries.capacity());
+        let requested = self
+            .used
+            .saturating_add(cost)
             .saturating_add((slots as u64).saturating_mul(entry_bytes));
         if requested > maximum {
             self.entries = Vec::new();
             self.used = 0;
         }
-        if self.entries.try_reserve_exact(1).is_err() { return; }
+        if self.entries.try_reserve_exact(1).is_err() {
+            return;
+        }
         if self.bytes().saturating_add(cost) > maximum {
             self.entries = Vec::new();
             self.used = 0;
             return;
         }
         let key = (id.number(), id.generation());
-        let index = self.entries.binary_search_by_key(&key, |entry| {
-            (entry.id.number(), entry.id.generation())
-        }).unwrap_or_else(|index| index);
+        let index = self
+            .entries
+            .binary_search_by_key(&key, |entry| (entry.id.number(), entry.id.generation()))
+            .unwrap_or_else(|index| index);
         if index <= self.entries.len() {
-            self.entries.insert(index, GlyphSourceEntry { id, source: source.clone() });
+            self.entries.insert(
+                index,
+                GlyphSourceEntry {
+                    id,
+                    source: source.clone(),
+                },
+            );
             self.used = self.used.saturating_add(cost);
         }
     }
@@ -218,10 +251,13 @@ impl GlyphSource {
         if font.kind() == FontKind::Type3 {
             return Ok(None);
         }
-        let object = dict.get(b"Subtype")
+        let object = dict
+            .get(b"Subtype")
             .and_then(|value| value.to_owned().object().id());
         match load_source(resolver, font, dict, fallback) {
-            Ok(Some(data)) => Ok(Some(Self { data: Arc::new(data) })),
+            Ok(Some(data)) => Ok(Some(Self {
+                data: Arc::new(data),
+            })),
             Ok(None) => Ok(None),
             Err(error @ (DocError::Encrypted | DocError::Refused(_))) => Err(error),
             Err(_) => {
@@ -244,17 +280,16 @@ impl GlyphSource {
     pub fn outline_checked(&self, glyph: &Glyph) -> Result<Option<Path>, DocError> {
         match (&self.data.backend, &self.data.mapping) {
             (Backend::Type1(program), Mapping::Type1(names)) => {
-                let name = usize::try_from(glyph.code).ok()
+                let name = usize::try_from(glyph.code)
+                    .ok()
                     .and_then(|code| names.get(code))
                     .and_then(Option::as_ref)
                     .and_then(GlyphName::text);
                 let Some(name) = name else { return Ok(None) };
-                let Some(mut path) = program.outline(name) else { return Ok(None) };
-                sfnt::validate_path(
-                    &path,
-                    self.data.maximum_elements,
-                    self.data.maximum_bytes,
-                )?;
+                let Some(mut path) = program.outline(name) else {
+                    return Ok(None);
+                };
+                sfnt::validate_path(&path, self.data.maximum_elements, self.data.maximum_bytes)?;
                 // Type1Font applies FontMatrix, yielding em/text-space units.
                 // The renderer's shared outline convention is 1/1000 em.
                 scale_type1(&mut path)?;
@@ -262,18 +297,21 @@ impl GlyphSource {
             }
             (Backend::Sfnt(program), mapping) => {
                 let gid = match mapping {
-                    Mapping::Simple(gids) => usize::try_from(glyph.code).ok()
+                    Mapping::Simple(gids) => usize::try_from(glyph.code)
+                        .ok()
                         .and_then(|code| gids.get(code))
                         .copied()
                         .flatten(),
                     Mapping::Cid { encoding, gids } => {
-                        let cid = encoding.as_ref()
+                        let cid = encoding
+                            .as_ref()
                             .map(|map| map.cid(glyph.code))
                             .unwrap_or(glyph.code);
                         if cid > u32::from(u16::MAX) {
                             None
                         } else if let Some(gids) = gids {
-                            usize::try_from(cid).ok()
+                            usize::try_from(cid)
+                                .ok()
                                 .and_then(|cid| cid.checked_mul(2))
                                 .and_then(|offset| {
                                     let end = offset.checked_add(2)?;
@@ -319,17 +357,26 @@ fn load_source(
     fallback: Option<&Arc<[u8]>>,
 ) -> Result<Option<SourceData>, DocError> {
     let limits = *resolver.document().limits();
-    let maximum_bytes = limits.max_decoded_bytes
+    let maximum_bytes = limits
+        .max_decoded_bytes
         .min(limits.max_total_decoded_bytes)
         .min(MAX_FONT_BYTES)
         .min(isize::MAX as u64);
     let maximum_elements = limits.max_content_ops.min(MAX_PATH_ELEMENTS);
-    let mut budget = Budget { limits, used: 0, cmap_bytes: 0, warnings: Vec::new() };
+    let mut budget = Budget {
+        limits,
+        used: 0,
+        cmap_bytes: 0,
+        warnings: Vec::new(),
+    };
 
     let descendant = if font.kind() == FontKind::Type0 {
-        let descendants = resolver.resolve_dict_key(dict, b"DescendantFonts")?
+        let descendants = resolver
+            .resolve_dict_key(dict, b"DescendantFonts")?
             .ok_or_else(failed)?;
-        let first = descendants.get().as_array()
+        let first = descendants
+            .get()
+            .as_array()
             .and_then(|array| array.get(0))
             .ok_or_else(failed)?;
         let descendant = resolver.resolve(first)?;
@@ -340,10 +387,12 @@ fn load_source(
     } else {
         None
     };
-    let metrics = descendant.as_ref()
+    let metrics = descendant
+        .as_ref()
         .and_then(|value| value.get().as_dict())
         .unwrap_or(dict);
-    let descriptor = resolver.resolve_dict_key(metrics, b"FontDescriptor")?
+    let descriptor = resolver
+        .resolve_dict_key(metrics, b"FontDescriptor")?
         .filter(|value| !value.get().is_null());
     let descriptor_dict = match descriptor.as_ref() {
         Some(value) => Some(value.get().as_dict().ok_or_else(failed)?),
@@ -357,7 +406,8 @@ fn load_source(
             (b"FontFile3".as_slice(), 3u8),
             (b"FontFile".as_slice(), 1u8),
         ] {
-            if let Some(value) = resolver.resolve_dict_key(descriptor, key)?
+            if let Some(value) = resolver
+                .resolve_dict_key(descriptor, key)?
                 .filter(|value| !value.get().is_null())
             {
                 embedded = Some((value, kind));
@@ -367,11 +417,12 @@ fn load_source(
     }
 
     let Some((embedded, kind)) = embedded else {
-        let Some(fallback) = fallback else { return Ok(None) };
+        let Some(fallback) = fallback else {
+            return Ok(None);
+        };
         let bytes = Bytes::shared(fallback.clone());
         check_bytes(bytes.len(), maximum_bytes)?;
-        let program = Program::new(bytes, maximum_bytes, maximum_elements)?
-            .ok_or_else(failed)?;
+        let program = Program::new(bytes, maximum_bytes, maximum_elements)?.ok_or_else(failed)?;
         let reference = program.font().ok_or_else(failed)?;
         let subtable = sfnt::cmap_index(&reference, PlatformId::Windows, 1)
             .or_else(|| sfnt::cmap_index(&reference, PlatformId::Windows, 10))
@@ -397,7 +448,11 @@ fn load_source(
         }
         let length1 = length(resolver, stream_dict, b"Length1")?;
         let length2 = length(resolver, stream_dict, b"Length2")?;
-        if length1.checked_add(length2).filter(|size| *size <= bytes.len()).is_none() {
+        if length1
+            .checked_add(length2)
+            .filter(|size| *size <= bytes.len())
+            .is_none()
+        {
             return Err(failed());
         }
         let program = parse_type1(bytes.bytes(), length1, length2).ok_or_else(failed)?;
@@ -415,7 +470,8 @@ fn load_source(
             // Type1 may reserve 65,536 glyph slots and sparse subroutine slots
             // even for a tiny input. Include those fixed worst-case capacities,
             // plus decoded charstrings and names, without changing its parser.
-            cache_bytes: budget.cache_bytes()
+            cache_bytes: budget
+                .cache_bytes()
                 .saturating_add(budget.used.saturating_mul(4))
                 .saturating_add(8 << 20),
             warnings: budget.warnings,
@@ -427,7 +483,8 @@ fn load_source(
     }
 
     let bytes = if kind == 3 {
-        let subtype = resolver.resolve_dict_key(stream_dict, b"Subtype")?
+        let subtype = resolver
+            .resolve_dict_key(stream_dict, b"Subtype")?
             .ok_or_else(failed)?;
         let subtype = subtype.get().as_name().ok_or_else(failed)?;
         if subtype.eq_bytes(b"Type1C") || subtype.eq_bytes(b"CIDFontType0C") {
@@ -442,27 +499,31 @@ fn load_source(
     } else {
         bytes
     };
-    let program = Program::new(bytes, maximum_bytes, maximum_elements)?
-        .ok_or_else(failed)?;
+    let program = Program::new(bytes, maximum_bytes, maximum_elements)?.ok_or_else(failed)?;
 
     let mapping = if font.kind() == FontKind::Type0 {
         let encoding = cid_encoding(resolver, dict, &mut budget, maximum_bytes)?;
-        let subtype = resolver.resolve_dict_key(metrics, b"Subtype")?
+        let subtype = resolver
+            .resolve_dict_key(metrics, b"Subtype")?
             .ok_or_else(failed)?;
         let subtype = subtype.get().as_name().ok_or_else(failed)?;
         let gids = if subtype.eq_bytes(b"CIDFontType2") {
-            match resolver.resolve_dict_key(metrics, b"CIDToGIDMap")?
+            match resolver
+                .resolve_dict_key(metrics, b"CIDToGIDMap")?
                 .filter(|value| !value.get().is_null())
             {
                 None => None,
-                Some(value) if value.get().as_name()
-                    .is_some_and(|name| name.eq_bytes(b"Identity")) => None,
+                Some(value)
+                    if value
+                        .get()
+                        .as_name()
+                        .is_some_and(|name| name.eq_bytes(b"Identity")) =>
+                {
+                    None
+                }
                 Some(value) => {
-                    let bytes = budget.stream(
-                        resolver,
-                        &value,
-                        maximum_bytes.min(MAX_CID_MAP_BYTES),
-                    )?;
+                    let bytes =
+                        budget.stream(resolver, &value, maximum_bytes.min(MAX_CID_MAP_BYTES))?;
                     if bytes.len() % 2 != 0 {
                         return Err(failed());
                     }
@@ -486,7 +547,8 @@ fn load_source(
             let encoding = cff.encoding().ok_or_else(failed)?;
             let charset = cff.charset().ok_or_else(failed)?;
             for (code, slot) in names.iter_mut().enumerate() {
-                *slot = encoding.map(code as u8)
+                *slot = encoding
+                    .map(code as u8)
                     .filter(|gid| *gid != GlyphId::NOTDEF)
                     .and_then(|gid| charset.string_id(gid).ok())
                     .and_then(|sid| cff.string(sid))
@@ -541,7 +603,10 @@ fn named_base(value: &Value) -> Result<BaseEncoding, DocError> {
         (b"MacRomanEncoding".as_slice(), BaseEncoding::MacRoman),
         (b"MacExpertEncoding".as_slice(), BaseEncoding::MacExpert),
         (b"SymbolEncoding".as_slice(), BaseEncoding::Symbol),
-        (b"ZapfDingbatsEncoding".as_slice(), BaseEncoding::ZapfDingbats),
+        (
+            b"ZapfDingbatsEncoding".as_slice(),
+            BaseEncoding::ZapfDingbats,
+        ),
         (b"PDFDocEncoding".as_slice(), BaseEncoding::PdfDoc),
     ] {
         if name.eq_bytes(name_bytes) {
@@ -557,22 +622,29 @@ fn apply_encoding(
     names: &mut [Option<GlyphName>; 256],
     limits: &Limits,
 ) -> Result<(), DocError> {
-    let Some(encoding) = resolver.resolve_dict_key(dict, b"Encoding")?
+    let Some(encoding) = resolver
+        .resolve_dict_key(dict, b"Encoding")?
         .filter(|value| !value.get().is_null())
-    else { return Ok(()) };
+    else {
+        return Ok(());
+    };
     if encoding.get().as_name().is_some() {
         *names = base_names(named_base(&encoding)?);
         return Ok(());
     }
     let dict = encoding.get().as_dict().ok_or_else(failed)?;
-    if let Some(base) = resolver.resolve_dict_key(dict, b"BaseEncoding")?
+    if let Some(base) = resolver
+        .resolve_dict_key(dict, b"BaseEncoding")?
         .filter(|value| !value.get().is_null())
     {
         *names = base_names(named_base(&base)?);
     }
-    let Some(differences) = resolver.resolve_dict_key(dict, b"Differences")?
+    let Some(differences) = resolver
+        .resolve_dict_key(dict, b"Differences")?
         .filter(|value| !value.get().is_null())
-    else { return Ok(()) };
+    else {
+        return Ok(());
+    };
     let array = differences.get().as_array().ok_or_else(failed)?;
     sfnt::check(
         LimitKind::Tokens,
@@ -673,15 +745,17 @@ fn simple_gids(
             sfnt::map(&font, symbol, 0xf000u32.saturating_add(codepoint))
                 .or_else(|| sfnt::map(&font, mac, codepoint))
         } else {
-            let character = names.get(code).and_then(Option::as_ref)
+            let character = names
+                .get(code)
+                .and_then(Option::as_ref)
                 .and_then(|name| glyph_name_to_unicode(name.bytes()))
                 .and_then(|text| match text.as_slice() {
                     [character] => Some(*character),
                     _ => None,
                 });
-            character.and_then(|character| {
-                sfnt::map(&font, unicode, u32::from(character))
-            }).or_else(|| sfnt::map(&font, mac, codepoint))
+            character
+                .and_then(|character| sfnt::map(&font, unicode, u32::from(character)))
+                .or_else(|| sfnt::map(&font, mac, codepoint))
                 .or(*slot)
         };
         *slot = slot.filter(|gid| *gid != 0 && *gid < program.glyph_count());
@@ -695,9 +769,12 @@ fn cid_encoding(
     budget: &mut Budget,
     maximum_bytes: u64,
 ) -> Result<Option<CMap>, DocError> {
-    let Some(value) = resolver.resolve_dict_key(dict, b"Encoding")?
+    let Some(value) = resolver
+        .resolve_dict_key(dict, b"Encoding")?
         .filter(|value| !value.get().is_null())
-    else { return Ok(None) };
+    else {
+        return Ok(None);
+    };
     if let Some(name) = value.get().as_name() {
         if !name.eq_bytes(b"Identity-H") && !name.eq_bytes(b"Identity-V") {
             let warning = Warning {
@@ -715,7 +792,9 @@ fn cid_encoding(
     let maximum = budget.limits.max_tokens_per_object.min(MAX_CMAP_ENTRIES);
     // Match the conservative charge for pdf-text's private CMap vectors.
     budget.cmap_bytes = budget.cmap_bytes.saturating_add(
-        (bytes.len().min(100_000) as u64).saturating_mul(128).saturating_add(8192),
+        (bytes.len().min(100_000) as u64)
+            .saturating_mul(128)
+            .saturating_add(8192),
     );
     let (map, warning) = CMap::parse(bytes.bytes(), maximum);
     match warning {
@@ -738,12 +817,15 @@ struct Budget {
 
 impl Budget {
     fn cache_bytes(&self) -> u64 {
-        self.used.saturating_add(self.cmap_bytes)
+        self.used
+            .saturating_add(self.cmap_bytes)
             .saturating_add(core::mem::size_of::<SourceData>() as u64)
             .saturating_add(core::mem::size_of::<Program>() as u64)
             .saturating_add(128)
-            .saturating_add((self.warnings.capacity() as u64)
-                .saturating_mul(core::mem::size_of::<Warning>() as u64))
+            .saturating_add(
+                (self.warnings.capacity() as u64)
+                    .saturating_mul(core::mem::size_of::<Warning>() as u64),
+            )
     }
     fn charge(&mut self, bytes: usize) -> Result<(), DocError> {
         let requested = self.used.checked_add(bytes as u64).unwrap_or(u64::MAX);
@@ -768,10 +850,13 @@ impl Budget {
             return Err(failed());
         }
         let filters = resolver.resolve_dict_key(dict, b"Filter")?;
-        let unfiltered = filters.as_ref().map(|value| {
-            value.get().is_null()
-                || value.get().as_array().is_some_and(|array| array.is_empty())
-        }).unwrap_or(true);
+        let unfiltered = filters
+            .as_ref()
+            .map(|value| {
+                value.get().is_null()
+                    || value.get().as_array().is_some_and(|array| array.is_empty())
+            })
+            .unwrap_or(true);
         let bytes = if unfiltered {
             let range = object.stream_range().ok_or_else(failed)?;
             Bytes::range(object.buffer().clone(), range).ok_or_else(failed)?
@@ -788,14 +873,12 @@ impl Budget {
     }
 }
 
-fn length(
-    resolver: &mut Resolver<'_>,
-    dict: DictRef<'_>,
-    key: &[u8],
-) -> Result<usize, DocError> {
+fn length(resolver: &mut Resolver<'_>, dict: DictRef<'_>, key: &[u8]) -> Result<usize, DocError> {
     match resolver.resolve_dict_key(dict, key)? {
         None => Ok(0),
-        Some(value) => value.get().as_i64()
+        Some(value) => value
+            .get()
+            .as_i64()
             .and_then(|number| usize::try_from(number).ok())
             .ok_or_else(failed),
     }
@@ -835,5 +918,8 @@ fn scale_type1(path: &mut Path) -> Result<(), DocError> {
 }
 
 fn failed() -> DocError {
-    DocError::Malformed { offset: 0, what: "font_program_failed" }
+    DocError::Malformed {
+        offset: 0,
+        what: "font_program_failed",
+    }
 }

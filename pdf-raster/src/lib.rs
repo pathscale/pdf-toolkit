@@ -99,12 +99,7 @@ pub fn render_page(
                     mask.data_mut().fill(255);
                 }
                 if let Some(path) = path_to_skia(&path) {
-                    mask.intersect_path(
-                        &path,
-                        sk_fill_rule(rule),
-                        true,
-                        Transform::identity(),
-                    );
+                    mask.intersect_path(&path, sk_fill_rule(rule), true, Transform::identity());
                 }
                 clips.push(mask);
             }
@@ -113,10 +108,16 @@ pub fn render_page(
             }
             Item::Fill { path, rule, paint } => {
                 let texture = paint_texture(
-                    &pixmap, &paint, clips.len(), limits, &mut function_work, &mut texture_bytes,
+                    &pixmap,
+                    &paint,
+                    clips.len(),
+                    limits,
+                    &mut function_work,
+                    &mut texture_bytes,
                 )?;
                 let (Some(path), Some(paint)) = (
-                    path_to_skia(&path), paint_to_skia(&paint, blend, texture.as_ref()),
+                    path_to_skia(&path),
+                    paint_to_skia(&paint, blend, texture.as_ref()),
                 ) else {
                     continue;
                 };
@@ -135,7 +136,12 @@ pub fn render_page(
                 paint,
             } => {
                 let texture = paint_texture(
-                    &pixmap, &paint, clips.len(), limits, &mut function_work, &mut texture_bytes,
+                    &pixmap,
+                    &paint,
+                    clips.len(),
+                    limits,
+                    &mut function_work,
+                    &mut texture_bytes,
                 )?;
                 let (Some(path), Some(paint), Some(stroke)) = (
                     path_to_skia(&path),
@@ -144,13 +150,7 @@ pub fn render_page(
                 ) else {
                     continue;
                 };
-                pixmap.stroke_path(
-                    &path,
-                    &paint,
-                    &stroke,
-                    Transform::identity(),
-                    clips.last(),
-                );
+                pixmap.stroke_path(&path, &paint, &stroke, Transform::identity(), clips.last());
             }
             Item::Image {
                 image,
@@ -174,12 +174,19 @@ pub fn render_page(
                 stroke,
             } => {
                 let texture = paint_texture(
-                    &pixmap, &paint, clips.len(), limits, &mut function_work, &mut texture_bytes,
+                    &pixmap,
+                    &paint,
+                    clips.len(),
+                    limits,
+                    &mut function_work,
+                    &mut texture_bytes,
                 )?;
                 let Some(paint) = paint_to_skia(&paint, blend, texture.as_ref()) else {
                     continue;
                 };
-                let stroke = stroke.as_ref().and_then(|stroke| stroke_to_skia(stroke, None));
+                let stroke = stroke
+                    .as_ref()
+                    .and_then(|stroke| stroke_to_skia(stroke, None));
                 for glyph in glyphs {
                     let Some(path) = path_to_skia(&glyph.path) else {
                         continue;
@@ -269,7 +276,12 @@ fn encode_opaque_png(raster: &Raster) -> Option<Vec<u8>> {
             current.extend_from_slice(&pixel[..3]);
         }
         filtered.push(2);
-        filtered.extend(current.iter().zip(&previous).map(|(byte, above)| byte.wrapping_sub(*above)));
+        filtered.extend(
+            current
+                .iter()
+                .zip(&previous)
+                .map(|(byte, above)| byte.wrapping_sub(*above)),
+        );
         core::mem::swap(&mut previous, &mut current);
     }
     let compressed = miniz_oxide::deflate::compress_to_vec_zlib(&filtered, 1);
@@ -303,7 +315,11 @@ fn crc32(bytes: &[u8]) -> u32 {
             let mut value = index as u32;
             let mut bit = 0;
             while bit < 8 {
-                value = if value & 1 != 0 { 0xEDB8_8320 ^ (value >> 1) } else { value >> 1 };
+                value = if value & 1 != 0 {
+                    0xEDB8_8320 ^ (value >> 1)
+                } else {
+                    value >> 1
+                };
                 bit += 1;
             }
             table[index] = value;
@@ -375,7 +391,10 @@ fn path_to_skia(path: &PdfPath) -> Option<SkPath> {
                 builder.line_to(c(x), c(y));
             }
             PathEl::CubicTo(x1, y1, x2, y2, x3, y3) => {
-                if ![x1, y1, x2, y2, x3, y3].iter().all(|value| value.is_finite()) {
+                if ![x1, y1, x2, y2, x3, y3]
+                    .iter()
+                    .all(|value| value.is_finite())
+                {
                     return None;
                 }
                 builder.cubic_to(c(x1), c(y1), c(x2), c(y2), c(x3), c(y3));
@@ -466,23 +485,36 @@ fn paint_texture(
     work: &mut u64,
     total_bytes: &mut u64,
 ) -> Result<Option<Pixmap>, DocError> {
-    let PdfPaint::Function(function) = paint else { return Ok(None) };
-    let length = checked_rgba_len(destination.width(), destination.height(), limits.max_decoded_bytes)?;
-    let active = (length as u64).saturating_mul(2)
+    let PdfPaint::Function(function) = paint else {
+        return Ok(None);
+    };
+    let length = checked_rgba_len(
+        destination.width(),
+        destination.height(),
+        limits.max_decoded_bytes,
+    )?;
+    let active = (length as u64)
+        .saturating_mul(2)
         .saturating_add((length as u64 / 4).saturating_mul(clip_count as u64));
     let maximum = limits.max_decoded_bytes.min(isize::MAX as u64);
     if active > maximum {
         return Err(DocError::Refused(Refusal {
-            limit: LimitKind::DecodedBytes, requested: active, maximum,
+            limit: LimitKind::DecodedBytes,
+            requested: active,
+            maximum,
         }));
     }
-    *total_bytes = total_bytes.checked_add(length as u64).ok_or(DocError::Refused(Refusal {
-        limit: LimitKind::TotalDecodedBytes, requested: u64::MAX,
-        maximum: limits.max_total_decoded_bytes,
-    }))?;
+    *total_bytes = total_bytes
+        .checked_add(length as u64)
+        .ok_or(DocError::Refused(Refusal {
+            limit: LimitKind::TotalDecodedBytes,
+            requested: u64::MAX,
+            maximum: limits.max_total_decoded_bytes,
+        }))?;
     if *total_bytes > limits.max_total_decoded_bytes {
         return Err(DocError::Refused(Refusal {
-            limit: LimitKind::TotalDecodedBytes, requested: *total_bytes,
+            limit: LimitKind::TotalDecodedBytes,
+            requested: *total_bytes,
             maximum: limits.max_total_decoded_bytes,
         }));
     }
@@ -492,11 +524,15 @@ fn paint_texture(
     let width = destination.width() as usize;
     for (index, pixel) in texture.data_mut().chunks_exact_mut(4).enumerate() {
         *work = work.checked_add(1).ok_or(DocError::Refused(Refusal {
-            limit: LimitKind::ContentOps, requested: u64::MAX, maximum: limits.max_content_ops,
+            limit: LimitKind::ContentOps,
+            requested: u64::MAX,
+            maximum: limits.max_content_ops,
         }))?;
         if *work > limits.max_content_ops {
             return Err(DocError::Refused(Refusal {
-                limit: LimitKind::ContentOps, requested: *work, maximum: limits.max_content_ops,
+                limit: LimitKind::ContentOps,
+                requested: *work,
+                maximum: limits.max_content_ops,
             }));
         }
         let x = (index % width) as f32 + 0.5;
@@ -518,8 +554,11 @@ fn paint_to_skia<'a>(
     let shader = match paint {
         PdfPaint::Solid(rgba) => Shader::SolidColor(color_to_skia(*rgba)?),
         PdfPaint::Function(_) => tiny_skia::Pattern::new(
-            texture?.as_ref(), SpreadMode::Pad, FilterQuality::Nearest,
-            1.0, Transform::identity(),
+            texture?.as_ref(),
+            SpreadMode::Pad,
+            FilterQuality::Nearest,
+            1.0,
+            Transform::identity(),
         ),
         PdfPaint::Axial {
             from,
@@ -597,7 +636,10 @@ fn dash_to_skia(dash: &pdf_render::display::Dash) -> Option<StrokeDash> {
     StrokeDash::new(values, dash.phase)
 }
 
-fn stroke_to_skia(stroke: &PdfStroke, dash: Option<&pdf_render::display::Dash>) -> Option<SkStroke> {
+fn stroke_to_skia(
+    stroke: &PdfStroke,
+    dash: Option<&pdf_render::display::Dash>,
+) -> Option<SkStroke> {
     if !stroke.width.is_finite() || stroke.width < 0.0 {
         return None;
     }
@@ -685,14 +727,8 @@ fn image_transform(
     }
     let width = width as f32;
     let height = height as f32;
-    let transform = Transform::from_row(
-        a / width,
-        -c / height,
-        b / width,
-        -d / height,
-        e + c,
-        f + d,
-    );
+    let transform =
+        Transform::from_row(a / width, -c / height, b / width, -d / height, e + c, f + d);
     transform.invert().map(|_| transform)
 }
 
@@ -766,8 +802,7 @@ fn decode_jpeg(
     use zune_jpeg::zune_core::colorspace::ColorSpace as JpegColorSpace;
     use zune_jpeg::zune_core::options::DecoderOptions;
 
-    let options =
-        DecoderOptions::default().jpeg_set_out_colorspace(JpegColorSpace::RGBA);
+    let options = DecoderOptions::default().jpeg_set_out_colorspace(JpegColorSpace::RGBA);
     let mut decoder = zune_jpeg::JpegDecoder::new_with_options(ZCursor::new(data), options);
     if decoder.decode_headers().is_err() {
         return Ok(None);
@@ -836,12 +871,8 @@ fn apply_external_soft_mask(
     for (index, pixel) in rgba.chunks_exact_mut(4).enumerate() {
         let x = index % image_width;
         let y = index / image_width;
-        let source_x = (x as u64)
-            .saturating_mul(u64::from(mask.width))
-            / u64::from(width);
-        let source_y = (y as u64)
-            .saturating_mul(u64::from(mask.height))
-            / u64::from(height);
+        let source_x = (x as u64).saturating_mul(u64::from(mask.width)) / u64::from(width);
+        let source_y = (y as u64).saturating_mul(u64::from(mask.height)) / u64::from(height);
         let offset = source_y
             .checked_mul(u64::from(mask.width))
             .and_then(|row| row.checked_add(source_x))
@@ -850,9 +881,7 @@ fn apply_external_soft_mask(
         let soft = offset
             .and_then(|offset| mask_rgba.get(offset..offset.saturating_add(4)))
             .and_then(|pixel| Some((pixel.first().copied()?, pixel.get(3).copied()?)))
-            .map(|(gray, alpha)| {
-                u16::from(gray).saturating_mul(u16::from(alpha)) / 255
-            })
+            .map(|(gray, alpha)| u16::from(gray).saturating_mul(u16::from(alpha)) / 255)
             .unwrap_or(0);
         if let Some(alpha) = pixel.get_mut(3) {
             *alpha = (u16::from(*alpha).saturating_mul(soft) / 255) as u8;

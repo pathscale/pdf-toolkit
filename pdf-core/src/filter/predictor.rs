@@ -97,12 +97,7 @@ fn decode_tiff(
                 for pair in pairs.by_ref() {
                     if let [high, low] = pair {
                         let encoded = (u16::from(*high) << 8) | u16::from(*low);
-                        let recovered = add_component(
-                            encoded,
-                            previous,
-                            &mut component,
-                            u16::MAX,
-                        );
+                        let recovered = add_component(encoded, previous, &mut component, u16::MAX);
                         let [new_high, new_low] = recovered.to_be_bytes();
                         *high = new_high;
                         *low = new_low;
@@ -112,12 +107,8 @@ fn decode_tiff(
                 // A short final sample has no low byte. Recover its available
                 // high byte with a zero low byte and retain the truncation flag.
                 if let Some(high) = pairs.into_remainder().first_mut() {
-                    let recovered = add_component(
-                        u16::from(*high) << 8,
-                        previous,
-                        &mut component,
-                        u16::MAX,
-                    );
+                    let recovered =
+                        add_component(u16::from(*high) << 8, previous, &mut component, u16::MAX);
                     *high = (recovered >> 8) as u8;
                 }
             }
@@ -136,12 +127,7 @@ fn decode_tiff(
                             .saturating_sub(bits)
                             .saturating_sub(slot.saturating_mul(bits));
                         let encoded = u16::from(*byte >> shift) & mask;
-                        let recovered = add_component(
-                            encoded,
-                            previous,
-                            &mut component,
-                            mask,
-                        );
+                        let recovered = add_component(encoded, previous, &mut component, mask);
                         let byte_mask = (mask as u8) << shift;
                         *byte = (*byte & !byte_mask) | ((recovered as u8) << shift);
                         samples_left = samples_left.saturating_sub(1);
@@ -154,12 +140,7 @@ fn decode_tiff(
     finish(bytes, truncated, filter, offset)
 }
 
-fn add_component(
-    encoded: u16,
-    previous: &mut [u16],
-    component: &mut usize,
-    mask: u16,
-) -> u16 {
+fn add_component(encoded: u16, previous: &mut [u16], component: &mut usize, mask: u16) -> u16 {
     let recovered = if let Some(left) = previous.get_mut(*component) {
         let recovered = encoded.wrapping_add(*left) & mask;
         *left = recovered;
@@ -210,10 +191,7 @@ fn decode_png(
             fault_offset = read;
             break;
         };
-        let Some(next_written) = written
-            .checked_add(count)
-            .filter(|&end| end <= input_len)
-        else {
+        let Some(next_written) = written.checked_add(count).filter(|&end| end <= input_len) else {
             truncated = true;
             fault_offset = read;
             break;
