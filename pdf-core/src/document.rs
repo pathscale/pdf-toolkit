@@ -155,6 +155,9 @@ impl Document {
                         .and_then(|value| value.get().as_i64())
                         .and_then(|number| i32::try_from(number).ok());
                 }
+                if password.is_some_and(|password| !password.is_empty()) {
+                    return Err(DocError::Encrypted);
+                }
                 Crypt::open(&mut resolver, &value)
             })();
             (result, resolver.take_warnings())
@@ -167,8 +170,13 @@ impl Document {
             return self.verify_private_objects();
         }
         match result {
-            Ok(crypt) => self.crypt = crypt.map(Arc::new),
-            Err(error @ DocError::Refused(_)) => return Err(error),
+            Ok(Some(crypt)) => self.crypt = Some(Arc::new(crypt)),
+            Ok(None) => self.warnings.push(Warning {
+                offset: None,
+                object: value.get().as_ref(),
+                what: "crypt_auth_failed",
+            }),
+            Err(error @ (DocError::Encrypted | DocError::Refused(_))) => return Err(error),
             Err(error @ DocError::Unsupported { .. }) => return Err(error),
             Err(_) => self.warnings.push(Warning {
                 offset: None,
