@@ -57,7 +57,7 @@ pub(crate) fn page_links_with_pages(
     Context::new(resolver, page_ids, Some(pages), Some(page_lookup)).page_links(page, display)
 }
 
-pub(crate) fn outline_with_pages(
+pub fn outline_with_pages(
     resolver: &mut Resolver<'_>,
     page_ids: &[ObjectRef],
     pages: &[Page],
