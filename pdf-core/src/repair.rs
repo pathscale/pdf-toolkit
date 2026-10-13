@@ -5,7 +5,9 @@ use alloc::vec::Vec;
 use crate::document::{Document, Resolver};
 use crate::error::{malformed, DocError, Warning};
 use crate::limits::{check, LimitKind, Limits};
-use crate::object::{keyword_at, parse_indirect_repair, parse_value, whitespace, Object};
+use crate::object::{
+    keyword_at, parse_indirect_repair, parse_value_with_scratch, whitespace, Object, ParseScratch,
+};
 use crate::objstm::ObjectStream;
 use crate::source::PdfSource;
 use crate::work::ObjectRef;
@@ -261,6 +263,7 @@ fn scan(source: &PdfSource, limits: &Limits) -> Result<Scan, DocError> {
     let mut catalogs = Vec::new();
     let mut object_streams = Vec::new();
     let mut warnings = Vec::new();
+    let mut scratch = ParseScratch::default();
     let mut header_count = 0u64;
     let mut offset = 0usize;
 
@@ -282,7 +285,8 @@ fn scan(source: &PdfSource, limits: &Limits) -> Result<Scan, DocError> {
         }
         if keyword_at(bytes, offset, b"trailer") {
             let start = offset.saturating_add(7);
-            match parse_value(&shared, start..bytes.len(), None, limits) {
+            match parse_value_with_scratch(&shared, start..bytes.len(), None, limits, &mut scratch)
+            {
                 Ok(object) if object.dict().is_some() => {
                     let kind = if object
                         .dict()
@@ -327,7 +331,7 @@ fn scan(source: &PdfSource, limits: &Limits) -> Result<Scan, DocError> {
             continue;
         }
         insert_in_use(&mut entries, id, offset, limits)?;
-        match parse_indirect_repair(&shared, offset, id, limits) {
+        match parse_indirect_repair(&shared, offset, id, limits, &mut scratch) {
             Ok(object) => {
                 if has_type(&object, b"XRef")
                     || (object.is_stream()
@@ -522,6 +526,7 @@ fn index_object_streams(
         return Ok((Vec::new(), None));
     }
     let mut resolver = probe.resolver();
+    let mut scratch = ParseScratch::default();
     let mut first_error = None;
     let mut decoded_total = 0u64;
     for (offset, id) in candidates {
@@ -567,7 +572,7 @@ fn index_object_streams(
                 }
                 let member_id = ObjectRef::new(number, 0);
                 // parse_repair has already validated this member's own range.
-                let member = stream.member(index, member_id, limits)?;
+                let member = stream.member(index, member_id, limits, &mut scratch)?;
                 insert_compressed(
                     entries,
                     number,
@@ -641,7 +646,8 @@ fn insert_compressed(
 
 fn empty_trailer(limits: &Limits) -> Result<Object, DocError> {
     let bytes = Arc::<[u8]>::from(&b"<<>>"[..]);
-    parse_value(&bytes, 0..bytes.len(), None, limits)
+    let mut scratch = ParseScratch::default();
+    parse_value_with_scratch(&bytes, 0..bytes.len(), None, limits, &mut scratch)
 }
 
 fn trailer_with_root(
@@ -673,7 +679,8 @@ fn trailer_with_root(
     )?;
     bytes.extend_from_slice(b" >>");
     let bytes = Arc::<[u8]>::from(bytes);
-    parse_value(&bytes, 0..bytes.len(), None, limits)
+    let mut scratch = ParseScratch::default();
+    parse_value_with_scratch(&bytes, 0..bytes.len(), None, limits, &mut scratch)
 }
 
 pub(crate) fn is_hard_error(error: &DocError) -> bool {

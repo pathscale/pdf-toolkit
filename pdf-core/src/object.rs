@@ -30,8 +30,8 @@ enum Kind {
     Name,
     String,
     DecryptedString(Arc<[u8]>),
-    Array(Vec<usize>),
-    Dict(Vec<(Range<usize>, usize)>),
+    Array { start: u32, len: u32 },
+    Dict { start: u32, len: u32 },
     Ref(ObjectRef),
 }
 
@@ -45,6 +45,8 @@ struct Node {
 struct ObjectData {
     buf: Arc<[u8]>,
     nodes: Vec<Node>,
+    array_items: Vec<usize>,
+    dict_entries: Vec<(Range<usize>, usize)>,
     root: usize,
     id: Option<ObjectRef>,
     stream: Option<Range<usize>>,
@@ -54,6 +56,41 @@ struct ObjectData {
     recovered: bool,
     syntax_recovered: bool,
     strings_plain: bool,
+}
+
+struct ParsedData {
+    nodes: Vec<Node>,
+    array_items: Vec<usize>,
+    dict_entries: Vec<(Range<usize>, usize)>,
+}
+
+#[derive(Default)]
+pub(crate) struct ParseScratch {
+    nodes: Vec<Node>,
+    array_items: Vec<usize>,
+    dict_entries: Vec<(Range<usize>, usize)>,
+    array_stack: Vec<usize>,
+    dict_stack: Vec<(Range<usize>, usize)>,
+}
+
+impl ParseScratch {
+    fn clear(&mut self) {
+        self.nodes.clear();
+        self.array_items.clear();
+        self.dict_entries.clear();
+        self.array_stack.clear();
+        self.dict_stack.clear();
+    }
+
+    fn clone_data(&mut self) -> ParsedData {
+        let data = ParsedData {
+            nodes: core::mem::take(&mut self.nodes),
+            array_items: core::mem::take(&mut self.array_items),
+            dict_entries: core::mem::take(&mut self.dict_entries),
+        };
+        self.clear();
+        data
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -306,8 +343,8 @@ impl<'o> ValueRef<'o> {
             Some(Kind::Real(_)) => ValueKind::Real,
             Some(Kind::Name) => ValueKind::Name,
             Some(Kind::String | Kind::DecryptedString(_)) => ValueKind::String,
-            Some(Kind::Array(_)) => ValueKind::Array,
-            Some(Kind::Dict(_)) => ValueKind::Dict,
+            Some(Kind::Array { .. }) => ValueKind::Array,
+            Some(Kind::Dict { .. }) => ValueKind::Dict,
             Some(Kind::Ref(_)) => ValueKind::Ref,
             _ => ValueKind::Null,
         }
@@ -380,10 +417,19 @@ impl<'o> ValueRef<'o> {
 
 impl<'o> ArrayRef<'o> {
     fn items(&self) -> &'o [usize] {
-        match self.0.node().map(|node| &node.kind) {
-            Some(Kind::Array(items)) => items,
-            _ => &[],
-        }
+        let Some(Kind::Array { start, len }) = self.0.node().map(|node| &node.kind) else {
+            return &[];
+        };
+        let Ok(start) = usize::try_from(*start) else {
+            return &[];
+        };
+        let Ok(len) = usize::try_from(*len) else {
+            return &[];
+        };
+        let Some(end) = start.checked_add(len) else {
+            return &[];
+        };
+        self.0.object.0.array_items.get(start..end).unwrap_or(&[])
     }
     pub fn len(&self) -> usize {
         self.items().len()
@@ -408,10 +454,19 @@ impl<'o> ArrayRef<'o> {
 
 impl<'o> DictRef<'o> {
     fn entries(&self) -> &'o [(Range<usize>, usize)] {
-        match self.0.node().map(|node| &node.kind) {
-            Some(Kind::Dict(entries)) => entries,
-            _ => &[],
-        }
+        let Some(Kind::Dict { start, len }) = self.0.node().map(|node| &node.kind) else {
+            return &[];
+        };
+        let Ok(start) = usize::try_from(*start) else {
+            return &[];
+        };
+        let Ok(len) = usize::try_from(*len) else {
+            return &[];
+        };
+        let Some(end) = start.checked_add(len) else {
+            return &[];
+        };
+        self.0.object.0.dict_entries.get(start..end).unwrap_or(&[])
     }
     pub fn len(&self) -> usize {
         self.entries().len()
@@ -594,11 +649,36 @@ pub fn parse_value(
     id: Option<ObjectRef>,
     limits: &Limits,
 ) -> Result<Object, DocError> {
+    let mut scratch = ParseScratch::default();
+    parse_value_with_scratch(buf, range, id, limits, &mut scratch)
+}
+
+pub fn parse_indirect(
+    buf: &Arc<[u8]>,
+    offset: usize,
+    expected: ObjectRef,
+    limits: &Limits,
+) -> Result<Object, DocError> {
+    let mut scratch = ParseScratch::default();
+    parse_indirect_with_scratch(buf, offset, expected, limits, &mut scratch)
+}
+
+pub(crate) fn parse_value_with_scratch(
+    buf: &Arc<[u8]>,
+    range: Range<usize>,
+    id: Option<ObjectRef>,
+    limits: &Limits,
+    scratch: &mut ParseScratch,
+) -> Result<Object, DocError> {
+    scratch.clear();
     let mut cursor = Cursor::at(buf, range, limits)?;
-    let (nodes, root) = graph(&mut cursor, limits)?;
+    let root = graph(&mut cursor, limits, scratch)?;
+    let parsed = scratch.clone_data();
     Ok(Object(Arc::new(ObjectData {
         buf: buf.clone(),
-        nodes,
+        nodes: parsed.nodes,
+        array_items: parsed.array_items,
+        dict_entries: parsed.dict_entries,
         root,
         id,
         stream: None,
@@ -611,13 +691,14 @@ pub fn parse_value(
     })))
 }
 
-pub fn parse_indirect(
+pub(crate) fn parse_indirect_with_scratch(
     buf: &Arc<[u8]>,
     offset: usize,
     expected: ObjectRef,
     limits: &Limits,
+    scratch: &mut ParseScratch,
 ) -> Result<Object, DocError> {
-    let mut object = parse_indirect_pending(buf, offset, expected, limits)?;
+    let mut object = parse_indirect_pending(buf, offset, expected, limits, scratch)?;
     if object.is_stream() && object.stream_raw().is_none() {
         object.finish_stream(None, limits)?;
     }
@@ -629,8 +710,9 @@ pub(crate) fn parse_indirect_repair(
     offset: usize,
     expected: ObjectRef,
     limits: &Limits,
+    scratch: &mut ParseScratch,
 ) -> Result<Object, DocError> {
-    let mut object = parse_indirect_pending_repair(buf, offset, expected, limits)?;
+    let mut object = parse_indirect_pending_repair(buf, offset, expected, limits, scratch)?;
     if object.is_stream() && object.stream_raw().is_none() {
         object.finish_stream_repair(None, limits)?;
     }
@@ -642,8 +724,9 @@ pub(crate) fn parse_indirect_pending_repair(
     offset: usize,
     expected: ObjectRef,
     limits: &Limits,
+    scratch: &mut ParseScratch,
 ) -> Result<Object, DocError> {
-    parse_indirect_pending_with_mode(buf, offset, expected, limits, true)
+    parse_indirect_pending_with_mode(buf, offset, expected, limits, true, scratch)
 }
 
 pub(crate) fn parse_indirect_pending(
@@ -651,8 +734,9 @@ pub(crate) fn parse_indirect_pending(
     offset: usize,
     expected: ObjectRef,
     limits: &Limits,
+    scratch: &mut ParseScratch,
 ) -> Result<Object, DocError> {
-    parse_indirect_pending_with_mode(buf, offset, expected, limits, false)
+    parse_indirect_pending_with_mode(buf, offset, expected, limits, false, scratch)
 }
 
 fn parse_indirect_pending_with_mode(
@@ -661,7 +745,9 @@ fn parse_indirect_pending_with_mode(
     expected: ObjectRef,
     limits: &Limits,
     repair: bool,
+    scratch: &mut ParseScratch,
 ) -> Result<Object, DocError> {
+    scratch.clear();
     let mut cursor = Cursor::at(buf, offset..buf.len(), limits)?;
     cursor.repair = repair;
     let first = cursor.required()?;
@@ -678,7 +764,7 @@ fn parse_indirect_pending_with_mode(
     if number != expected.number() {
         return Err(malformed(offset, "object number"));
     }
-    let (nodes, root) = graph(&mut cursor, limits)?;
+    let root = graph(&mut cursor, limits, scratch)?;
     let end = match cursor.required() {
         Ok(end) => Some(end),
         Err(error) if repair && !crate::repair::is_hard_error(&error) => None,
@@ -687,7 +773,10 @@ fn parse_indirect_pending_with_mode(
     let mut stream_start = None;
     let mut repaired_tail = None;
     if end.as_ref().is_some_and(|end| end.bytes() == b"stream") {
-        if !matches!(nodes.get(root).map(|node| &node.kind), Some(Kind::Dict(_))) {
+        if !matches!(
+            scratch.nodes.get(root).map(|node| &node.kind),
+            Some(Kind::Dict { .. })
+        ) {
             return Err(malformed(cursor.position(), "stream dictionary"));
         }
         let mut start = cursor.position();
@@ -711,7 +800,8 @@ fn parse_indirect_pending_with_mode(
         if !repair {
             return Err(malformed(cursor.position(), "endobj"));
         }
-        let start = nodes
+        let start = scratch
+            .nodes
             .get(root)
             .map(|node| node.span.end)
             .ok_or_else(|| malformed(offset, "object root"))?;
@@ -721,9 +811,12 @@ fn parse_indirect_pending_with_mode(
         .or(repaired_tail)
         .unwrap_or(cursor.position())
         .saturating_sub(offset) as u64;
+    let parsed = scratch.clone_data();
     let mut object = Object(Arc::new(ObjectData {
         buf: buf.clone(),
-        nodes,
+        nodes: parsed.nodes,
+        array_items: parsed.array_items,
+        dict_entries: parsed.dict_entries,
         root,
         id: Some(ObjectRef::new(number, generation)),
         stream: None,
@@ -762,23 +855,26 @@ fn parse_indirect_pending_with_mode(
 enum Frame {
     Array {
         start: usize,
-        items: Vec<usize>,
+        items_at: usize,
     },
     Dict {
         start: usize,
-        entries: Vec<(Range<usize>, usize)>,
+        entries_at: usize,
         key: Option<Range<usize>>,
     },
 }
 
-fn graph(cursor: &mut Cursor<'_>, limits: &Limits) -> Result<(Vec<Node>, usize), DocError> {
-    let mut nodes = Vec::new();
+fn graph(
+    cursor: &mut Cursor<'_>,
+    limits: &Limits,
+    scratch: &mut ParseScratch,
+) -> Result<usize, DocError> {
     let mut frames = Vec::new();
     let mut root = None;
     loop {
         if frames.is_empty() {
             if let Some(root) = root {
-                return Ok((nodes, root));
+                return Ok(root);
             }
         }
         let token = cursor.required()?;
@@ -814,12 +910,12 @@ fn graph(cursor: &mut Cursor<'_>, limits: &Limits) -> Result<(Vec<Node>, usize),
                 if token.kind() == TokenKind::ArrayStart {
                     frames.push(Frame::Array {
                         start: span.start,
-                        items: Vec::new(),
+                        items_at: scratch.array_stack.len(),
                     });
                 } else {
                     frames.push(Frame::Dict {
                         start: span.start,
-                        entries: Vec::new(),
+                        entries_at: scratch.dict_stack.len(),
                         key: None,
                     });
                 }
@@ -830,27 +926,29 @@ fn graph(cursor: &mut Cursor<'_>, limits: &Limits) -> Result<(Vec<Node>, usize),
                     .pop()
                     .ok_or_else(|| malformed(span.start, "container end"))?;
                 let (start, kind) = match frame {
-                    Frame::Array { start, items } if token.kind() == TokenKind::ArrayEnd => {
-                        (start, Kind::Array(items))
+                    Frame::Array { start, items_at } if token.kind() == TokenKind::ArrayEnd => {
+                        (start, seal_array(scratch, items_at, limits, span.start)?)
                     }
                     Frame::Dict {
                         start,
-                        entries,
+                        entries_at,
                         key: None,
-                    } if token.kind() == TokenKind::DictionaryEnd => (start, Kind::Dict(entries)),
+                    } if token.kind() == TokenKind::DictionaryEnd => {
+                        (start, seal_dict(scratch, entries_at, limits, span.start)?)
+                    }
                     Frame::Dict {
                         start,
-                        mut entries,
+                        entries_at,
                         key: Some(key),
                     } if cursor.repair && token.kind() == TokenKind::DictionaryEnd => {
-                        let index = nodes.len();
-                        nodes.push(Node {
+                        let index = scratch.nodes.len();
+                        scratch.nodes.push(Node {
                             span: span.start..span.start,
                             kind: Kind::Null,
                         });
-                        entries.push((key, index));
+                        scratch.dict_stack.push((key, index));
                         cursor.recovered = true;
-                        (start, Kind::Dict(entries))
+                        (start, seal_dict(scratch, entries_at, limits, span.start)?)
                     }
                     _ => return Err(malformed(span.start, "container end")),
                 };
@@ -859,7 +957,7 @@ fn graph(cursor: &mut Cursor<'_>, limits: &Limits) -> Result<(Vec<Node>, usize),
                         span: start..span.end,
                         kind,
                     },
-                    &mut nodes,
+                    scratch,
                     &mut frames,
                     &mut root,
                 )?;
@@ -889,7 +987,7 @@ fn graph(cursor: &mut Cursor<'_>, limits: &Limits) -> Result<(Vec<Node>, usize),
                             span: span.start..end,
                             kind: Kind::Ref(ObjectRef::new(number, generation)),
                         },
-                        &mut nodes,
+                        scratch,
                         &mut frames,
                         &mut root,
                     )?;
@@ -932,7 +1030,7 @@ fn graph(cursor: &mut Cursor<'_>, limits: &Limits) -> Result<(Vec<Node>, usize),
                                         span: span.start..end,
                                         kind: Kind::Ref(id),
                                     },
-                                    &mut nodes,
+                                    scratch,
                                     &mut frames,
                                     &mut root,
                                 )?;
@@ -957,8 +1055,65 @@ fn graph(cursor: &mut Cursor<'_>, limits: &Limits) -> Result<(Vec<Node>, usize),
                 _ => return Err(malformed(span.start, "value")),
             },
         };
-        attach(Node { span, kind }, &mut nodes, &mut frames, &mut root)?;
+        attach(Node { span, kind }, scratch, &mut frames, &mut root)?;
     }
+}
+
+fn container_indices(start: usize, len: usize, limits: &Limits) -> Result<(u32, u32), DocError> {
+    let maximum = u64::from(limits.max_tokens_per_object);
+    let total = u64::try_from(start.saturating_add(len)).unwrap_or(u64::MAX);
+    check(LimitKind::Tokens, total, maximum)?;
+    let requested_start = u64::try_from(start).unwrap_or(u64::MAX);
+    let requested_len = u64::try_from(len).unwrap_or(u64::MAX);
+    let start = u32::try_from(start).map_err(|_| {
+        DocError::Refused(Refusal {
+            limit: LimitKind::Tokens,
+            requested: requested_start,
+            maximum,
+        })
+    })?;
+    let len = u32::try_from(len).map_err(|_| {
+        DocError::Refused(Refusal {
+            limit: LimitKind::Tokens,
+            requested: requested_len,
+            maximum,
+        })
+    })?;
+    Ok((start, len))
+}
+
+fn seal_array(
+    scratch: &mut ParseScratch,
+    items_at: usize,
+    limits: &Limits,
+    offset: usize,
+) -> Result<Kind, DocError> {
+    let end = scratch.array_stack.len();
+    let items = scratch
+        .array_stack
+        .get(items_at..end)
+        .ok_or_else(|| malformed(offset, "array items"))?;
+    let (start, len) = container_indices(scratch.array_items.len(), items.len(), limits)?;
+    scratch.array_items.extend_from_slice(items);
+    scratch.array_stack.truncate(items_at);
+    Ok(Kind::Array { start, len })
+}
+
+fn seal_dict(
+    scratch: &mut ParseScratch,
+    entries_at: usize,
+    limits: &Limits,
+    offset: usize,
+) -> Result<Kind, DocError> {
+    let end = scratch.dict_stack.len();
+    let entries = scratch
+        .dict_stack
+        .get(entries_at..end)
+        .ok_or_else(|| malformed(offset, "dictionary entries"))?;
+    let (start, len) = container_indices(scratch.dict_entries.len(), entries.len(), limits)?;
+    scratch.dict_entries.extend_from_slice(entries);
+    scratch.dict_stack.truncate(entries_at);
+    Ok(Kind::Dict { start, len })
 }
 
 fn object_marker(bytes: &[u8]) -> bool {
@@ -1012,21 +1167,20 @@ fn skip_container(
 
 fn attach(
     node: Node,
-    nodes: &mut Vec<Node>,
+    scratch: &mut ParseScratch,
     frames: &mut [Frame],
     root: &mut Option<usize>,
 ) -> Result<(), DocError> {
     let offset = node.span.start;
-    let index = nodes.len();
-    nodes.push(node);
+    let index = scratch.nodes.len();
+    scratch.nodes.push(node);
     match frames.last_mut() {
-        Some(Frame::Array { items, .. }) => items.push(index),
-        Some(Frame::Dict { entries, key, .. }) => {
-            entries.push((
-                key.take()
-                    .ok_or_else(|| malformed(offset, "dictionary key"))?,
-                index,
-            ));
+        Some(Frame::Array { .. }) => scratch.array_stack.push(index),
+        Some(Frame::Dict { key, .. }) => {
+            let key = key
+                .take()
+                .ok_or_else(|| malformed(offset, "dictionary key"))?;
+            scratch.dict_stack.push((key, index));
         }
         None => {
             if root.replace(index).is_some() {

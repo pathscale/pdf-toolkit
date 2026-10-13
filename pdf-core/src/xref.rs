@@ -6,7 +6,10 @@ use crate::document::filter_steps;
 use crate::error::{malformed, DocError, Warning};
 use crate::lex::{Lexer, LexerLimits, Token};
 use crate::limits::{check, LimitKind, Limits};
-use crate::object::{keyword_at, parse_indirect, parse_value, unsigned, DictRef, Object};
+use crate::object::{
+    keyword_at, parse_indirect_with_scratch, parse_value_with_scratch, unsigned, DictRef, Object,
+    ParseScratch,
+};
 use crate::source::PdfSource;
 use crate::work::ObjectRef;
 
@@ -329,13 +332,14 @@ fn table(
         return Err(malformed(offset, "xref"));
     }
     let mut pairs = Vec::new();
+    let mut scratch = ParseScratch::default();
     let mut first_subsection = true;
     let trailer;
     loop {
         let first = required(&mut lexer, offset)?;
         if first.bytes() == b"trailer" {
             let start = offset.saturating_add(lexer.offset());
-            trailer = parse_value(buf, start..buf.len(), None, limits)?;
+            trailer = parse_value_with_scratch(buf, start..buf.len(), None, limits, &mut scratch)?;
             break;
         }
         let start = unsigned(first.bytes()).ok_or_else(|| malformed(offset, "xref subsection"))?;
@@ -426,7 +430,8 @@ fn stream(
     warnings: &mut Vec<Warning>,
 ) -> Result<Section, DocError> {
     let id = header_at(buf, offset).ok_or_else(|| malformed(offset, "xref stream header"))?;
-    let trailer = parse_indirect(buf, offset, id, limits)?;
+    let mut scratch = ParseScratch::default();
+    let trailer = parse_indirect_with_scratch(buf, offset, id, limits, &mut scratch)?;
     let dict = trailer
         .dict()
         .ok_or_else(|| malformed(offset, "xref stream dictionary"))?;

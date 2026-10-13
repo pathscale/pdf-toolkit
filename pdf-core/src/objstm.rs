@@ -5,7 +5,7 @@ use core::ops::Range;
 
 use crate::error::{malformed, DocError};
 use crate::limits::{check, LimitKind, Limits};
-use crate::object::{parse_value, unsigned, Cursor, Object};
+use crate::object::{parse_value_with_scratch, unsigned, Cursor, Object, ParseScratch};
 use crate::work::ObjectRef;
 
 #[derive(Clone)]
@@ -179,6 +179,7 @@ impl ObjectStream {
         let mut recovered =
             strict.is_err() || declared_first != Some(first) || pairs.len() as u64 != n;
         let mut sequential = Some(first);
+        let mut scratch = ParseScratch::default();
         let mut usable = 0usize;
         for (number, declared) in pairs {
             let index =
@@ -191,7 +192,7 @@ impl ObjectStream {
             let mut member = None;
             let mut from_sequential = false;
             if let Some(start) = sequential {
-                match parse_value(&buf, start..buf.len(), id, limits) {
+                match parse_value_with_scratch(&buf, start..buf.len(), id, limits, &mut scratch) {
                     Ok(value) => {
                         from_sequential = true;
                         member = Some(value);
@@ -202,7 +203,8 @@ impl ObjectStream {
             }
             if member.is_none() {
                 if let Some(start) = declared {
-                    match parse_value(&buf, start..buf.len(), id, limits) {
+                    match parse_value_with_scratch(&buf, start..buf.len(), id, limits, &mut scratch)
+                    {
                         Ok(value) => member = Some(value),
                         Err(error) if crate::repair::is_hard_error(&error) => return Err(error),
                         Err(_) => recovered = true,
@@ -239,7 +241,7 @@ impl ObjectStream {
                 recovered = true;
             }
             if let Ok(stream) = &strict {
-                match stream.member(index, id, limits) {
+                match stream.member(index, id, limits, &mut scratch) {
                     Ok(value) if value.root().span() == range => {}
                     Ok(_) => recovered = true,
                     Err(error) if crate::repair::is_hard_error(&error) => return Err(error),
@@ -281,6 +283,7 @@ impl ObjectStream {
         index: u32,
         expected: ObjectRef,
         limits: &Limits,
+        scratch: &mut ParseScratch,
     ) -> Result<Object, DocError> {
         let (number, range) = self
             .0
@@ -290,11 +293,12 @@ impl ObjectStream {
         if *number != expected.number() {
             return Err(malformed(range.start, "object stream number"));
         }
-        let object = parse_value(
+        let object = parse_value_with_scratch(
             &self.0.buf,
             range.clone(),
             Some(ObjectRef::new(*number, 0)),
             limits,
+            scratch,
         )?;
         let end = object.root().span().end;
         let mut tail = Cursor::at(&self.0.buf, end..range.end, limits)?;

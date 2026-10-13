@@ -6,7 +6,8 @@ use crate::error::{malformed, DocError, Warning};
 use crate::filter::{DecodeParams, Decoded, FilterKind, FilterStep};
 use crate::limits::{check, LimitKind, Limits, Refusal};
 use crate::object::{
-    parse_indirect_pending, parse_indirect_pending_repair, DictRef, Object, PdfStr, Value, ValueRef,
+    parse_indirect_pending, parse_indirect_pending_repair, DictRef, Object, ParseScratch, PdfStr,
+    Value, ValueRef,
 };
 use crate::objstm::ObjectStream;
 use crate::source::PdfSource;
@@ -327,6 +328,10 @@ impl Document {
             cache_bytes: 0,
             warnings: Vec::new(),
             nesting: 0,
+            parse_scratch: ParseScratch::default(),
+            tasks: Vec::new(),
+            objects: Vec::new(),
+            active: Vec::new(),
         }
     }
 }
@@ -345,6 +350,10 @@ pub struct Resolver<'d> {
     /// Nested `get` calls in flight: an indirect /Length or an object stream's
     /// indirect filter parameters re-enter `get`; this bounds that recursion.
     nesting: u32,
+    parse_scratch: ParseScratch,
+    tasks: Vec<GetTask>,
+    objects: Vec<Object>,
+    active: Vec<u32>,
 }
 
 enum GetTask {
@@ -372,9 +381,36 @@ impl<'d> Resolver<'d> {
     }
 
     fn get_with_tasks(&mut self, id: ObjectRef) -> Result<Object, DocError> {
-        let mut tasks = Vec::new();
-        let mut objects = Vec::new();
-        let mut active = Vec::new();
+        if self.nesting == 1 {
+            let mut tasks = core::mem::take(&mut self.tasks);
+            let mut objects = core::mem::take(&mut self.objects);
+            let mut active = core::mem::take(&mut self.active);
+            tasks.clear();
+            objects.clear();
+            active.clear();
+            let result = self.get_with_buffers(id, &mut tasks, &mut objects, &mut active);
+            tasks.clear();
+            objects.clear();
+            active.clear();
+            self.tasks = tasks;
+            self.objects = objects;
+            self.active = active;
+            result
+        } else {
+            let mut tasks = Vec::new();
+            let mut objects = Vec::new();
+            let mut active = Vec::new();
+            self.get_with_buffers(id, &mut tasks, &mut objects, &mut active)
+        }
+    }
+
+    fn get_with_buffers(
+        &mut self,
+        id: ObjectRef,
+        tasks: &mut Vec<GetTask>,
+        objects: &mut Vec<Object>,
+        active: &mut Vec<u32>,
+    ) -> Result<Object, DocError> {
         tasks.push(GetTask::Object(id));
         while let Some(task) = tasks.pop() {
             match task {
@@ -402,6 +438,7 @@ impl<'d> Resolver<'d> {
                                 offset,
                                 id,
                                 &self.document.limits,
+                                &mut self.parse_scratch,
                             )?;
                             if object
                                 .id()
@@ -459,8 +496,12 @@ impl<'d> Resolver<'d> {
                             if let Some(cached) =
                                 self.cache.iter().find(|entry| entry.number == stream)
                             {
-                                let object =
-                                    cached.stream.member(index, id, &self.document.limits)?;
+                                let object = cached.stream.member(
+                                    index,
+                                    id,
+                                    &self.document.limits,
+                                    &mut self.parse_scratch,
+                                )?;
                                 active.pop();
                                 objects.push(object);
                                 continue;
@@ -504,7 +545,8 @@ impl<'d> Resolver<'d> {
                     } else {
                         ObjectStream::parse(&container, buf, &self.document.limits)?
                     };
-                    let object = stream.member(index, id, &self.document.limits)?;
+                    let object =
+                        stream.member(index, id, &self.document.limits, &mut self.parse_scratch)?;
                     self.cache_stream(number, stream);
                     active.pop();
                     objects.push(object);
