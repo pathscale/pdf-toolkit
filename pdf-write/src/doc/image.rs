@@ -90,7 +90,7 @@ impl Image {
         if rgba.len() != expected {
             return Err(invalid("RGBA byte length does not match dimensions"));
         }
-        let alpha_needed = rgba.chunks_exact(4).any(|pixel| pixel.get(3) != Some(&255));
+        let alpha_needed = rgba.as_chunks::<4>().0.iter().any(|pixel| pixel[3] != 255);
         let mut rgb = zeroed(0, mul(count, 3)?)?;
         rgb.try_reserve_exact(mul(count, 3)?)
             .map_err(|_| refusal("allocation_bytes", expected, MAX_BYTES))?;
@@ -103,7 +103,7 @@ impl Image {
         } else {
             None
         };
-        for pixel in rgba.chunks_exact(4) {
+        for pixel in rgba.as_chunks::<4>().0 {
             append(&mut rgb, slice(pixel, 0, 3)?, mul(count, 3)?)?;
             if let Some(alpha) = alpha.as_mut() {
                 append(alpha, slice(pixel, 3, 1)?, count)?;
@@ -155,7 +155,7 @@ impl Image {
                 invert = components == 4;
             }
             if matches!(marker, 0xc0..=0xcf) && !matches!(marker, 0xc4 | 0xc8 | 0xcc) {
-                if !matches!(marker, 0xc0 | 0xc1 | 0xc2) {
+                if !matches!(marker, 0xc0..=0xc2) {
                     return Err(invalid("unsupported JPEG coding process"));
                 }
                 if found || segment.get(2) != Some(&8) {

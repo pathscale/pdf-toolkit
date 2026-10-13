@@ -334,7 +334,7 @@ fn cmyk_source() -> Source {
     let height = 32u32;
     // Fixed fixture dimensions bound every product and sample below.
     let count = 48usize * 32;
-    let mut planes = vec![Vec::with_capacity(count); 4];
+    let mut planes: Vec<Vec<_>> = (0..4).map(|_| Vec::with_capacity(count)).collect();
     let mut rgba = Vec::with_capacity(count * 4);
     for y in 0..height {
         for x in 0..width {

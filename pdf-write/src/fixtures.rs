@@ -380,6 +380,7 @@ fn append_hex_text_line(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn text_page_truth(
     expected: &mut String,
     index: usize,
@@ -407,6 +408,7 @@ fn text_page_truth(
     ));
 }
 
+#[allow(clippy::too_many_arguments)]
 fn text_fixture(
     mut house: House,
     plain: &[u8],
@@ -678,7 +680,7 @@ fn filters() -> io::Result<Fixture> {
         };
         let mut plain = text(&label)?;
         if index == 4 {
-            while plain.len() % 16 != 0 {
+            while !plain.len().is_multiple_of(16) {
                 plain.push(b' ');
             }
         }
@@ -803,7 +805,7 @@ fn deep_nesting() -> io::Result<Fixture> {
 
 fn bad_startxref() -> io::Result<Fixture> {
     let mut plain = text("Bad startxref house")?;
-    plain.extend(std::iter::repeat(b' ').take(16 * 1024));
+    plain.extend(std::iter::repeat_n(b' ', 16 * 1024));
     let (mut house, page) = single(&plain, Encoding::Plain)?;
     let target = page.data_start.checked_add(8192).ok_or_else(|| {
         io::Error::new(io::ErrorKind::InvalidInput, "bad startxref target overflow")
@@ -1545,7 +1547,7 @@ fn images() -> io::Result<Fixture> {
     ];
     let alpha_samples = [255, 192, 128, 64, 0, 255, 255, 192, 128, 64, 32, 16];
     let mut rgb_rgba = Vec::with_capacity(48);
-    for (pixel, alpha) in rgb_samples.chunks_exact(3).zip(alpha_samples) {
+    for (pixel, alpha) in rgb_samples.as_chunks::<3>().0.iter().zip(alpha_samples) {
         rgb_rgba.extend_from_slice(pixel);
         rgb_rgba.push(alpha);
     }

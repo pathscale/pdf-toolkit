@@ -224,7 +224,7 @@ impl TrueType {
             } else {
                 usize::try_from(read32(loca, at)?).map_err(|_| invalid("loca offset overflow"))?
             };
-            if offset < previous || offset > glyf_length {
+            if !(previous..=glyf_length).contains(&offset) {
                 return Err(invalid("loca offsets are invalid"));
             }
             push(&mut offsets, offset, "loca_entries", 65536)?;
@@ -549,7 +549,7 @@ fn parse_cmap(bytes: &[u8], base: usize) -> io::Result<Cmap> {
         match format {
             4 => {
                 let twice = usize::from(read16(table, 6)?);
-                if twice == 0 || twice % 2 != 0 {
+                if twice == 0 || !twice.is_multiple_of(2) {
                     return Err(invalid("cmap segment count is invalid"));
                 }
                 let count = twice / 2;
@@ -563,7 +563,9 @@ fn parse_cmap(bytes: &[u8], base: usize) -> io::Result<Cmap> {
                     let adjustment = read16(table, add(add(16, mul(count, 4)?)?, delta)?)?;
                     let word = add(add(16, mul(count, 6)?)?, delta)?;
                     let range = usize::from(read16(table, word)?);
-                    if start > end || previous.is_some_and(|value| start <= value) || range % 2 != 0
+                    if start > end
+                        || previous.is_some_and(|value| start <= value)
+                        || !range.is_multiple_of(2)
                     {
                         return Err(invalid("cmap segments are invalid"));
                     }
@@ -718,11 +720,11 @@ fn font_name(bytes: Option<&[u8]>) -> String {
             check("font_name_bytes", length, 254)?;
             let start = add(strings, usize::from(read16(bytes, add(at, 10)?)?))?;
             let raw = slice(bytes, start, length)?;
-            if length % 2 != 0 {
+            if !length.is_multiple_of(2) {
                 continue;
             }
             let mut name = String::new();
-            for pair in raw.chunks_exact(2) {
+            for pair in raw.as_chunks::<2>().0 {
                 let unit = read16(pair, 0)?;
                 if let Some(character) = char::from_u32(u32::from(unit)).filter(|character| {
                     character.is_ascii_alphanumeric() || matches!(character, '-' | '_')

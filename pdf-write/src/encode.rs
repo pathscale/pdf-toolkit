@@ -84,7 +84,7 @@ pub fn run_length(input: &[u8]) -> Vec<u8> {
 /// PNG predictor 12, with an explicit Up filter byte before every complete row.
 /// Padding belongs to the authored plain content, rather than to this encoder.
 pub fn png_up(input: &[u8], columns: usize) -> io::Result<Vec<u8>> {
-    if columns == 0 || input.len() % columns != 0 {
+    if columns == 0 || !input.len().is_multiple_of(columns) {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             "PNG Up input must consist of complete nonempty-width rows",

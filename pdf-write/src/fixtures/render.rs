@@ -219,7 +219,7 @@ fn contains(points: impl IntoIterator<Item = Point>, point: Point, even_odd: boo
 /// Probe clearances exceed the subdivision error by more than three pixels.
 fn flatten(curves: &Curves) -> [Point; 256] {
     let mut points = [[0.0; 2]; 256];
-    for (curve, output) in curves.iter().zip(points.chunks_exact_mut(64)) {
+    for (curve, output) in curves.iter().zip(points.as_chunks_mut::<64>().0) {
         let [p0, p1, p2, p3] = *curve;
         for (step, slot) in output.iter_mut().enumerate() {
             let t = step as f64 / 64.0;
@@ -508,16 +508,13 @@ pub(super) fn images() -> io::Result<Fixture> {
         (134, 104),
     ];
     for ((samples, alpha), (x, y)) in RGB_SAMPLES
-        .chunks_exact(3)
+        .as_chunks::<3>()
+        .0
+        .iter()
         .zip(ALPHA_SAMPLES)
         .zip(positions)
     {
-        let [r, g, b] = samples else {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "RGB fixture layout",
-            ));
-        };
+        let [r, g, b] = samples;
         let color = Color([
             f64::from(*r) / 255.0,
             f64::from(*g) / 255.0,

@@ -1375,7 +1375,7 @@ pub fn encode_with_tiles(
     }
     let alignment = 1usize << settings.levels;
     if tile_coding.is_empty()
-        && ((tw < w && tw % alignment != 0) || (th < h && th % alignment != 0))
+        && ((tw < w && !tw.is_multiple_of(alignment)) || (th < h && !th.is_multiple_of(alignment)))
     {
         return Err(invalid("unsupported:jpx_encoder_tile_alignment"));
     }
@@ -1394,7 +1394,7 @@ pub fn encode_with_tiles(
         let grid = 1usize << coding.levels;
         let x = product(index % columns, tw)?;
         let y = product(index / columns, th)?;
-        if x % grid != 0 || y % grid != 0 {
+        if !x.is_multiple_of(grid) || !y.is_multiple_of(grid) {
             return Err(invalid("unsupported:jpx_encoder_tile_alignment"));
         }
     }

@@ -233,7 +233,7 @@ fn soft_mask_ramp(width: u32, height: u32) -> io::Result<Vec<u8>> {
     let mut samples = Vec::with_capacity(count);
     for _y in 0..height {
         for x in 0..width {
-            let sample = u32::from(x)
+            let sample = x
                 .checked_mul(255)
                 .map(|value| value / span)
                 .ok_or_else(|| invalid("JXL fixture mask sample overflow"))?;

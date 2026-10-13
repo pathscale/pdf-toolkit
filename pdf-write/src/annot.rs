@@ -322,7 +322,7 @@ pub fn build(annot: &Annot) -> Result<AnnotParts, &'static str> {
         ("F".to_owned(), Value::Int(4)),
         ("M".to_owned(), Value::Str(b"D:19700101000000Z".to_vec())),
     ];
-    let contents = annot.contents.as_deref().or_else(|| match &annot.kind {
+    let contents = annot.contents.as_deref().or(match &annot.kind {
         AnnotKind::FreeText { text, .. } => Some(text.as_str()),
         _ => None,
     });

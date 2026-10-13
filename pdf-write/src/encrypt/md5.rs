@@ -25,8 +25,8 @@ const K: [u32; 64] = [
 
 fn block(state: &mut [u32; 4], bytes: &[u8; 64]) {
     let mut words = [0u32; 16];
-    for (index, chunk) in bytes.chunks_exact(4).enumerate() {
-        words[index] = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+    for (index, chunk) in bytes.as_chunks::<4>().0.iter().enumerate() {
+        words[index] = u32::from_le_bytes(*chunk);
     }
     let [mut a, mut b, mut c, mut d] = *state;
     for index in 0..64 {
@@ -57,25 +57,23 @@ pub(super) fn digest(input: &[u8]) -> io::Result<[u8; 16]> {
         .and_then(|length| length.checked_mul(8))
         .ok_or_else(|| invalid("MD5 input bit length exceeds u64"))?;
     let mut state = INITIAL;
-    let mut chunks = input.chunks_exact(64);
-    for chunk in &mut chunks {
-        let bytes = <[u8; 64]>::try_from(chunk).map_err(|_| invalid("short MD5 block"))?;
-        block(&mut state, &bytes);
+    let (chunks, remainder) = input.as_chunks::<64>();
+    for chunk in chunks {
+        block(&mut state, chunk);
     }
-    let remainder = chunks.remainder();
+
     // remainder is at most 63 bytes; both possible tails fit this buffer.
     let mut tail = [0u8; 128];
     tail[..remainder.len()].copy_from_slice(remainder);
     tail[remainder.len()] = 0x80;
     let length = if remainder.len() < 56 { 64 } else { 128 };
     tail[length - 8..length].copy_from_slice(&bits.to_le_bytes());
-    for chunk in tail[..length].chunks_exact(64) {
-        let bytes = <[u8; 64]>::try_from(chunk).map_err(|_| invalid("short MD5 padding block"))?;
-        block(&mut state, &bytes);
+    for chunk in tail[..length].as_chunks::<64>().0 {
+        block(&mut state, chunk);
     }
     let mut result = [0u8; 16];
-    for (target, word) in result.chunks_exact_mut(4).zip(state) {
-        target.copy_from_slice(&word.to_le_bytes());
+    for (target, word) in result.as_chunks_mut::<4>().0.iter_mut().zip(state) {
+        *target = word.to_le_bytes();
     }
     Ok(result)
 }

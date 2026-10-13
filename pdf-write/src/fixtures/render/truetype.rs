@@ -42,7 +42,7 @@ fn append(out: &mut Vec<u8>, bytes: &[u8]) -> io::Result<()> {
     let length = at(out.len(), bytes.len())?;
     bounded(length, MAX_FONT_BYTES, "font_bytes")?;
     out.try_reserve(bytes.len())
-        .map_err(|_| io::Error::new(io::ErrorKind::Other, "font allocation failed"))?;
+        .map_err(|_| io::Error::other("font allocation failed"))?;
     out.extend_from_slice(bytes);
     Ok(())
 }

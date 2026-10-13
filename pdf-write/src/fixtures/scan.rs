@@ -20,8 +20,9 @@ fn invalid(message: &str) -> io::Error {
 }
 
 fn ink(x: u32, y: u32) -> io::Result<bool> {
-    let border =
-        (2..62).contains(&x) && (2..46).contains(&y) && (x < 6 || x >= 58 || y < 6 || y >= 42);
+    let border = (2..62).contains(&x)
+        && (2..46).contains(&y)
+        && (!(6..58).contains(&x) || !(6..42).contains(&y));
     let dx = i64::from(x)
         .checked_sub(18)
         .ok_or_else(|| invalid("scan circle x overflow"))?;

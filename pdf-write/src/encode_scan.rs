@@ -15,7 +15,7 @@ fn invalid(message: &str) -> io::Error {
 }
 
 fn allocation() -> io::Error {
-    io::Error::new(io::ErrorKind::Other, "scan allocation failed")
+    io::Error::other("scan allocation failed")
 }
 
 fn add(left: usize, right: usize) -> io::Result<usize> {

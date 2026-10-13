@@ -17,8 +17,8 @@ const K: [u32; 64] = [
 
 fn block(state: &mut [u32; 8], bytes: &[u8; 64]) {
     let mut words = [0u32; 64];
-    for (index, chunk) in bytes.chunks_exact(4).enumerate() {
-        words[index] = u32::from_be_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+    for (index, chunk) in bytes.as_chunks::<4>().0.iter().enumerate() {
+        words[index] = u32::from_be_bytes(*chunk);
     }
     for index in 16..64 {
         let x = words[index - 15];
@@ -59,27 +59,25 @@ fn block(state: &mut [u32; 8], bytes: &[u8; 64]) {
 
 pub fn digest(input: &[u8]) -> [u8; 32] {
     let mut state = INITIAL;
-    let mut chunks = input.chunks_exact(64);
-    for chunk in &mut chunks {
+    let (chunks, remainder) = input.as_chunks::<64>();
+    for chunk in chunks {
         let mut bytes = [0u8; 64];
         bytes.copy_from_slice(chunk);
         block(&mut state, &bytes);
     }
-    let remainder = chunks.remainder();
+
     let mut tail = [0u8; 128];
     tail[..remainder.len()].copy_from_slice(remainder);
     tail[remainder.len()] = 0x80;
     let length = if remainder.len() < 56 { 64 } else { 128 };
     let bits = (input.len() as u64).wrapping_mul(8);
     tail[length - 8..length].copy_from_slice(&bits.to_be_bytes());
-    for chunk in tail[..length].chunks_exact(64) {
-        let mut bytes = [0u8; 64];
-        bytes.copy_from_slice(chunk);
-        block(&mut state, &bytes);
+    for chunk in tail[..length].as_chunks::<64>().0 {
+        block(&mut state, chunk);
     }
     let mut result = [0u8; 32];
-    for (target, word) in result.chunks_exact_mut(4).zip(state) {
-        target.copy_from_slice(&word.to_be_bytes());
+    for (target, word) in result.as_chunks_mut::<4>().0.iter_mut().zip(state) {
+        *target = word.to_be_bytes();
     }
     result
 }
