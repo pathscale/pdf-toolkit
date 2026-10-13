@@ -64,11 +64,11 @@ impl HexText {
         if carry != 0 || bytes.is_empty() || bytes.len() % 2 != 0 {
             return None;
         }
-        let units = bytes.chunks_exact(2).map(|pair| {
-            let high = pair.first().copied().unwrap_or(0);
-            let low = pair.get(1).copied().unwrap_or(0);
-            (u16::from(high) << 8) | u16::from(low)
-        });
+        let units = bytes
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|&[high, low]| (u16::from(high) << 8) | u16::from(low));
         let mut text = GlyphText::new();
         for scalar in core::char::decode_utf16(units) {
             if !text.push(scalar.ok()?) {

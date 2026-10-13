@@ -185,7 +185,7 @@ impl FontCache {
                         resolver.warn(Warning {
                             offset: None,
                             object: id,
-                            what: *what,
+                            what,
                         });
                     }
                     return Ok(entry.font.clone());

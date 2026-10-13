@@ -406,7 +406,7 @@ fn read_image(
             bpc: bits_per_component,
         };
 
-        for pixel in output.chunks_exact_mut(4) {
+        for pixel in output.as_chunks_mut::<4>().0 {
             let mut raw = [0u16; 4];
             for slot in raw.iter_mut().take(channels) {
                 let Some(sample) = samples.next() else {
@@ -550,7 +550,7 @@ fn decode_jxl(
     } else {
         None
     };
-    for (index, pixel) in rgba.chunks_exact_mut(4).enumerate() {
+    for (index, pixel) in rgba.as_chunks_mut::<4>().0.iter_mut().enumerate() {
         let mut samples = [0u8; 4];
         let output = samples
             .get_mut(..stream_count)
@@ -673,7 +673,7 @@ fn decode_jpx(
     budget.charge(layout.rgba)?;
 
     let in_data = image_integer(resolver, dict, b"SMaskInData", 0, object.id())?;
-    if !matches!(in_data, 0 | 1 | 2) {
+    if !(0..=2).contains(&in_data) {
         return Err(wrong(object.id(), "SMaskInData in 0..2"));
     }
     let has_pdf_soft = resolver
@@ -755,7 +755,7 @@ fn decode_jpx(
         None
     };
     for (y, row) in rgba.chunks_exact_mut(layout.row_rgba).enumerate() {
-        for (x, pixel) in row.chunks_exact_mut(4).enumerate() {
+        for (x, pixel) in row.as_chunks_mut::<4>().0.iter_mut().enumerate() {
             let opacity = if use_alpha {
                 let index = alpha_index.ok_or_else(jpx_components)?;
                 planes
@@ -981,15 +981,18 @@ impl JpxHeader {
             stream
                 .get(42..end)
                 .ok_or_else(jpx_components)?
-                .chunks_exact(3),
+                .as_chunks::<3>()
+                .0,
         ) {
-            let sx = u32::from(entry.get(1).copied().ok_or_else(jpx_components)?);
-            let sy = u32::from(entry.get(2).copied().ok_or_else(jpx_components)?);
+            let [_, sx, sy] = entry;
+            let sx = u32::from(*sx);
+            let sy = u32::from(*sy);
             if sx == 0 || sy == 0 {
                 return Err(jpx_components());
             }
-            let ceil =
-                |value: u32, step: u32| (value / step).saturating_add(u32::from(value % step != 0));
+            let ceil = |value: u32, step: u32| {
+                (value / step).saturating_add(u32::from(!value.is_multiple_of(step)))
+            };
             *slot = (
                 ceil(right, sx).saturating_sub(ceil(left, sx)),
                 ceil(bottom, sy).saturating_sub(ceil(top, sy)),
@@ -1703,10 +1706,8 @@ fn apply_soft_mask(
         }
     }
 
-    for (pixel, soft) in rgba.chunks_exact_mut(4).zip(alpha.iter()) {
-        if let Some(current) = pixel.get_mut(3) {
-            *current = (u16::from(*current).saturating_mul(u16::from(*soft)) / 255) as u8;
-        }
+    for ([.., current], soft) in rgba.as_chunks_mut::<4>().0.iter_mut().zip(alpha.iter()) {
+        *current = (u16::from(*current).saturating_mul(u16::from(*soft)) / 255) as u8;
     }
     image.soft_mask = Some(alpha);
     Ok(())

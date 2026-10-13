@@ -762,11 +762,7 @@ pub(crate) fn text_string(
     if bytes.starts_with(&[0xfe, 0xff]) || bytes.starts_with(&[0xff, 0xfe]) {
         let little = bytes.starts_with(&[0xff, 0xfe]);
         let body = bytes.get(2..).unwrap_or(&[]);
-        let units = body.chunks_exact(2).map(|pair| {
-            let bytes = [
-                pair.first().copied().unwrap_or(0),
-                pair.get(1).copied().unwrap_or(0),
-            ];
+        let units = body.as_chunks::<2>().0.iter().map(|&bytes| {
             if little {
                 u16::from_le_bytes(bytes)
             } else {

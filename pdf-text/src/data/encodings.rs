@@ -1588,7 +1588,7 @@ pub const PDF_DOC_NAMES: [&str; 232] = [
 pub const PDF_DOC_FIRST: usize = 24;
 
 /// Glyph name to Unicode, sorted by name for binary search.
-pub const GLYPH_NAMES: [(&str, u16); 712] = [
+pub static GLYPH_NAMES: [(&str, u16); 712] = [
     ("A", 0x0041),
     ("AE", 0x00c6),
     ("AEsmall", 0xf7e6),

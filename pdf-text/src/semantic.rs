@@ -532,13 +532,12 @@ fn line_spans(
         let along = dx * glyph.x + dy * glyph.y;
         let size = glyph.size.abs().max(0.01);
         if let Some((last_along, width, last_size)) = previous {
-            if along - last_along - width > SPACE_GAP * size.max(last_size) {
-                if spans
+            if along - last_along - width > SPACE_GAP * size.max(last_size)
+                && spans
                     .last()
                     .is_some_and(|span: &Span| !span.text.ends_with(' '))
-                {
-                    separator(&mut spans, ' ', budget)?;
-                }
+            {
+                separator(&mut spans, ' ', budget)?;
             }
         }
         let style = styles
@@ -562,8 +561,7 @@ fn line_spans(
         }
         previous = Some((along, glyph.width, size));
     }
-    loop {
-        let Some(last) = spans.last_mut() else { break };
+    while let Some(last) = spans.last_mut() {
         while last.text.ends_with(' ') {
             last.text.pop();
         }

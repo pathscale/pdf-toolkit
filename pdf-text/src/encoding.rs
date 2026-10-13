@@ -93,7 +93,7 @@ fn component_to_unicode(name: &[u8]) -> Option<GlyphText> {
             return None;
         }
         let mut text = GlyphText::new();
-        for group in digits.chunks_exact(4) {
+        for group in digits.as_chunks::<4>().0 {
             let character = char::from_u32(hex_number(group)?)?;
             if !text.push(character) {
                 return None;
