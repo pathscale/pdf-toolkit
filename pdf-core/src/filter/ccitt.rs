@@ -982,5 +982,5 @@ const fn run_table(codes: &[(u16, u8, u16)]) -> [RunEntry; RUN_TABLE_SIZE] {
     table
 }
 
-const WHITE_TABLE: [RunEntry; RUN_TABLE_SIZE] = run_table(WHITE_CODES);
-const BLACK_TABLE: [RunEntry; RUN_TABLE_SIZE] = run_table(BLACK_CODES);
+static WHITE_TABLE: [RunEntry; RUN_TABLE_SIZE] = run_table(WHITE_CODES);
+static BLACK_TABLE: [RunEntry; RUN_TABLE_SIZE] = run_table(BLACK_CODES);

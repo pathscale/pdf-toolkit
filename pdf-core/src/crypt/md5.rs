@@ -59,8 +59,8 @@ impl Md5 {
         self.buffer[56..].copy_from_slice(&bits.to_le_bytes());
         compress(&mut self.state, &self.buffer);
         let mut result = [0u8; 16];
-        for (word, slot) in self.state.iter().zip(result.chunks_exact_mut(4)) {
-            slot.copy_from_slice(&word.to_le_bytes());
+        for (word, slot) in self.state.iter().zip(result.as_chunks_mut::<4>().0) {
+            *slot = word.to_le_bytes();
         }
         result
     }
@@ -74,8 +74,8 @@ pub(super) fn digest(bytes: &[u8]) -> [u8; 16] {
 
 fn compress(state: &mut [u32; 4], block: &[u8; 64]) {
     let mut words = [0u32; 16];
-    for (slot, bytes) in words.iter_mut().zip(block.chunks_exact(4)) {
-        *slot = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+    for (slot, bytes) in words.iter_mut().zip(block.as_chunks::<4>().0) {
+        *slot = u32::from_le_bytes(*bytes);
     }
     let [mut a, mut b, mut c, mut d] = *state;
     for index in 0..64 {

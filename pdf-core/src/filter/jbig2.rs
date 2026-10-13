@@ -222,7 +222,7 @@ impl Budget {
 }
 
 fn stride(width: u32) -> Result<usize, FilterError> {
-    usize::try_from((u64::from(width) + 7) / 8).map_err(|_| corrupt(0))
+    usize::try_from(u64::from(width).div_ceil(8)).map_err(|_| corrupt(0))
 }
 
 fn bitmap_size(width: u32, height: u32) -> Result<usize, FilterError> {

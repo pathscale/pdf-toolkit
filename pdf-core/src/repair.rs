@@ -37,10 +37,10 @@ pub(crate) fn needs_rebuild(document: &Document) -> Result<bool, DocError> {
                     return Ok(true);
                 }
             }
-            Some(XrefEntry::Compressed { stream, .. }) => {
-                if !matches!(document.xref().get(stream), Some(XrefEntry::InUse { .. })) {
-                    return Ok(true);
-                }
+            Some(XrefEntry::Compressed { stream, .. })
+                if !matches!(document.xref().get(stream), Some(XrefEntry::InUse { .. })) =>
+            {
+                return Ok(true);
             }
             _ => {}
         }

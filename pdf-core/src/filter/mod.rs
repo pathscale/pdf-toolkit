@@ -177,7 +177,8 @@ pub fn decode_image_report(
             maximum: max_pixels,
         }));
     }
-    let expected = ((u64::from(params.width) + 7) / 8)
+    let expected = u64::from(params.width)
+        .div_ceil(8)
         .checked_mul(u64::from(params.height))
         .and_then(|size| usize::try_from(size).ok())
         .filter(|&size| size <= isize::MAX as usize)

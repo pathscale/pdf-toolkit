@@ -158,12 +158,12 @@ impl<'r, 'd> PageWalk<'r, 'd> {
 
     fn next_child(&mut self) -> Option<Child> {
         loop {
-            let exhausted = match self.stack.last() {
-                Some(frame) => match frame.kids.get().as_array() {
+            let exhausted = {
+                let frame = self.stack.last()?;
+                match frame.kids.get().as_array() {
                     Some(kids) => frame.next >= kids.len(),
                     None => true,
-                },
-                None => return None,
+                }
             };
 
             if exhausted {
@@ -171,10 +171,7 @@ impl<'r, 'd> PageWalk<'r, 'd> {
                 continue;
             }
 
-            let frame = match self.stack.last_mut() {
-                Some(frame) => frame,
-                None => return None,
-            };
+            let frame = self.stack.last_mut()?;
             let index = frame.next;
             frame.next = frame.next.saturating_add(1);
             let id = frame
@@ -396,7 +393,7 @@ impl<'r, 'd> PageWalk<'r, 'd> {
                 self.page_count = self.page_count.saturating_sub(1);
                 continue;
             }
-            if matches!(&built, Err(_)) {
+            if built.is_err() {
                 self.finished = true;
             }
             return Some(built);
@@ -718,10 +715,7 @@ impl PageWalk<'_, '_> {
                         })));
                     }
 
-                    let index = match u32::try_from(self.page_count) {
-                        Ok(index) => index,
-                        Err(_) => u32::MAX,
-                    };
+                    let index = u32::try_from(self.page_count).unwrap_or(u32::MAX);
                     self.page_count = requested;
                     let built = self.build_page(pending.id, index, inherited, dict);
                     let retry_scan = if let Err(error) = &built {
@@ -1050,9 +1044,7 @@ fn read_contents(
     };
 
     if let Some(stream_id) = contents_ref.as_ref() {
-        let mut contents = Vec::new();
-        contents.push(stream_id);
-        return Ok(contents);
+        return Ok(alloc::vec![stream_id]);
     }
 
     let contents = resolver.resolve(contents_ref)?;
@@ -1145,10 +1137,7 @@ fn malformed(offset: u64, what: &'static str) -> DocError {
 }
 
 fn malformed_at(value: ValueRef<'_>, what: &'static str) -> DocError {
-    let offset = match u64::try_from(value.span().start) {
-        Ok(offset) => offset,
-        Err(_) => u64::MAX,
-    };
+    let offset = u64::try_from(value.span().start).unwrap_or(u64::MAX);
     malformed(offset, what)
 }
 

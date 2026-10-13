@@ -275,10 +275,7 @@ impl<'input> Lexer<'input> {
         let mut seen_digit = false;
         let mut needs_slow = false;
 
-        loop {
-            let Some(byte) = byte_at(self.input, end) else {
-                break;
-            };
+        while let Some(byte) = byte_at(self.input, end) {
             if is_pdf_whitespace(byte) || is_delimiter(byte) {
                 break;
             }
@@ -406,7 +403,7 @@ impl<'input> Lexer<'input> {
             let run = self.input.get(end..window_end).unwrap_or(&[]);
             let stop = run
                 .iter()
-                .position(|byte| !matches!(*byte, b'0'..=b'9' | b'a'..=b'f' | b'A'..=b'F'))
+                .position(|byte: &u8| !byte.is_ascii_hexdigit())
                 .unwrap_or(run.len());
             end = end.saturating_add(stop);
 

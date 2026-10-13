@@ -346,7 +346,7 @@ pub(crate) fn sha256(bytes: &[u8]) -> SourceDigest {
 
     let mut state = INITIAL_STATE;
     let complete_length = bytes.len() - bytes.len() % 64;
-    for block in bytes[..complete_length].chunks_exact(64) {
+    for block in bytes[..complete_length].as_chunks::<64>().0 {
         compress_block(&mut state, block, &ROUND_CONSTANTS);
     }
 
@@ -357,7 +357,7 @@ pub(crate) fn sha256(bytes: &[u8]) -> SourceDigest {
     let padded_length = if remainder.len() < 56 { 64 } else { 128 };
     let bit_length = (bytes.len() as u64).wrapping_mul(8);
     tail[padded_length - 8..padded_length].copy_from_slice(&bit_length.to_be_bytes());
-    for block in tail[..padded_length].chunks_exact(64) {
+    for block in tail[..padded_length].as_chunks::<64>().0 {
         compress_block(&mut state, block, &ROUND_CONSTANTS);
     }
 
@@ -371,7 +371,7 @@ pub(crate) fn sha256(bytes: &[u8]) -> SourceDigest {
 
 fn compress_block(state: &mut [u32; 8], block: &[u8], round_constants: &[u32; 64]) {
     let mut schedule = [0u32; 64];
-    for (index, word) in block.chunks_exact(4).enumerate() {
+    for (index, word) in block.as_chunks::<4>().0.iter().enumerate() {
         schedule[index] = u32::from_be_bytes([word[0], word[1], word[2], word[3]]);
     }
     for index in 16..64 {

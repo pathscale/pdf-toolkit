@@ -142,10 +142,8 @@ pub(crate) fn read(
                 }
                 for (number, entry) in supplemental.entries.into_iter().enumerate() {
                     if let Some(slot) = section.entries.get_mut(number) {
-                        if slot.is_none() || *slot == Some(XrefEntry::Free) {
-                            if entry.is_some() {
-                                *slot = entry;
-                            }
+                        if (slot.is_none() || *slot == Some(XrefEntry::Free)) && entry.is_some() {
+                            *slot = entry;
                         }
                     }
                 }

@@ -381,7 +381,7 @@ fn repair_first(
     let delimiter = buf
         .get(body)
         .is_some_and(|byte| b"()<>[]{}/".contains(byte));
-    if delimiter && tokens != 0 && tokens % 2 == 0 {
+    if delimiter && tokens != 0 && tokens.is_multiple_of(2) {
         if let Some(first) = declared.filter(|first| *first >= pos && *first <= body) {
             return Ok(Some(first));
         }

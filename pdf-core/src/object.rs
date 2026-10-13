@@ -356,10 +356,10 @@ impl<'o> ValueRef<'o> {
         })
     }
     pub fn as_array(&self) -> Option<ArrayRef<'o>> {
-        (self.kind() == ValueKind::Array).then(|| ArrayRef(*self))
+        (self.kind() == ValueKind::Array).then_some(ArrayRef(*self))
     }
     pub fn as_dict(&self) -> Option<DictRef<'o>> {
-        (self.kind() == ValueKind::Dict).then(|| DictRef(*self))
+        (self.kind() == ValueKind::Dict).then_some(DictRef(*self))
     }
     pub fn as_ref(&self) -> Option<ObjectRef> {
         match self.node().map(|node| &node.kind) {
@@ -416,12 +416,15 @@ impl<'o> DictRef<'o> {
     pub fn len(&self) -> usize {
         self.entries().len()
     }
+    pub fn is_empty(&self) -> bool {
+        self.entries().is_empty()
+    }
     pub fn get(&self, key: &[u8]) -> Option<ValueRef<'o>> {
         self.entries().iter().rev().find_map(|(range, index)| {
             let name = Name {
                 bytes: self.0.object.0.buf.get(range.clone()).unwrap_or(&[]),
             };
-            name.eq_bytes(key).then(|| ValueRef {
+            name.eq_bytes(key).then_some(ValueRef {
                 object: self.0.object,
                 index: *index,
             })

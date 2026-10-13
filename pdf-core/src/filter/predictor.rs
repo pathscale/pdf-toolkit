@@ -73,7 +73,7 @@ fn decode_tiff(
     layout: Layout,
     filter: FilterKind,
 ) -> Result<Decoded, FilterError> {
-    let truncated = bytes.len() % layout.row_bytes != 0;
+    let truncated = !bytes.len().is_multiple_of(layout.row_bytes);
     let offset = bytes.len();
 
     for row in bytes.chunks_mut(layout.row_bytes) {
@@ -93,20 +93,18 @@ fn decode_tiff(
             }
             16 => {
                 let mut component = 0usize;
-                let mut pairs = row.chunks_exact_mut(2);
-                for pair in pairs.by_ref() {
-                    if let [high, low] = pair {
-                        let encoded = (u16::from(*high) << 8) | u16::from(*low);
-                        let recovered = add_component(encoded, previous, &mut component, u16::MAX);
-                        let [new_high, new_low] = recovered.to_be_bytes();
-                        *high = new_high;
-                        *low = new_low;
-                    }
+                let (pairs, remainder) = row.as_chunks_mut::<2>();
+                for [high, low] in pairs {
+                    let encoded = (u16::from(*high) << 8) | u16::from(*low);
+                    let recovered = add_component(encoded, previous, &mut component, u16::MAX);
+                    let [new_high, new_low] = recovered.to_be_bytes();
+                    *high = new_high;
+                    *low = new_low;
                 }
 
                 // A short final sample has no low byte. Recover its available
                 // high byte with a zero low byte and retain the truncation flag.
-                if let Some(high) = pairs.into_remainder().first_mut() {
+                if let Some(high) = remainder.first_mut() {
                     let recovered =
                         add_component(u16::from(*high) << 8, previous, &mut component, u16::MAX);
                     *high = (recovered >> 8) as u8;
