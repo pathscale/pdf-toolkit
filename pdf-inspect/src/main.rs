@@ -109,12 +109,18 @@ fn peak_bytes() -> u64 {
     PEAK_BYTES.load(Ordering::Relaxed) as u64
 }
 
+#[path = "app_caps.rs"]
+mod app_caps;
+
 fn main() -> std::process::ExitCode {
+    let _caps = app_caps::start([4294967296, 600, 900, 512, 2, 32, 268435456, 10000, 10000]);
+    app_caps::stage("pdf-inspect/src/main.rs: running");
     std::process::ExitCode::from(run())
 }
 
 fn run() -> u8 {
-    let args: Vec<OsString> = std::env::args_os().skip(1).collect();
+    let args: Vec<OsString> = app_caps::args_os().skip(1).collect();
+    app_caps::stage(Arc::<str>::from(format!("pdf-inspect {args:?}")));
     let Some(command_arg) = args.first() else {
         print_usage();
         return 1;
@@ -446,6 +452,12 @@ fn open_source(
     } else {
         file::open(path, limits.max_file_bytes)
     }
+}
+
+fn app_caps_open(path: &Path, maximum: u64) -> Result<PdfSource, DocError> {
+    app_caps::stage(Arc::<str>::from(format!("parse PDF {}", path.display())));
+    if let Ok(metadata) = std::fs::metadata(path) { app_caps::check("input-bytes", metadata.len()); }
+    file::open(path, maximum.min(app_caps::hard("input-bytes")))
 }
 
 fn open_document(source: PdfSource, limits: Limits, repair: bool) -> Result<Document, DocError> {
@@ -1209,10 +1221,13 @@ fn run_image(path: &Path, object_number: u32, output: &Path, limits: Limits) -> 
 }
 
 fn read_bounded(path: &Path, maximum: u64) -> std::io::Result<Vec<u8>> {
+    app_caps::stage(Arc::<str>::from(format!("read {}", path.display())));
+    let maximum = maximum.min(app_caps::hard("input-bytes"));
     let file = std::fs::File::open(path)?;
     let mut reader = file.take(maximum.saturating_add(1));
     let mut bytes = Vec::new();
     reader.read_to_end(&mut bytes)?;
+    app_caps::check("input-bytes", bytes.len() as u64);
     if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > maximum {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
@@ -1782,6 +1797,7 @@ fn median_u64(values: impl Iterator<Item = u64>) -> u64 {
 }
 
 fn run_bench(paths: &[PathBuf], repeat: usize, limits: Limits) -> u8 {
+    app_caps::check("iterations", (paths.len() as u64).saturating_mul(repeat as u64));
     for path in paths {
         reset_peak_bytes();
         let mut samples = Vec::new();
@@ -2421,6 +2437,7 @@ fn run_mutate(path: &Path, seed: u64, count: usize) -> u8 {
     let previous_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(|_| {}));
 
+    app_caps::check("iterations", count as u64);
     for _ in 0..count.min(MAX_MUTATE_CASES) {
         let case_seed = next_random(&mut master_state);
         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -3080,6 +3097,7 @@ fn run_check(directory: &Path) -> u8 {
         };
         let path = entry.path();
         if path.extension() == Some(OsStr::new("pdf")) {
+            app_caps::check("cache-entries", pdf_paths.len() as u64 + 1);
             pdf_paths.push(path);
         }
     }
