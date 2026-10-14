@@ -19,7 +19,12 @@ const FIRST: &str = "Field notes are short pages written while the work is fresh
 const SECOND: &str = "The second page continues the notes. Its outline entry points here, \
     and the link on the first page jumps to this heading.";
 
+#[path = "../../pdf-apps/src/app_caps.rs"]
+mod app_caps;
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let _caps = app_caps::start([536870912, 30, 120, 256, 1, 32, 16777216, 10000, 10000]);
+    app_caps::turn("PDF authoring");
     let args: Vec<String> = std::env::args().skip(1).collect();
     let [font, logo, out] = args.as_slice() else {
         return Err("usage: authoring FONT.ttf LOGO.png OUT.pdf".into());

@@ -1,5 +1,5 @@
 [package]
-autobins = false
+autoexamples = false
 name = "pdf-toolkit-write"
 description = "Deterministic PDF writer: documents with subset TrueType fonts, images, links and outlines"
 version.workspace = true
