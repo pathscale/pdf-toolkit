@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 fn run() -> io::Result<()> {
-    let mut args = env::args_os().skip(1);
+    let mut args = app_caps::args_os().skip(1);
     let destination = args.next().ok_or_else(|| {
         io::Error::new(io::ErrorKind::InvalidInput, "usage: pdf-fixtures OUT_DIR")
     })?;
@@ -20,7 +20,12 @@ fn run() -> io::Result<()> {
     Ok(())
 }
 
+#[path = "../../../pdf-apps/src/app_caps.rs"]
+mod app_caps;
+
 fn main() -> ExitCode {
+    let _caps = app_caps::start([2147483648, 300, 600, 256, 2, 32, 268435456, 10000, 10000]);
+    app_caps::stage("pdf-write/src/bin/pdf-fixtures.rs: fixture generation or round trip");
     match run() {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {

@@ -184,7 +184,7 @@ const DEFAULT_HOUSE_DIR: &str = "fixtures/house";
 
 fn config() -> CheckResult<Config> {
     // Four arguments suffice to detect every unsupported argument count.
-    let arguments: Vec<_> = env::args_os().skip(1).take(4).collect();
+    let arguments: Vec<_> = app_caps::args_os().skip(1).take(4).collect();
     let (output, classic, stream) = match arguments.as_slice() {
         [output] => {
             let house = PathBuf::from(DEFAULT_HOUSE_DIR);
@@ -223,7 +223,7 @@ fn config() -> CheckResult<Config> {
 /// House directory for the argument split `config` accepts.
 /// Pair mode (classic PDF plus xref PDF) returns `None`.
 fn active_house_dir() -> Option<PathBuf> {
-    let arguments: Vec<_> = env::args_os().skip(1).take(4).collect();
+    let arguments: Vec<_> = app_caps::args_os().skip(1).take(4).collect();
     match arguments.as_slice() {
         [_] => Some(PathBuf::from(DEFAULT_HOUSE_DIR)),
         [_, house] => Some(PathBuf::from(house.as_os_str())),
@@ -269,17 +269,20 @@ fn read_bounded(path: &Path) -> CheckResult<Arc<[u8]>> {
     if !metadata.is_file() {
         return Err(format!("regular file required: {}", path.display()));
     }
+    app_caps::stage(Arc::<str>::from(format!("round trip: {}", path.display())));
+    app_caps::check("input-bytes", metadata.len());
     bounded("file_bytes", metadata.len(), MAX_FILE_BYTES)?;
     let capacity = usize::try_from(metadata.len()).map_err(describe)?;
     let mut bytes = Vec::new();
     bytes.try_reserve_exact(capacity).map_err(describe)?;
-    let read_limit = MAX_FILE_BYTES
+    let read_limit = MAX_FILE_BYTES.min(app_caps::hard("input-bytes"))
         .checked_add(1)
         .ok_or_else(|| "file byte limit overflow".to_owned())?;
     file.take(read_limit)
         .read_to_end(&mut bytes)
         .map_err(describe)?;
     let requested = u64::try_from(bytes.len()).map_err(describe)?;
+    app_caps::check("input-bytes", requested);
     bounded("file_bytes", requested, MAX_FILE_BYTES)?;
     Ok(Arc::from(bytes))
 }
@@ -1190,7 +1193,12 @@ fn run_incremental(
     );
 }
 
+#[path = "../../../pdf-apps/src/app_caps.rs"]
+mod app_caps;
+
 fn main() -> ExitCode {
+    let _caps = app_caps::start([2147483648, 300, 600, 256, 2, 32, 268435456, 10000, 10000]);
+    app_caps::stage("pdf-edit/src/bin/pdf-roundtrip.rs: fixture generation or round trip");
     let mut report = Report::default();
     let Some(config) = report.obtain("setup", "arguments", config()) else {
         return report.finish();
