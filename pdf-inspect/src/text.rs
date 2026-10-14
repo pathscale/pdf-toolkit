@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::io::{self, Write as _};
 use std::path::Path;
 
-use pdf_core::file;
+use crate::file;
 use pdf_core::pages::{Page, PageWalk};
 use pdf_core::{Document, Limits};
 use pdf_text::extract::{PageReceipt, extract_text, page_receipt, page_receipt_cached};
