@@ -7,7 +7,7 @@
 
 use std::sync::Arc;
 
-use pdf_write::doc::{
+use pdf_toolkit_write::doc::{
     Align, Color, DocumentBuilder, Margins, Metadata, PageSetup, PageSize, PdfDate, StandardFont,
     TextStyle, WriteOptions,
 };
@@ -19,7 +19,7 @@ const FIRST: &str = "Field notes are short pages written while the work is fresh
 const SECOND: &str = "The second page continues the notes. Its outline entry points here, \
     and the link on the first page jumps to this heading.";
 
-#[path = "../../pdf-apps/src/app_caps.rs"]
+#[path = "../src/bin/app_caps/mod.rs"]
 mod app_caps;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {

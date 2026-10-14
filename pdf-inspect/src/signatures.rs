@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::Arc;
 
-use pdf_core::file;
+use crate::file;
 use pdf_core::limits::Limits;
 use pdf_edit::sign::{SignatureReport, verify};
 

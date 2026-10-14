@@ -2,7 +2,6 @@ use rusty_alloc::RustyAlloc as System;
 use std::alloc::{GlobalAlloc, Layout};
 use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
-use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -11,7 +10,22 @@ use std::time::Instant;
 use pdf_core::document::{Document, Resolver, XrefEntry, XrefKind};
 use pdf_core::error::{DocError, Warning};
 mod file {
-    pub use pdf_core::file::{FileOpenError, open_repair};
+    pub use pdf_core::file::FileOpenError;
+    pub fn open_repair(
+        path: &std::path::Path,
+        maximum: u64,
+    ) -> Result<pdf_core::source::PdfSource, FileOpenError> {
+        crate::app_caps::stage("repair PDF source");
+        if let Ok(metadata) = std::fs::metadata(path) {
+            crate::app_caps::check("input-bytes", metadata.len());
+        }
+        let result =
+            pdf_core::file::open_repair(path, maximum.min(crate::app_caps::hard("input-bytes")));
+        if let Err(FileOpenError::TooLarge { observed, .. }) = &result {
+            crate::app_caps::check("input-bytes", *observed);
+        }
+        result
+    }
     pub fn open(
         path: &std::path::Path,
         maximum: u64,
@@ -27,6 +41,7 @@ mod file {
             |error| match error {
                 FileOpenError::Source(error) => pdf_core::error::DocError::Source(error),
                 FileOpenError::TooLarge { limit, observed } => {
+                    crate::app_caps::check("input-bytes", observed);
                     pdf_core::error::DocError::Refused(pdf_core::limits::Refusal {
                         limit: pdf_core::limits::LimitKind::FileBytes,
                         requested: observed,
@@ -1257,17 +1272,7 @@ fn read_bounded(path: &Path, maximum: u64) -> std::io::Result<Vec<u8>> {
     app_caps::stage(Arc::<str>::from(format!("read {}", path.display())));
     let maximum = maximum.min(app_caps::hard("input-bytes"));
     let file = std::fs::File::open(path)?;
-    let mut reader = file.take(maximum.saturating_add(1));
-    let mut bytes = Vec::new();
-    reader.read_to_end(&mut bytes)?;
-    app_caps::check("input-bytes", bytes.len() as u64);
-    if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > maximum {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            "font exceeds the decoded byte limit",
-        ));
-    }
-    Ok(bytes)
+    app_caps::read_limited(file, maximum)
 }
 
 fn run_render(
@@ -1835,6 +1840,10 @@ fn run_bench(paths: &[PathBuf], repeat: usize, limits: Limits) -> u8 {
     );
     for path in paths {
         reset_peak_bytes();
+        app_caps::check("cache-entries", repeat as u64);
+        app_caps::reserve_bytes(
+            (repeat as u64).saturating_mul(std::mem::size_of::<BenchSample>() as u64),
+        );
         let mut samples = Vec::new();
         for _ in 0..repeat {
             match bench_sample(path, limits) {

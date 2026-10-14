@@ -14,12 +14,12 @@ fn run() -> io::Result<()> {
         ));
     }
     let destination = PathBuf::from(destination);
-    let count = pdf_write::fixtures::write_fixtures(&destination)?;
+    let count = pdf_toolkit_write::fixtures::write_fixtures(&destination)?;
     println!("wrote {count} fixtures");
     Ok(())
 }
 
-#[path = "../../../pdf-apps/src/app_caps.rs"]
+#[path = "app_caps/mod.rs"]
 mod app_caps;
 
 fn main() -> ExitCode {

@@ -7,7 +7,7 @@
 
 use std::fmt::Debug;
 use std::fs::{self, File};
-use std::io::{self, Read, Write};
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
@@ -271,16 +271,7 @@ fn read_bounded(path: &Path) -> CheckResult<Arc<[u8]>> {
     app_caps::stage(Arc::<str>::from(format!("round trip: {}", path.display())));
     app_caps::check("input-bytes", metadata.len());
     bounded("file_bytes", metadata.len(), MAX_FILE_BYTES)?;
-    let capacity = usize::try_from(metadata.len()).map_err(describe)?;
-    let mut bytes = Vec::new();
-    bytes.try_reserve_exact(capacity).map_err(describe)?;
-    let read_limit = MAX_FILE_BYTES
-        .min(app_caps::hard("input-bytes"))
-        .checked_add(1)
-        .ok_or_else(|| "file byte limit overflow".to_owned())?;
-    file.take(read_limit)
-        .read_to_end(&mut bytes)
-        .map_err(describe)?;
+    let bytes = app_caps::read_limited(file, MAX_FILE_BYTES).map_err(describe)?;
     let requested = u64::try_from(bytes.len()).map_err(describe)?;
     app_caps::check("input-bytes", requested);
     bounded("file_bytes", requested, MAX_FILE_BYTES)?;
@@ -1195,7 +1186,7 @@ fn run_incremental(
     );
 }
 
-#[path = "../../../pdf-apps/src/app_caps.rs"]
+#[path = "app_caps/mod.rs"]
 mod app_caps;
 
 fn main() -> ExitCode {

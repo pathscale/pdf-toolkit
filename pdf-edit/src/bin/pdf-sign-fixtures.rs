@@ -10,7 +10,7 @@ use std::process::ExitCode;
 #[path = "../sign_fixtures.rs"]
 mod fixtures;
 
-#[path = "../../../pdf-apps/src/app_caps.rs"]
+#[path = "app_caps/mod.rs"]
 mod app_caps;
 
 fn main() -> ExitCode {
