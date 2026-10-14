@@ -6,7 +6,7 @@ use std::sync::Arc;
 use pdf_core::encryption::ChaChaKey;
 use pdf_core::{Limits, ObjectRef};
 
-use crate::{invalid, set, Dict, Value, Writer};
+use crate::{Dict, Value, Writer, invalid, set};
 
 pub use pdf_core::encryption::KdfParams;
 
@@ -82,10 +82,10 @@ impl Encryption {
     }
 
     pub(crate) fn trailer(&self, extra: &mut Dict) -> io::Result<()> {
-        if let Some((_, existing)) = extra.iter().rev().find(|(key, _)| key == "Encrypt") {
-            if !matches!(existing, Value::Ref(number, 0) if *number == self.encrypt_id) {
-                return Err(invalid("conflicting PSChaCha security dictionary"));
-            }
+        if let Some((_, existing)) = extra.iter().rev().find(|(key, _)| key == "Encrypt")
+            && !matches!(existing, Value::Ref(number, 0) if *number == self.encrypt_id)
+        {
+            return Err(invalid("conflicting PSChaCha security dictionary"));
         }
         set(extra, "Encrypt", Value::Ref(self.encrypt_id, 0));
         if !extra.iter().any(|(key, _)| key == "ID") {

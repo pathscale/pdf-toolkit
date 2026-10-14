@@ -3,7 +3,7 @@ use std::io;
 use super::bounds::*;
 use super::image::Pixels;
 use super::{Destination, DocumentBuilder, Encrypt, Font, Outline, Target, WriteOptions};
-use crate::{encode, serialize_value, Dict, Value, Writer, XrefCompression};
+use crate::{Dict, Value, Writer, XrefCompression, encode, serialize_value};
 
 pub(super) fn name(value: &str) -> Value {
     Value::Name(value.to_owned())
@@ -213,10 +213,10 @@ fn validate(doc: &DocumentBuilder, options: &WriteOptions) -> io::Result<()> {
     }
     for page in &doc.pages {
         for link in &page.links {
-            if let Target::Destination(target) = &link.target {
-                if doc.pages.get(target.page()).is_none() {
-                    return Err(invalid("link destination page is missing"));
-                }
+            if let Target::Destination(target) = &link.target
+                && doc.pages.get(target.page()).is_none()
+            {
+                return Err(invalid("link destination page is missing"));
             }
         }
     }

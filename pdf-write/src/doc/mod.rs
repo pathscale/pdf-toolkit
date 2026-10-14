@@ -378,10 +378,10 @@ impl Destination {
                 for value in [left, top].into_iter().flatten() {
                     coordinate(*value)?;
                 }
-                if let Some(zoom) = zoom {
-                    if !zoom.is_finite() || *zoom <= 0.0 || *zoom > 64.0 {
-                        return Err(invalid("destination zoom must be positive and at most 64"));
-                    }
+                if let Some(zoom) = zoom
+                    && (!zoom.is_finite() || *zoom <= 0.0 || *zoom > 64.0)
+                {
+                    return Err(invalid("destination zoom must be positive and at most 64"));
                 }
                 Ok(())
             }
@@ -858,10 +858,10 @@ impl DocumentBuilder {
                 add(usize::from(level - base), 1)?,
                 MAX_DEPTH,
             )?;
-            if let Some(previous) = self.outlines.last() {
-                if usize::from(level) > add(usize::from(previous.level), 1)? {
-                    return Err(invalid("outline levels cannot skip a parent"));
-                }
+            if let Some(previous) = self.outlines.last()
+                && usize::from(level) > add(usize::from(previous.level), 1)?
+            {
+                return Err(invalid("outline levels cannot skip a parent"));
             }
             let title = unicode(title, MAX_STRING_BYTES)?;
             self.charge(add(title.len(), 256)?)?;

@@ -159,10 +159,11 @@ impl Editor {
             .trailer()
             .dict()
             .ok_or_else(|| malformed("trailer"))?;
-        if let Some(info) = trailer.get(b"Info") {
-            if !info.is_null() && info.as_ref().is_none() {
-                return Err(wrong(None, "Info reference"));
-            }
+        if let Some(info) = trailer.get(b"Info")
+            && !info.is_null()
+            && info.as_ref().is_none()
+        {
+            return Err(wrong(None, "Info reference"));
         }
         let next = document.xref().size();
         if next == 0 {

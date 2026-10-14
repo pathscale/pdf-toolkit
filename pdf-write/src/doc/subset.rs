@@ -5,7 +5,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::io;
 
 use super::bounds::*;
-use super::font::{patch, read16, set16, set32, signed16, size32, slice, TrueType};
+use super::font::{TrueType, patch, read16, set16, set32, signed16, size32, slice};
 
 const MAX_COMPONENTS: usize = 1024;
 const MAX_WORK: usize = 65536;
@@ -375,14 +375,13 @@ pub(super) fn build(font: &TrueType) -> io::Result<(Vec<u8>, String)> {
         set16(&mut maxp, at, 0)?;
     }
     let mut post = zeroed(32, MAX_FONT_BYTES)?;
-    if let Some(range) = font.tables.get(b"post") {
-        if let Some(bytes) = font
+    if let Some(range) = font.tables.get(b"post")
+        && let Some(bytes) = font
             .data
             .get(range.clone())
             .filter(|bytes| bytes.len() >= 32)
-        {
-            patch(&mut post, 4, slice(bytes, 4, 28)?)?;
-        }
+    {
+        patch(&mut post, 4, slice(bytes, 4, 28)?)?;
     }
     set32(&mut post, 0, 0x0003_0000)?;
     for at in [16, 20, 24, 28] {
