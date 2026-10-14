@@ -2,7 +2,7 @@
 
 use std::io;
 
-use super::{manifest, name, page_truth, reference, ContentTruth, Fixture, House, LETTER};
+use super::{ContentTruth, Fixture, House, LETTER, manifest, name, page_truth, reference};
 use crate::{Value, Writer};
 
 const PASSWORD: &[u8] = b"house-chacha-password";

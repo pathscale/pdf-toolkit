@@ -1,10 +1,10 @@
 use std::sync::Arc;
 
 use pdf_core::{DocError, LimitKind, ObjectRef};
-use pdf_write::annot::{Annot, AnnotKind};
 use pdf_write::Value;
+use pdf_write::annot::{Annot, AnnotKind};
 
-use crate::{check, get, malformed, set, Editor, Pending, StreamData};
+use crate::{Editor, Pending, StreamData, check, get, malformed, set};
 
 impl Editor {
     pub fn add_annotation(&mut self, page: u32, annot: &Annot) -> Result<ObjectRef, DocError> {

@@ -6,7 +6,7 @@
 
 use std::io;
 
-use crate::{sha256, Dict, Value};
+use crate::{Dict, Value, sha256};
 
 mod md5;
 

@@ -4,7 +4,7 @@ use std::ops::Range;
 use std::sync::Arc;
 
 use super::bounds::*;
-use super::emit::{dict, name, reference, Output};
+use super::emit::{Output, dict, name, reference};
 use crate::Value;
 
 pub(super) fn slice(bytes: &[u8], at: usize, length: usize) -> io::Result<&[u8]> {

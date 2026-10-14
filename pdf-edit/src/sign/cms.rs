@@ -13,12 +13,12 @@ use der::{Any, DateTime, Decode, Encode};
 use p256::ecdsa::signature::hazmat::{PrehashSigner, PrehashVerifier};
 use pdf_core::DocError;
 use sha2::Digest;
+use x509_cert::Certificate;
 use x509_cert::attr::Attribute;
 use x509_cert::spki::AlgorithmIdentifierOwned;
 use x509_cert::time::Time;
-use x509_cert::Certificate;
 
-use super::{unsupported, Curve, SignOptions, Signer, SubFilter};
+use super::{Curve, SignOptions, Signer, SubFilter, unsupported};
 use crate::malformed;
 
 pub(super) const ID_DATA: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.2.840.113549.1.7.1");

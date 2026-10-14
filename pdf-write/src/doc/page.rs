@@ -2,7 +2,7 @@ use std::io;
 
 use super::bounds::*;
 use super::{Color, Destination, DocumentBuilder, Font, FontId, ImageId, Link, Target};
-use crate::{serialize_value, Value};
+use crate::{Value, serialize_value};
 
 /// Nesting limit for `save`, matching common reader limits for `q`.
 const MAX_SAVE_DEPTH: usize = 28;

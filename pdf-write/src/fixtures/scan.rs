@@ -5,8 +5,8 @@ use std::io;
 use crate::encode::scan;
 
 use super::{
-    fixture_resources, image_dictionary, image_truth, manifest, name, rect, sha256, Encoding,
-    Fixture, House, Value,
+    Encoding, Fixture, House, Value, fixture_resources, image_dictionary, image_truth, manifest,
+    name, rect, sha256,
 };
 
 const WIDTH: u32 = 64;

@@ -519,11 +519,7 @@ impl Tier1 {
                 },
                 1 => {
                     if v == 0 {
-                        if d == 0 {
-                            5
-                        } else {
-                            6
-                        }
+                        if d == 0 { 5 } else { 6 }
                     } else {
                         7
                     }
@@ -548,11 +544,7 @@ impl Tier1 {
             v = v.abs();
         }
         let context = if h == 0 {
-            if v == 0 {
-                9
-            } else {
-                10
-            }
+            if v == 0 { 9 } else { 10 }
         } else {
             match v {
                 -1 => 11,

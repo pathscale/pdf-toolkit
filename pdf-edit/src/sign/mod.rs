@@ -21,16 +21,16 @@
 use std::sync::Arc;
 
 use pdf_core::{DocError, Limits, ObjectRef};
-use pdf_write::doc::PdfDate;
 use pdf_write::Value;
+use pdf_write::doc::PdfDate;
 
-use crate::{get, malformed, set, value, wrong, Editor, Pending};
+use crate::{Editor, Pending, get, malformed, set, value, wrong};
 
 mod cms;
 mod verify;
 
 pub use cms::self_signed_certificate;
-pub use verify::{verify, DigestCheck, SignatureCheck, SignatureReport};
+pub use verify::{DigestCheck, SignatureCheck, SignatureReport, verify};
 
 /// Bytes reserved for the DER `SignedData` inside `/Contents`.
 const DEFAULT_RESERVE: usize = 8192;
