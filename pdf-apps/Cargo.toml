@@ -29,7 +29,7 @@ pdf-raster = { package = "pdf-toolkit-raster", version = "^0.3.9", path = "../pd
 pdf-render = { package = "pdf-toolkit-render", version = "^0.3.9", path = "../pdf-render" }
 pdf-toolkit-edit = { version = "^0.3.9", path = "../pdf-edit", default-features = false }
 libc = "^0.2.189"
-nagoya = { version = "^0.1.12", path = "../../nagoya" }
+nagoya = { version = "^0.1.12" }
 sha2 = { version = "^0.11", default-features = false, optional = true }
 cms = { version = "^0.3.0-pre.2", default-features = false, optional = true }
 der = { version = "^0.8", default-features = false, features = ["alloc", "oid"], optional = true }

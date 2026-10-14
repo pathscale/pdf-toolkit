@@ -15,7 +15,7 @@ name = "pdf-inspect"
 path = "src/main.rs"
 
 [dependencies]
-nagoya = { version = "^0.1.12", path = "../../nagoya", features = ["reactor"] }
+nagoya = { version = "^0.1.12", features = ["reactor"] }
 libc = "^0.2.189"
 rusty_alloc = { package = "ps-rusty_alloc", version = "^2.3.3" }
 pdf-core = { package = "pdf-toolkit-core", version = "0.3.9", path = "../pdf-core", default-features = false, features = ["std"] }
