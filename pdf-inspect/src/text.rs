@@ -55,7 +55,7 @@ fn repaired_text(document: &Document) -> Result<String, String> {
 }
 
 pub(super) fn run_text(path: &Path, limits: Limits, repair: bool) -> u8 {
-    let source = match file::open(path, limits.max_file_bytes) {
+    let source = match file::open(path, limits.max_file_bytes.min(crate::app_caps::hard("input-bytes"))) {
         Ok(source) => source,
         Err(error) => {
             eprintln!("{error}");
@@ -194,7 +194,7 @@ fn write_page(json: &mut JsonWriter, page: &PageReceipt) {
 }
 
 pub(super) fn run_receipt(path: &Path, limits: Limits) -> u8 {
-    let source = match file::open(path, limits.max_file_bytes) {
+    let source = match file::open(path, limits.max_file_bytes.min(crate::app_caps::hard("input-bytes"))) {
         Ok(source) => source,
         Err(error) => {
             eprintln!("{error}");

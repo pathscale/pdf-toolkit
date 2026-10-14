@@ -78,7 +78,7 @@ pub(crate) fn fixture_values(
 }
 
 pub(crate) fn run(path: &Path, limits: Limits) -> u8 {
-    let source = match file::open(path, limits.max_file_bytes) {
+    let source = match file::open(path, limits.max_file_bytes.min(crate::app_caps::hard("input-bytes"))) {
         Ok(source) => source,
         Err(error) => {
             eprintln!("pdf-inspect: {error}");
