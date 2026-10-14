@@ -6,6 +6,7 @@ members = [
     "pdf-render",
     "pdf-raster",
     "pdf-inspect",
+    "pdf-apps",
     "pdf-write",
     "pdf-edit",
     "pdf-toolkit",

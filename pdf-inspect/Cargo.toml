@@ -2,7 +2,7 @@
 name = "pdf-toolkit-inspect"
 description = "pdf-inspect: summary, text, receipts, semantic JSON, rendering, benchmarks, fuzzing and fixture checks for PDFs"
 version.workspace = true
-edition.workspace = true
+edition = "2024"
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true

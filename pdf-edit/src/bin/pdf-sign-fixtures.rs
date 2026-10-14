@@ -11,8 +11,13 @@ use std::process::ExitCode;
 #[path = "../sign_fixtures.rs"]
 mod fixtures;
 
+#[path = "../../../pdf-apps/src/app_caps.rs"]
+mod app_caps;
+
 fn main() -> ExitCode {
-    let Some(directory) = env::args_os().nth(1).map(PathBuf::from) else {
+    let _caps = app_caps::start([2147483648, 300, 600, 256, 2, 32, 268435456, 10000, 10000]);
+    app_caps::stage("pdf-edit/src/bin/pdf-sign-fixtures.rs: fixture generation or round trip");
+    let Some(directory) = app_caps::args_os().nth(1).map(PathBuf::from) else {
         eprintln!("usage: pdf-sign-fixtures DIR");
         return ExitCode::from(2);
     };

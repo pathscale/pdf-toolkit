@@ -1,4 +1,5 @@
 [package]
+autobins = false
 name = "pdf-toolkit-edit"
 description = "Incremental PDF updates that keep the original bytes, plus a writer and editor round-trip checker"
 version.workspace = true
@@ -15,9 +16,7 @@ default = ["sign"]
 # ECDSA P-256 and P-384 signing and verification (`pdf_edit::sign`).
 sign = ["dep:p256", "dep:p384", "dep:sha2", "dep:cms", "dep:x509-cert", "dep:der"]
 
-[[bin]]
-name = "pdf-sign-fixtures"
-required-features = ["sign"]
+
 
 [dependencies]
 pdf-core = { package = "pdf-toolkit-core", version = "0.3.9", path = "../pdf-core", default-features = false, features = ["std"] }
