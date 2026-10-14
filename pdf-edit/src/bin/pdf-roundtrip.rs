@@ -5,7 +5,6 @@
 //! CLASSIC_PDF XREF_PDF runs that pair without the house fixture pass.
 //! A missing house directory yields one failure that names that path.
 
-use std::env;
 use std::fmt::Debug;
 use std::fs::{self, File};
 use std::io::{self, Read, Write};

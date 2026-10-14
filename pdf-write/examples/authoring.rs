@@ -7,7 +7,7 @@
 
 use std::sync::Arc;
 
-use pdf_toolkit_write::doc::{
+use pdf_write::doc::{
     Align, Color, DocumentBuilder, Margins, Metadata, PageSetup, PageSize, PdfDate, StandardFont,
     TextStyle, WriteOptions,
 };

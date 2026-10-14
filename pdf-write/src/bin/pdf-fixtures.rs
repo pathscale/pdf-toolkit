@@ -1,4 +1,3 @@
-use std::env;
 use std::io;
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -15,7 +14,7 @@ fn run() -> io::Result<()> {
         ));
     }
     let destination = PathBuf::from(destination);
-    let count = pdf_toolkit_write::fixtures::write_fixtures(&destination)?;
+    let count = pdf_write::fixtures::write_fixtures(&destination)?;
     println!("wrote {count} fixtures");
     Ok(())
 }
