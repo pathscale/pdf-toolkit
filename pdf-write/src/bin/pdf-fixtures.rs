@@ -25,6 +25,7 @@ mod app_caps;
 fn main() -> ExitCode {
     let _caps = app_caps::start([2147483648, 300, 600, 256, 2, 32, 268435456, 10000, 10000]);
     app_caps::stage("pdf-write/src/bin/pdf-fixtures.rs: fixture generation or round trip");
+    app_caps::turn("write PDF fixtures");
     match run() {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {

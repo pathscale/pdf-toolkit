@@ -492,14 +492,6 @@ fn open_source(
     }
 }
 
-fn app_caps_open(path: &Path, maximum: u64) -> Result<PdfSource, DocError> {
-    app_caps::stage(Arc::<str>::from(format!("parse PDF {}", path.display())));
-    if let Ok(metadata) = std::fs::metadata(path) {
-        app_caps::check("input-bytes", metadata.len());
-    }
-    file::open(path, maximum.min(app_caps::hard("input-bytes")))
-}
-
 fn open_document(source: PdfSource, limits: Limits, repair: bool) -> Result<Document, DocError> {
     if repair {
         Document::open_with(source, limits, pdf_core::OpenMode::Repair)
@@ -1511,10 +1503,10 @@ fn stream_filter_names(resolver: &mut Resolver<'_>, object: &Object) -> Vec<Vec<
     };
     let mut names = Vec::new();
     for item in array.iter() {
-        if let Ok(value) = resolver.resolve(item) {
-            if let Some(name) = value.get().as_name() {
-                names.push(name.decoded().into_owned());
-            }
+        if let Ok(value) = resolver.resolve(item)
+            && let Some(name) = value.get().as_name()
+        {
+            names.push(name.decoded().into_owned());
         }
     }
     names
@@ -1777,10 +1769,9 @@ fn bench_sample(path: &Path, limits: Limits) -> Result<BenchSample, String> {
                 fallback_font: None,
             };
             if let Err(error) = rasterize_page(&mut resolver, page, &options, [255, 255, 255, 255])
+                && refusal.is_none()
             {
-                if refusal.is_none() {
-                    refusal = Some(error.code().to_string());
-                }
+                refusal = Some(error.code().to_string());
             }
         }
         render_ms = render_start.elapsed().as_secs_f64() * 1000.0;
@@ -2007,10 +1998,10 @@ fn mutate_digit_run(bytes: &mut [u8], state: &mut u64) -> bool {
         if start >= tail_start {
             tail.push(range);
         }
-        if let Some(target) = startxref {
-            if start.abs_diff(target) <= 64 {
-                near_startxref.push(range);
-            }
+        if let Some(target) = startxref
+            && start.abs_diff(target) <= 64
+        {
+            near_startxref.push(range);
         }
     }
 
@@ -2882,14 +2873,13 @@ fn render_fixture_expectations(
             Ok(raster) => {
                 actuals.insert(format!("page.{index}.render"), "ok".to_string());
                 for (key, _) in expectations {
-                    if let Some((page_index, x, y)) = parse_pixel_key(key) {
-                        if page_index == index {
-                            actuals.insert(
-                                key.clone(),
-                                pixel_rgb(&raster, x, y)
-                                    .unwrap_or_else(|| "unavailable".to_string()),
-                            );
-                        }
+                    if let Some((page_index, x, y)) = parse_pixel_key(key)
+                        && page_index == index
+                    {
+                        actuals.insert(
+                            key.clone(),
+                            pixel_rgb(&raster, x, y).unwrap_or_else(|| "unavailable".to_string()),
+                        );
                     }
                 }
             }
@@ -2981,25 +2971,25 @@ fn actual_fixture_values(
             if xref || object.id() == document.encryption_ref() {
                 continue;
             }
-            if let Some(range) = object.stream_range() {
-                if range.len() >= 40 {
-                    let mut damaged = source.bytes().to_vec();
-                    let position = range
-                        .start
-                        .checked_add(24)
-                        .ok_or_else(|| "ciphertext position overflow".to_string())?;
-                    let byte = damaged
-                        .get_mut(position)
-                        .ok_or_else(|| "ciphertext position outside file".to_string())?;
-                    *byte ^= 1;
-                    let damaged = PdfSource::new(std::sync::Arc::<[u8]>::from(damaged))
-                        .map_err(|error| error.to_string())?;
-                    corruption = match Document::open_with_password(damaged, limits, password) {
-                        Ok(_) => "none".to_string(),
-                        Err(error) => error.code().to_string(),
-                    };
-                    break;
-                }
+            if let Some(range) = object.stream_range()
+                && range.len() >= 40
+            {
+                let mut damaged = source.bytes().to_vec();
+                let position = range
+                    .start
+                    .checked_add(24)
+                    .ok_or_else(|| "ciphertext position overflow".to_string())?;
+                let byte = damaged
+                    .get_mut(position)
+                    .ok_or_else(|| "ciphertext position outside file".to_string())?;
+                *byte ^= 1;
+                let damaged = PdfSource::new(std::sync::Arc::<[u8]>::from(damaged))
+                    .map_err(|error| error.to_string())?;
+                corruption = match Document::open_with_password(damaged, limits, password) {
+                    Ok(_) => "none".to_string(),
+                    Err(error) => error.code().to_string(),
+                };
+                break;
             }
         }
         actuals.insert("open.corrupt_ciphertext".to_string(), corruption);

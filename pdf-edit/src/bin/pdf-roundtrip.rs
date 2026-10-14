@@ -1070,17 +1070,16 @@ fn run_incremental(
             "repeat save differs",
         );
     }
-    if let Some(second_editor) = report.obtain(name, "second-edit", edit(original.clone(), title)) {
-        if let Some(second) =
+    if let Some(second_editor) = report.obtain(name, "second-edit", edit(original.clone(), title))
+        && let Some(second) =
             report.obtain(name, "second-save", second_editor.save().map_err(describe))
-        {
-            report.check(
-                name,
-                "independent-edit-determinism",
-                bytes == second,
-                "second edit differs",
-            );
-        }
+    {
+        report.check(
+            name,
+            "independent-edit-determinism",
+            bytes == second,
+            "second edit differs",
+        );
     }
     let Some(saved) = report.obtain(
         name,
