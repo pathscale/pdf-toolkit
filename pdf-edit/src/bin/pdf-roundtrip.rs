@@ -210,7 +210,7 @@ fn config() -> CheckResult<Config> {
         _ => {
             return Err(
                 "usage: pdf-roundtrip OUT_DIR [HOUSE_DIR | CLASSIC_PDF XREF_PDF]".to_owned(),
-            )
+            );
         }
     };
     Ok(Config {
@@ -275,7 +275,8 @@ fn read_bounded(path: &Path) -> CheckResult<Arc<[u8]>> {
     let capacity = usize::try_from(metadata.len()).map_err(describe)?;
     let mut bytes = Vec::new();
     bytes.try_reserve_exact(capacity).map_err(describe)?;
-    let read_limit = MAX_FILE_BYTES.min(app_caps::hard("input-bytes"))
+    let read_limit = MAX_FILE_BYTES
+        .min(app_caps::hard("input-bytes"))
         .checked_add(1)
         .ok_or_else(|| "file byte limit overflow".to_owned())?;
     file.take(read_limit)

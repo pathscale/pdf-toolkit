@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use pdf_core::file;
 use pdf_core::limits::Limits;
-use pdf_edit::sign::{verify, SignatureReport};
+use pdf_edit::sign::{SignatureReport, verify};
 
 fn values(index: usize, report: &SignatureReport) -> Vec<(String, String)> {
     let prefix = format!("signature.{index}");
@@ -78,7 +78,12 @@ pub(crate) fn fixture_values(
 }
 
 pub(crate) fn run(path: &Path, limits: Limits) -> u8 {
-    let source = match file::open(path, limits.max_file_bytes.min(crate::app_caps::hard("input-bytes"))) {
+    let source = match file::open(
+        path,
+        limits
+            .max_file_bytes
+            .min(crate::app_caps::hard("input-bytes")),
+    ) {
         Ok(source) => source,
         Err(error) => {
             eprintln!("pdf-inspect: {error}");
@@ -100,9 +105,5 @@ pub(crate) fn run(path: &Path, limits: Limits) -> u8 {
             println!("{key}={value}");
         }
     }
-    if intact {
-        0
-    } else {
-        1
-    }
+    if intact { 0 } else { 1 }
 }

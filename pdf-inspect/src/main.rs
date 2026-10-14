@@ -4,37 +4,54 @@ use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
 use pdf_core::document::{Document, Resolver, XrefEntry, XrefKind};
 use pdf_core::error::{DocError, Warning};
 mod file {
     pub use pdf_core::file::{FileOpenError, open_repair};
-    pub fn open(path: &std::path::Path, maximum: u64) -> Result<pdf_core::source::PdfSource, pdf_core::error::DocError> {
-        crate::app_caps::stage(std::sync::Arc::<str>::from(format!("read PDF {}", path.display())));
-        if let Ok(metadata) = std::fs::metadata(path) { crate::app_caps::check("input-bytes", metadata.len()); }
-        pdf_core::file::open(path, maximum.min(crate::app_caps::hard("input-bytes"))).map_err(|error| match error {
-            FileOpenError::Source(error) => pdf_core::error::DocError::Source(error),
-            FileOpenError::TooLarge { limit, observed } => pdf_core::error::DocError::Refused(pdf_core::limits::Refusal {
-                limit: pdf_core::limits::LimitKind::FileBytes, requested: observed, maximum: limit,
-            }),
-            FileOpenError::Io(error) => {
-                eprintln!("pdf-inspect: {}: {error}", path.display());
-                pdf_core::error::DocError::Malformed { offset: 0, what: "PDF source I/O" }
+    pub fn open(
+        path: &std::path::Path,
+        maximum: u64,
+    ) -> Result<pdf_core::source::PdfSource, pdf_core::error::DocError> {
+        crate::app_caps::stage(std::sync::Arc::<str>::from(format!(
+            "read PDF {}",
+            path.display()
+        )));
+        if let Ok(metadata) = std::fs::metadata(path) {
+            crate::app_caps::check("input-bytes", metadata.len());
+        }
+        pdf_core::file::open(path, maximum.min(crate::app_caps::hard("input-bytes"))).map_err(
+            |error| match error {
+                FileOpenError::Source(error) => pdf_core::error::DocError::Source(error),
+                FileOpenError::TooLarge { limit, observed } => {
+                    pdf_core::error::DocError::Refused(pdf_core::limits::Refusal {
+                        limit: pdf_core::limits::LimitKind::FileBytes,
+                        requested: observed,
+                        maximum: limit,
+                    })
+                }
+                FileOpenError::Io(error) => {
+                    eprintln!("pdf-inspect: {}: {error}", path.display());
+                    pdf_core::error::DocError::Malformed {
+                        offset: 0,
+                        what: "PDF source I/O",
+                    }
+                }
             },
-        })
+        )
     }
 }
 use pdf_core::limits::Limits;
 use pdf_core::object::{DictRef, Object};
-use pdf_core::pages::{page_count_hint, Page, PageWalk};
+use pdf_core::pages::{Page, PageWalk, page_count_hint};
 use pdf_core::source::PdfSource;
 use pdf_core::work::ObjectRef;
 use pdf_raster::{encode_png, render_page as rasterize_page};
 use pdf_render::RenderOptions;
-use pdf_toolkit_inspect::{digest_hex, format_number, JsonWriter, Sha256};
+use pdf_toolkit_inspect::{JsonWriter, Sha256, digest_hex, format_number};
 
 /// println! that ends the process quietly once stdout is closed, for example by `head`.
 macro_rules! out {
@@ -464,7 +481,9 @@ fn open_source(
     repair: bool,
 ) -> Result<PdfSource, file::FileOpenError> {
     app_caps::stage(Arc::<str>::from(format!("read PDF {}", path.display())));
-    if let Ok(metadata) = std::fs::metadata(path) { app_caps::check("input-bytes", metadata.len()); }
+    if let Ok(metadata) = std::fs::metadata(path) {
+        app_caps::check("input-bytes", metadata.len());
+    }
     let maximum = limits.max_file_bytes.min(app_caps::hard("input-bytes"));
     if repair {
         pdf_core::file::open_repair(path, maximum)
@@ -475,7 +494,9 @@ fn open_source(
 
 fn app_caps_open(path: &Path, maximum: u64) -> Result<PdfSource, DocError> {
     app_caps::stage(Arc::<str>::from(format!("parse PDF {}", path.display())));
-    if let Ok(metadata) = std::fs::metadata(path) { app_caps::check("input-bytes", metadata.len()); }
+    if let Ok(metadata) = std::fs::metadata(path) {
+        app_caps::check("input-bytes", metadata.len());
+    }
     file::open(path, maximum.min(app_caps::hard("input-bytes")))
 }
 
@@ -1098,7 +1119,8 @@ fn run_repair(path: &Path, limits: Limits) -> u8 {
     warnings.dedup();
     out!(
         "{{\"strict\":{:?},\"pages\":{pages},\"page_errors\":{page_errors},\"glyphs\":{glyphs},\"warnings\":{:?}}}",
-        strict, warnings
+        strict,
+        warnings
     );
     0
 }
@@ -1816,7 +1838,10 @@ fn median_u64(values: impl Iterator<Item = u64>) -> u64 {
 }
 
 fn run_bench(paths: &[PathBuf], repeat: usize, limits: Limits) -> u8 {
-    app_caps::check("iterations", (paths.len() as u64).saturating_mul(repeat as u64));
+    app_caps::check(
+        "iterations",
+        (paths.len() as u64).saturating_mul(repeat as u64),
+    );
     for path in paths {
         reset_peak_bytes();
         let mut samples = Vec::new();
@@ -2514,11 +2539,7 @@ fn run_mutate(path: &Path, seed: u64, count: usize) -> u8 {
     json.end_object();
     out!("{}", json.finish());
 
-    if panicked > 0 {
-        2
-    } else {
-        0
-    }
+    if panicked > 0 { 2 } else { 0 }
 }
 
 struct Manifest {
@@ -3211,9 +3232,5 @@ fn run_check(directory: &Path) -> u8 {
     }
 
     out!("fixtures: {passed_fixtures} passed, {failed_fixtures} failed, {checked_keys} keys");
-    if failed_fixtures > 0 {
-        1
-    } else {
-        0
-    }
+    if failed_fixtures > 0 { 1 } else { 0 }
 }
