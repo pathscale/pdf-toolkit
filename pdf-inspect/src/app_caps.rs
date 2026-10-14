@@ -219,6 +219,6 @@ pub fn turn(value: impl Into<Arc<str>>) { stage(value); check("iterations", TURN
 pub fn child(pid: u32) { OWNED.lock().unwrap_or_else(|e| e.into_inner()).push(pid as i32); }
 pub fn reaped(pid: u32) { OWNED.lock().unwrap_or_else(|e| e.into_inner()).retain(|p| *p != pid as i32); }
 fn stop_owned() {
-    #[unix]
+    #[cfg(unix)]
     for pid in OWNED.lock().unwrap_or_else(|e| e.into_inner()).iter() { unsafe { libc::kill(-*pid, libc::SIGKILL); } }
 }
