@@ -8,8 +8,8 @@
 use std::sync::Arc;
 
 use pdf_core::Limits;
-use pdf_toolkit_edit::sign::{self, Curve, SignOptions, Signer, SubFilter};
 use pdf_toolkit_edit::Editor;
+use pdf_toolkit_edit::sign::{self, Curve, SignOptions, Signer, SubFilter};
 use pdf_write::doc::{
     Align, Color, DocumentBuilder, Margins, Metadata, PageSetup, PageSize, PdfDate, StandardFont,
     TextStyle, WriteOptions,

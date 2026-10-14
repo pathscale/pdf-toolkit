@@ -6,7 +6,7 @@
 use std::io;
 use std::sync::Arc;
 
-use super::{box_text, manifest, sha256, Fixture};
+use super::{Fixture, box_text, manifest, sha256};
 use crate::doc::{
     Align, Color, Destination, DocumentBuilder, Margins, Metadata, PageSetup, PageSize, Paint,
     PdfDate, StandardFont, TextStyle, WriteOptions,

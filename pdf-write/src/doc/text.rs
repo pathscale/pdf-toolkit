@@ -4,9 +4,9 @@
 use std::io;
 
 use super::bounds::*;
-use super::page::{use_font, win_ansi, PageBuilder, Paint};
+use super::page::{PageBuilder, Paint, use_font, win_ansi};
 use super::{DocumentBuilder, Font, FontId};
-use crate::{serialize_value, Value};
+use crate::{Value, serialize_value};
 
 /// Tolerance in points when a line exactly fills the box.
 const FIT_EPSILON: f32 = 0.001;

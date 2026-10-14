@@ -17,16 +17,12 @@ use pdf_toolkit_edit::sign::{
 use pdf_write::doc::PdfDate;
 
 use super::sign_fixtures;
-use super::{describe, read_bounded, CheckResult, Config, Editor, Report};
+use super::{CheckResult, Config, Editor, Report, describe, read_bounded};
 
 const SHA256_WITH_RSA: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.2.840.113549.1.1.11");
 
 fn require(value: bool, what: &str) -> CheckResult<()> {
-    if value {
-        Ok(())
-    } else {
-        Err(what.to_owned())
-    }
+    if value { Ok(()) } else { Err(what.to_owned()) }
 }
 
 fn verify(bytes: &[u8]) -> CheckResult<Vec<SignatureReport>> {

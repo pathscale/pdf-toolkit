@@ -2,7 +2,7 @@
 
 use std::io;
 
-use super::{manifest, name, rect, reference, sha256, Encoding, Fixture, House, Value};
+use super::{Encoding, Fixture, House, Value, manifest, name, rect, reference, sha256};
 use crate::annot::{self, Annot, AnnotKind};
 
 const HEIGHT: u32 = 320;

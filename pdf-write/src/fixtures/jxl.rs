@@ -3,8 +3,8 @@
 use std::io;
 
 use super::{
-    fixture_resources, image_dictionary, image_truth, manifest, name, rect, reference, sha256,
-    Encoding, Fixture, House, Value,
+    Encoding, Fixture, House, Value, fixture_resources, image_dictionary, image_truth, manifest,
+    name, rect, reference, sha256,
 };
 
 const BOUNDS: [f64; 4] = [0.0, 0.0, 402.0, 263.0];

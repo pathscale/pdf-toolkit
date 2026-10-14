@@ -4,7 +4,7 @@ use std::fs;
 use std::io;
 use std::path::Path;
 
-use crate::{encode, serialize_value, sha256, Dict, Value, Writer, XrefCompression};
+use crate::{Dict, Value, Writer, XrefCompression, encode, serialize_value, sha256};
 
 use crate::encrypt;
 mod annotations;

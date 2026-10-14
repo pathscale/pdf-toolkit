@@ -6,7 +6,7 @@ use pdf_core::{DocError, Document, LimitKind, ObjectRef, PdfSource};
 use pdf_write::Value;
 
 use crate::pages::{self, PageEntry};
-use crate::{check, get, malformed, refused, set, value, Editor, Pending};
+use crate::{Editor, Pending, check, get, malformed, refused, set, value};
 
 pub(crate) struct StreamData {
     bytes: Arc<[u8]>,

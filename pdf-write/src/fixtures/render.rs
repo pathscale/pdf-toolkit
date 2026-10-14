@@ -3,8 +3,8 @@
 use std::io;
 
 use super::{
-    encode, fixture_resources, image_dictionary, manifest, name, rect, reference, sha256, Encoding,
-    Fixture, House, Value,
+    Encoding, Fixture, House, Value, encode, fixture_resources, image_dictionary, manifest, name,
+    rect, reference, sha256,
 };
 
 mod truetype;
@@ -564,11 +564,7 @@ fn glyph_color(point: Point) -> Color {
         ring_point,
         false,
     );
-    if square(168.0) && !hole {
-        BLACK
-    } else {
-        WHITE
-    }
+    if square(168.0) && !hole { BLACK } else { WHITE }
 }
 
 pub(super) fn truetype() -> io::Result<Fixture> {

@@ -4,7 +4,7 @@
 
 use std::io;
 
-use pdf_core::filter::{decode as filter_decode, DecodeParams, FilterKind, FilterStep};
+use pdf_core::filter::{DecodeParams, FilterKind, FilterStep, decode as filter_decode};
 
 use super::bounds::*;
 use super::font::{read32, slice};

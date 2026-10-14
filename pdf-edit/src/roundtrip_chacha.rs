@@ -4,19 +4,15 @@ use std::sync::Arc;
 
 use pdf_core::pages::PageWalk;
 use pdf_core::{DocError, Document, Limits, ObjectRef, PdfSource};
-use pdf_write::{encode, Value, Writer, XrefCompression};
+use pdf_write::{Value, Writer, XrefCompression, encode};
 
-use super::{describe, CheckResult, Config, Editor};
+use super::{CheckResult, Config, Editor, describe};
 
 const PASSWORD: &[u8] = b"roundtrip-chacha-password";
 const CONTENT: &[u8] = b"BT /F1 12 Tf 72 720 Td (ChaCha round trip) Tj ET\n";
 
 fn require(value: bool, what: &str) -> CheckResult<()> {
-    if value {
-        Ok(())
-    } else {
-        Err(what.to_owned())
-    }
+    if value { Ok(()) } else { Err(what.to_owned()) }
 }
 
 fn name(value: &str) -> Value {

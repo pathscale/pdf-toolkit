@@ -4,9 +4,9 @@ use std::io;
 
 use super::encrypt::Encryption;
 use super::{
-    manifest, name, page_truth, page_value, reference, ContentTruth, Fixture, House, LETTER,
+    ContentTruth, Fixture, House, LETTER, manifest, name, page_truth, page_value, reference,
 };
-use crate::{encode, Value};
+use crate::{Value, encode};
 
 const PLAIN: &[u8] =
     b"BT /F1 12 Tf 14 TL 72 720 Td (Empty user password) Tj T* (Encrypted strings and streams) Tj ET\n";
