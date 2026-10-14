@@ -3,7 +3,6 @@
 //!
 //! Usage: pdf-sign-fixtures DIR
 
-use std::env;
 use std::fs;
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -17,6 +16,7 @@ mod app_caps;
 fn main() -> ExitCode {
     let _caps = app_caps::start([2147483648, 300, 600, 256, 2, 32, 268435456, 10000, 10000]);
     app_caps::stage("pdf-edit/src/bin/pdf-sign-fixtures.rs: fixture generation or round trip");
+    app_caps::turn("write signing fixtures");
     let Some(directory) = app_caps::args_os().nth(1).map(PathBuf::from) else {
         eprintln!("usage: pdf-sign-fixtures DIR");
         return ExitCode::from(2);

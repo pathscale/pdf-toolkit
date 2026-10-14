@@ -369,12 +369,11 @@ fn compress_block(state: &mut [u32; 8], block: &[u8]) {
     let mut words = [0u32; 64];
     for (index, word) in words.iter_mut().take(16).enumerate() {
         let start = index.saturating_mul(4);
-        if let Some(chunk) = block.get(start..start + 4) {
-            if let (Some(a), Some(b), Some(c), Some(d)) =
+        if let Some(chunk) = block.get(start..start + 4)
+            && let (Some(a), Some(b), Some(c), Some(d)) =
                 (chunk.first(), chunk.get(1), chunk.get(2), chunk.get(3))
-            {
-                *word = u32::from_be_bytes([*a, *b, *c, *d]);
-            }
+        {
+            *word = u32::from_be_bytes([*a, *b, *c, *d]);
         }
     }
 
