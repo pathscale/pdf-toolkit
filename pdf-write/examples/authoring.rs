@@ -25,7 +25,7 @@ mod app_caps;
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _caps = app_caps::start([536870912, 30, 120, 256, 1, 32, 16777216, 10000, 10000]);
     app_caps::turn("PDF authoring");
-    let args: Vec<String> = std::env::args().skip(1).collect();
+    let args: Vec<String> = app_caps::args().skip(1).collect();
     let [font, logo, out] = args.as_slice() else {
         return Err("usage: authoring FONT.ttf LOGO.png OUT.pdf".into());
     };
@@ -40,9 +40,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
     // An embedded TrueType font is subset, written as Identity-H Type0 with a
     // ToUnicode map, so any text it covers can be copied back out.
-    let body = doc.truetype_font(Arc::from(std::fs::read(font)?))?;
+    let body = doc.truetype_font(Arc::from(app_caps::read_bytes(font)?))?;
     let bold = doc.standard_font(StandardFont::HelveticaBold);
-    let logo = doc.png(&std::fs::read(logo)?);
+    let logo = doc.png(&app_caps::read_bytes(logo)?);
 
     let heading = TextStyle::new(bold, 24.0);
     let text = TextStyle::new(body, 11.0)
@@ -52,6 +52,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let top;
     {
+        app_caps::turn("PDF authoring: page");
         let mut page = doc.page_with(&setup);
         // [x, y, width, height] of the page inside its margins.
         let [x, y, width, height] = page.content_box();
@@ -69,6 +70,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         page.link_page(x + 80.0, top - 80.0, width - 80.0, 20.0, 1, top);
     }
     {
+        app_caps::turn("PDF authoring: page");
         let mut page = doc.page_with(&setup);
         let [x, y, width, height] = page.content_box();
         page.paragraph(&heading, [x, top - 30.0, width, 30.0], "Continued");
