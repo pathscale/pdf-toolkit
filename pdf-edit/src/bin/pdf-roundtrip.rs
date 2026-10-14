@@ -470,6 +470,8 @@ fn snapshot(bytes: Arc<[u8]>, font: Arc<[u8]>) -> CheckResult<Snapshot> {
     let mut resolver = document.resolver();
     let mut pages = Vec::new();
     for page in PageWalk::new(&mut resolver).map_err(describe)? {
+        app_caps::turn("round trip: decode page");
+        app_caps::check("cache-entries", pages.len() as u64 + 1);
         pages.push(page.map_err(describe)?);
     }
     let options = RenderOptions {
@@ -482,6 +484,7 @@ fn snapshot(bytes: Arc<[u8]>, font: Arc<[u8]>) -> CheckResult<Snapshot> {
     let mut retained = 0u64;
     // Sample order matches document order when there are at most MAX_PAGES pages.
     for index in sample_indexes(pages.len()) {
+        app_caps::turn(format!("round trip: raster page {index}"));
         let page = pages
             .get(index)
             .ok_or_else(|| format!("missing sampled page {index}"))?;
