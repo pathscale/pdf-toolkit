@@ -20,7 +20,7 @@
 
 use std::sync::Arc;
 
-use pdf_core::{DocError, Limits, ObjectRef};
+use pdf_core::{DocError, Document, Limits, ObjectRef, PdfSource, XrefEntry};
 use pdf_write::Value;
 use pdf_write::doc::PdfDate;
 
@@ -153,10 +153,11 @@ pub fn sign(
     if editor.document.encrypted() {
         return Err(unsupported("sign:encrypted document"));
     }
-    add_field(&mut editor, options, &time, reserve)?;
+    let signature_id = add_field(&mut editor, options, &time, reserve)?;
     let mut out = editor.save()?;
 
-    let (range_at, contents_at, contents_end) = placeholders(&out, original)?;
+    let (range_at, contents_at, contents_end) =
+        placeholders(&out, original, signature_id, limits, reserve)?;
     let after = contents_end;
     let total = out.len();
     let byte_range = [0, contents_at, after, total - after];
@@ -185,36 +186,117 @@ pub fn sign(
     for byte in &der {
         hex.push_str(&format!("{byte:02x}"));
     }
-    out.get_mut(contents_at + 1..contents_at + 1 + hex.len())
+    let hex_start = contents_at
+        .checked_add(1)
+        .ok_or_else(|| malformed("signature contents"))?;
+    let hex_end = contents_end
+        .checked_sub(1)
+        .ok_or_else(|| malformed("signature contents"))?;
+    let capacity = hex_end
+        .checked_sub(hex_start)
+        .ok_or_else(|| malformed("signature contents"))?;
+    if hex.len() > capacity {
+        return Err(unsupported("sign:signature larger than reserved space"));
+    }
+    let write_end = hex_start
+        .checked_add(hex.len())
+        .ok_or_else(|| malformed("signature contents"))?;
+    out.get_mut(hex_start..write_end)
         .ok_or_else(|| malformed("signature contents"))?
         .copy_from_slice(hex.as_bytes());
     Ok(out)
 }
 
-/// Finds the ByteRange placeholder and the Contents hex string after `from`.
-fn placeholders(out: &[u8], from: usize) -> Result<(usize, usize, usize), DocError> {
-    let tail = out
-        .get(from..)
-        .ok_or_else(|| malformed("signature placeholder"))?;
-    let find = |needle: &[u8]| {
-        tail.windows(needle.len())
-            .position(|window| window == needle)
-            .map(|at| at + from)
+/// Locates parsed placeholders in the newly serialized signature object.
+fn placeholders(
+    out: &[u8],
+    from: usize,
+    signature_id: ObjectRef,
+    limits: Limits,
+    reserve: usize,
+) -> Result<(usize, usize, usize), DocError> {
+    let document = Document::open(PdfSource::new(Arc::<[u8]>::from(out))?, limits)?;
+    let offset = match document.xref().get(signature_id.number()) {
+        Some(XrefEntry::InUse { offset, generation })
+            if generation == signature_id.generation() =>
+        {
+            usize::try_from(offset).map_err(|_| malformed("signature object span"))?
+        }
+        _ => return Err(malformed("signature object span")),
     };
-    let range_key = find(b"/ByteRange ").ok_or_else(|| malformed("signature ByteRange"))?;
-    let range_at = range_key + b"/ByteRange ".len();
-    if out.get(range_at..range_at + BYTE_RANGE_PLACEHOLDER.len()) != Some(BYTE_RANGE_PLACEHOLDER) {
+    if offset < from || offset >= out.len() {
+        return Err(malformed("signature object span"));
+    }
+
+    let mut resolver = document.resolver();
+    let object = resolver
+        .get(signature_id)
+        .map_err(|_| malformed("signature object span"))?;
+    if object.id() != Some(signature_id) || object.is_stream() {
+        return Err(malformed("signature object span"));
+    }
+    let dict = object
+        .dict()
+        .ok_or_else(|| malformed("signature object span"))?;
+    if !dict
+        .get(b"Type")
+        .and_then(|value| value.as_name())
+        .is_some_and(|name| name.eq_bytes(b"Sig"))
+    {
+        return Err(malformed("signature object span"));
+    }
+
+    let object_span = object.root().span();
+    if object_span.start < offset || object_span.end > out.len() {
+        return Err(malformed("signature object span"));
+    }
+
+    let range = dict
+        .get(b"ByteRange")
+        .ok_or_else(|| malformed("signature ByteRange"))?;
+    if range.as_array().is_none() {
         return Err(malformed("signature ByteRange"));
     }
-    let contents_key = find(b"/Contents <").ok_or_else(|| malformed("signature Contents"))?;
-    let contents_at = contents_key + b"/Contents ".len();
-    let length = out
-        .get(contents_at + 1..)
-        .unwrap_or(&[])
-        .iter()
-        .position(|byte| *byte == b'>')
+    let range_span = range.span();
+    if range_span.start < object_span.start || range_span.end > object_span.end {
+        return Err(malformed("signature ByteRange"));
+    }
+    if out.get(range_span.clone()) != Some(BYTE_RANGE_PLACEHOLDER) {
+        return Err(malformed("signature ByteRange"));
+    }
+
+    let contents = dict
+        .get(b"Contents")
+        .filter(|value| value.as_str().is_some())
         .ok_or_else(|| malformed("signature Contents"))?;
-    Ok((range_at, contents_at, contents_at + 1 + length + 1))
+    let contents_span = contents.span();
+    if contents_span.start < object_span.start || contents_span.end > object_span.end {
+        return Err(malformed("signature Contents"));
+    }
+    let contents_bytes = out
+        .get(contents_span.clone())
+        .ok_or_else(|| malformed("signature Contents"))?;
+    let expected_length = reserve
+        .checked_mul(2)
+        .and_then(|length| length.checked_add(2))
+        .ok_or_else(|| malformed("signature Contents"))?;
+    if contents_bytes.len() != expected_length
+        || contents_bytes.first() != Some(&b'<')
+        || contents_bytes.last() != Some(&b'>')
+    {
+        return Err(malformed("signature Contents"));
+    }
+    let contents_hex = contents_bytes
+        .get(1..contents_bytes.len().saturating_sub(1))
+        .ok_or_else(|| malformed("signature Contents"))?;
+    if contents_hex.iter().any(|byte| *byte != b'0') {
+        return Err(malformed("signature Contents"));
+    }
+    if !(range_span.end <= contents_span.start || contents_span.end <= range_span.start) {
+        return Err(malformed("signature placeholder spans"));
+    }
+
+    Ok((range_span.start, contents_span.start, contents_span.end))
 }
 
 fn field_names(editor: &Editor, fields: &[Value]) -> Result<Vec<Vec<u8>>, DocError> {
@@ -237,7 +319,7 @@ fn add_field(
     options: &SignOptions,
     time: &str,
     reserve: usize,
-) -> Result<(), DocError> {
+) -> Result<ObjectRef, DocError> {
     editor.clean()?;
     let limits = *editor.document.limits();
     let root = editor
@@ -390,5 +472,5 @@ fn add_field(
     }
     editor.pending_bytes = total;
     editor.next = after;
-    Ok(())
+    Ok(signature_id)
 }

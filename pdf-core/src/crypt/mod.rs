@@ -354,10 +354,11 @@ pub(crate) fn decode_stream(
     stream: &Object,
     raw: &[u8],
     steps: &[FilterStep],
+    maximum: u64,
 ) -> Result<Decoded, DocError> {
-    let maximum = resolver.document().limits().max_decoded_bytes;
+    let maximum = maximum.min(resolver.document().limits().max_decoded_bytes);
     let crypt = resolver.document().crypt();
-    let exempt = is_type(stream, b"XRef")
+    let exempt = stream.is_xref_stream()
         || crypt.as_ref().is_some_and(|crypt| {
             crypt.excluded(stream.id()) || (!crypt.metadata && is_type(stream, b"Metadata"))
         });

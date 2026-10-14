@@ -39,6 +39,7 @@ pub struct Xref {
     entries: Vec<XrefEntry>,
     kind: XrefKind,
     sections: u32,
+    parsed_streams: BTreeSet<(u32, u16, usize)>,
 }
 
 impl Xref {
@@ -53,6 +54,16 @@ impl Xref {
     }
     pub fn sections(&self) -> u32 {
         self.sections
+    }
+    pub(crate) fn parsed_stream(&self, object: &Object) -> bool {
+        object.is_stream()
+            && object.id().is_some_and(|id| {
+                self.parsed_streams.contains(&(
+                    id.number(),
+                    id.generation(),
+                    object.root().span().start,
+                ))
+            })
     }
     pub fn counts(&self) -> XrefCounts {
         let mut counts = XrefCounts::default();
@@ -76,6 +87,7 @@ impl Xref {
             entries,
             kind,
             sections: 1,
+            parsed_streams: BTreeSet::new(),
         }
     }
 }
@@ -84,6 +96,7 @@ struct Section {
     entries: Vec<Option<XrefEntry>>,
     trailer: Object,
     kind: XrefKind,
+    parsed_stream: Option<(u32, u16, usize)>,
 }
 
 pub(crate) fn read(
@@ -102,6 +115,7 @@ pub(crate) fn read(
     let mut warnings = Vec::new();
     let (mut offset, shift) = locate(bytes, original, header, &mut warnings)?;
     let mut visited = BTreeSet::new();
+    let mut parsed_streams = BTreeSet::new();
     let mut entries: Vec<Option<XrefEntry>> = Vec::new();
     let mut newest = None;
     let mut kind = XrefKind::Table;
@@ -117,6 +131,9 @@ pub(crate) fn read(
         }
         count_section(&mut sections, limits)?;
         let mut section = section(&buf, offset, shift, limits, &mut warnings)?;
+        if let Some(parsed_stream) = section.parsed_stream {
+            parsed_streams.insert(parsed_stream);
+        }
         let table = section.kind == XrefKind::Table;
         let dict = section
             .trailer
@@ -140,8 +157,15 @@ pub(crate) fn read(
                 // The /XRefStm stream belongs to the same revision as its table:
                 // `sections` counts revisions, so it is not counted again.
                 let supplemental = stream(&buf, hybrid, shift, limits, &mut warnings)?;
+                if let Some(parsed_stream) = supplemental.parsed_stream {
+                    parsed_streams.insert(parsed_stream);
+                }
                 if supplemental.entries.len() > section.entries.len() {
-                    section.entries.resize(supplemental.entries.len(), None);
+                    grow_entries(
+                        &mut section.entries,
+                        supplemental.entries.len(),
+                        allocation_maximum(limits, buf.len()),
+                    )?;
                 }
                 for (number, entry) in supplemental.entries.into_iter().enumerate() {
                     if let Some(slot) = section.entries.get_mut(number) {
@@ -157,9 +181,11 @@ pub(crate) fn read(
             kind = section.kind;
             newest = Some(section.trailer);
         }
-        if section.entries.len() > entries.len() {
-            entries.resize(section.entries.len(), None);
-        }
+        grow_entries(
+            &mut entries,
+            section.entries.len(),
+            allocation_maximum(limits, buf.len()),
+        )?;
         for (number, entry) in section.entries.into_iter().enumerate() {
             if let Some(slot) = entries.get_mut(number) {
                 if slot.is_none() {
@@ -173,15 +199,20 @@ pub(crate) fn read(
         offset = shifted(prev, shift, offset)?;
     }
     let trailer = newest.ok_or_else(|| malformed(original, "xref"))?;
-    let entries = entries
-        .into_iter()
-        .map(|entry| entry.unwrap_or(XrefEntry::Free))
-        .collect();
+    let maximum = allocation_maximum(limits, buf.len());
+    let mut final_entries = Vec::new();
+    final_entries
+        .try_reserve_exact(entries.len())
+        .map_err(|_| allocation_failure(maximum))?;
+    for entry in entries {
+        final_entries.push(entry.unwrap_or(XrefEntry::Free));
+    }
     Ok((
         Xref {
-            entries,
+            entries: final_entries,
             kind,
             sections,
+            parsed_streams,
         },
         trailer,
         warnings,
@@ -352,6 +383,17 @@ fn table(
         let allowance =
             u64::from(limits.max_objects).saturating_add(u64::from(first_subsection && start == 1));
         check(LimitKind::Objects, end, allowance)?;
+        let maximum = allocation_maximum(limits, buf.len());
+        let count_usize =
+            usize::try_from(count).map_err(|_| malformed(offset, "xref subsection"))?;
+        let pair_count = pairs
+            .len()
+            .checked_add(count_usize)
+            .ok_or_else(|| allocation_failure(maximum))?;
+        check(LimitKind::Objects, pair_count as u64, maximum)?;
+        pairs
+            .try_reserve_exact(count_usize)
+            .map_err(|_| allocation_failure(maximum))?;
         let first_pair = pairs.len();
         for number in start..end {
             let field = unsigned(required(&mut lexer, offset)?.bytes())
@@ -407,8 +449,9 @@ fn table(
         )?;
     }
     let dict = trailer.dict().ok_or_else(|| malformed(offset, "trailer"))?;
-    let size = size(dict, limits, offset)?;
-    let mut entries = alloc::vec![None; size];
+    let size = size(dict, limits, offset, buf.len())?;
+    let mut entries = Vec::new();
+    grow_entries(&mut entries, size, allocation_maximum(limits, buf.len()))?;
     for (number, entry) in pairs {
         let slot = entries
             .get_mut(number as usize)
@@ -419,6 +462,7 @@ fn table(
         entries,
         trailer,
         kind: XrefKind::Table,
+        parsed_stream: None,
     })
 }
 
@@ -431,7 +475,7 @@ fn stream(
 ) -> Result<Section, DocError> {
     let id = header_at(buf, offset).ok_or_else(|| malformed(offset, "xref stream header"))?;
     let mut scratch = ParseScratch::default();
-    let trailer = parse_indirect_with_scratch(buf, offset, id, limits, &mut scratch)?;
+    let mut trailer = parse_indirect_with_scratch(buf, offset, id, limits, &mut scratch)?;
     let dict = trailer
         .dict()
         .ok_or_else(|| malformed(offset, "xref stream dictionary"))?;
@@ -443,7 +487,7 @@ fn stream(
     {
         return Err(malformed(offset, "xref stream Type"));
     }
-    let size = size(dict, limits, offset)?;
+    let size = size(dict, limits, offset, buf.len())?;
     let widths = dict
         .get(b"W")
         .and_then(|value| value.as_array())
@@ -534,7 +578,8 @@ fn stream(
             what: "stream_length_recovered",
         });
     }
-    let mut entries = alloc::vec![None; size];
+    let mut entries = Vec::new();
+    grow_entries(&mut entries, size, allocation_maximum(limits, buf.len()))?;
     let mut position = 0usize;
     for range in ranges {
         for number in range {
@@ -582,16 +627,55 @@ fn stream(
             *slot = entry;
         }
     }
+    let parsed_stream = (id.number(), id.generation(), trailer.root().span().start);
+    trailer.mark_xref_stream();
     Ok(Section {
         entries,
         trailer,
         kind: XrefKind::Stream,
+        parsed_stream: Some(parsed_stream),
     })
 }
 
-fn size(dict: DictRef<'_>, limits: &Limits, offset: usize) -> Result<usize, DocError> {
+fn allocation_maximum(limits: &Limits, file_len: usize) -> u64 {
+    u64::from(limits.max_objects).min((file_len as u64).saturating_mul(8).saturating_add(1024))
+}
+
+fn allocation_failure(maximum: u64) -> DocError {
+    DocError::Refused(crate::limits::Refusal {
+        limit: LimitKind::Objects,
+        requested: maximum.saturating_add(1),
+        maximum,
+    })
+}
+
+fn grow_entries(
+    entries: &mut Vec<Option<XrefEntry>>,
+    length: usize,
+    maximum: u64,
+) -> Result<(), DocError> {
+    check(LimitKind::Objects, length as u64, maximum)?;
+    if length > entries.len() {
+        entries
+            .try_reserve_exact(length - entries.len())
+            .map_err(|_| allocation_failure(maximum))?;
+        entries.resize(length, None);
+    }
+    Ok(())
+}
+
+fn size(
+    dict: DictRef<'_>,
+    limits: &Limits,
+    offset: usize,
+    file_len: usize,
+) -> Result<usize, DocError> {
     let size = integer(dict, b"Size")?.ok_or_else(|| malformed(offset, "xref Size"))?;
-    check(LimitKind::Objects, size, u64::from(limits.max_objects))?;
+    check(
+        LimitKind::Objects,
+        size,
+        allocation_maximum(limits, file_len),
+    )?;
     usize::try_from(size).map_err(|_| malformed(offset, "xref Size"))
 }
 

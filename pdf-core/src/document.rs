@@ -132,6 +132,9 @@ impl Document {
             .filter(|value| !value.is_null())
             .map(|value| value.to_owned())
         else {
+            if password.is_some() {
+                return Err(malformed(0, "password supplied for unencrypted document"));
+            }
             return Ok(());
         };
         let mut permissions = None;
@@ -326,6 +329,7 @@ impl Document {
             document: self,
             cache: Vec::new(),
             cache_bytes: 0,
+            objstm_decoded_bytes: 0,
             warnings: Vec::new(),
             nesting: 0,
             parse_scratch: ParseScratch::default(),
@@ -346,6 +350,7 @@ pub struct Resolver<'d> {
     document: &'d Document,
     cache: Vec<CacheEntry>,
     cache_bytes: u64,
+    objstm_decoded_bytes: u64,
     warnings: Vec<Warning>,
     /// Nested `get` calls in flight: an indirect /Length or an object stream's
     /// indirect filter parameters re-enter `get`; this bounds that recursion.
@@ -475,6 +480,9 @@ impl<'d> Resolver<'d> {
                                     object.finish_stream(resolved, &self.document.limits)?;
                                 }
                             }
+                            if self.document.xref.parsed_stream(&object) {
+                                object.mark_xref_stream();
+                            }
                             if let Some(crypt) = &self.document.private_crypt {
                                 crypt.prepare(&mut object, id, &self.document.limits)?;
                             }
@@ -524,7 +532,55 @@ impl<'d> Resolver<'d> {
                     let container = objects
                         .pop()
                         .ok_or_else(|| malformed(0, "resolver state"))?;
-                    let decoded = self.decode_stream(&container)?;
+                    let limits = self.document.limits;
+                    let remaining = limits
+                        .max_total_decoded_bytes
+                        .saturating_sub(self.objstm_decoded_bytes);
+                    let maximum = limits
+                        .max_decoded_bytes
+                        .min(limits.max_objstm_cache_bytes)
+                        .min(remaining);
+                    let decoded = match self.decode_stream_limited(&container, maximum) {
+                        Ok(decoded) => decoded,
+                        Err(DocError::Filter(crate::filter::FilterError::OutputLimit {
+                            ..
+                        })) => {
+                            let (limit, requested, maximum) = if remaining == maximum {
+                                (
+                                    LimitKind::TotalDecodedBytes,
+                                    limits.max_total_decoded_bytes.saturating_add(1),
+                                    limits.max_total_decoded_bytes,
+                                )
+                            } else {
+                                (LimitKind::DecodedBytes, maximum.saturating_add(1), maximum)
+                            };
+                            return Err(DocError::Refused(Refusal {
+                                limit,
+                                requested,
+                                maximum,
+                            }));
+                        }
+                        Err(error) => return Err(error),
+                    };
+                    check(
+                        LimitKind::DecodedBytes,
+                        decoded.bytes.len() as u64,
+                        limits.max_objstm_cache_bytes,
+                    )?;
+                    let requested = self
+                        .objstm_decoded_bytes
+                        .checked_add(decoded.bytes.len() as u64)
+                        .ok_or(DocError::Refused(Refusal {
+                            limit: LimitKind::TotalDecodedBytes,
+                            requested: u64::MAX,
+                            maximum: limits.max_total_decoded_bytes,
+                        }))?;
+                    check(
+                        LimitKind::TotalDecodedBytes,
+                        requested,
+                        limits.max_total_decoded_bytes,
+                    )?;
+                    self.objstm_decoded_bytes = requested;
                     if decoded.image.is_some() || (decoded.truncated && !self.document.repair_mode)
                     {
                         return Err(malformed(0, "object stream decode"));
@@ -547,7 +603,7 @@ impl<'d> Resolver<'d> {
                     };
                     let object =
                         stream.member(index, id, &self.document.limits, &mut self.parse_scratch)?;
-                    self.cache_stream(number, stream);
+                    self.cache_stream(number, stream)?;
                     active.pop();
                     objects.push(object);
                 }
@@ -589,12 +645,10 @@ impl<'d> Resolver<'d> {
         }
     }
 
-    fn cache_stream(&mut self, number: u32, stream: ObjectStream) {
+    fn cache_stream(&mut self, number: u32, stream: ObjectStream) -> Result<(), DocError> {
         let cost = stream.cost();
         let maximum = self.document.limits.max_objstm_cache_bytes;
-        if cost > maximum {
-            return;
-        }
+        check(LimitKind::DecodedBytes, cost, maximum)?;
         if let Some(index) = self.cache.iter().position(|entry| entry.number == number) {
             let removed = self.cache.remove(index);
             self.cache_bytes = self.cache_bytes.saturating_sub(removed.cost);
@@ -609,6 +663,7 @@ impl<'d> Resolver<'d> {
             stream,
             cost,
         });
+        Ok(())
     }
 
     pub fn resolve(&mut self, value: ValueRef<'_>) -> Result<Value, DocError> {
@@ -642,6 +697,16 @@ impl<'d> Resolver<'d> {
     }
 
     pub fn decode_stream(&mut self, stream: &Object) -> Result<Decoded, DocError> {
+        let maximum = self.document.limits.max_decoded_bytes;
+        self.decode_stream_limited(stream, maximum)
+    }
+
+    pub fn decode_stream_limited(
+        &mut self,
+        stream: &Object,
+        maximum: u64,
+    ) -> Result<Decoded, DocError> {
+        let maximum = maximum.min(self.document.limits.max_decoded_bytes);
         if !self.document.decryptable() {
             return Err(DocError::Encrypted);
         }
@@ -651,6 +716,7 @@ impl<'d> Resolver<'d> {
         })?;
         let steps = filter_steps_for(stream, |value| self.resolve(value), true)?;
         if let Some(crypt) = &self.document.private_crypt {
+            crypt.check_xref_claim(stream)?;
             if !crypt.excluded(stream) {
                 if steps.iter().any(|step| step.kind == FilterKind::Crypt) {
                     return Err(DocError::Unsupported {
@@ -660,13 +726,11 @@ impl<'d> Resolver<'d> {
                 let id = stream
                     .id()
                     .ok_or_else(|| malformed(0, "PSChaCha object ID"))?;
-                let plain = crypt
-                    .key
-                    .open(id, raw, self.document.limits.max_decoded_bytes)?;
-                return crate::crypt::decode_stream(self, stream, &plain, &steps);
+                let plain = crypt.key.open(id, raw, maximum)?;
+                return crate::crypt::decode_stream(self, stream, &plain, &steps, maximum);
             }
         }
-        crate::crypt::decode_stream(self, stream, raw, &steps)
+        crate::crypt::decode_stream(self, stream, raw, &steps, maximum)
     }
 
     /// Decode an object-level string. Content and object-stream strings carry
