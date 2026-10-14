@@ -11,15 +11,15 @@ use der::asn1::OctetString;
 use der::oid::ObjectIdentifier;
 use der::{Decode, Encode};
 use pdf_core::{DocError, Document, Limits, ObjectRef, PdfSource, Value};
-use x509_cert::time::Time;
 use x509_cert::Certificate;
+use x509_cert::time::Time;
 
 use super::cms::{
-    digest, verify_prehash, ECDSA_SHA256, ECDSA_SHA384, ECDSA_SHA512, ID_EC_PUBLIC_KEY,
-    ID_MESSAGE_DIGEST, ID_SHA256, ID_SHA384, ID_SHA512, ID_SIGNED_DATA, ID_SIGNING_TIME, SECP256R1,
-    SECP384R1,
+    ECDSA_SHA256, ECDSA_SHA384, ECDSA_SHA512, ID_EC_PUBLIC_KEY, ID_MESSAGE_DIGEST, ID_SHA256,
+    ID_SHA384, ID_SHA512, ID_SIGNED_DATA, ID_SIGNING_TIME, SECP256R1, SECP384R1, digest,
+    verify_prehash,
 };
-use super::{unsupported, Curve};
+use super::{Curve, unsupported};
 
 const MAX_FIELDS: usize = 4096;
 
@@ -312,12 +312,11 @@ fn signer_certificate<'a>(signed: &'a SignedData, info: &SignerInfo) -> Option<&
             continue;
         };
         first.get_or_insert(certificate);
-        if let SignerIdentifier::IssuerAndSerialNumber(id) = &info.sid {
-            if certificate.tbs_certificate().issuer() == &id.issuer
-                && certificate.tbs_certificate().serial_number() == &id.serial_number
-            {
-                return Some(certificate);
-            }
+        if let SignerIdentifier::IssuerAndSerialNumber(id) = &info.sid
+            && certificate.tbs_certificate().issuer() == &id.issuer
+            && certificate.tbs_certificate().serial_number() == &id.serial_number
+        {
+            return Some(certificate);
         }
     }
     first

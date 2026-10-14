@@ -4,7 +4,7 @@ use pdf_core::lex::{Lexer, LexerLimits};
 use pdf_core::{DocError, LimitKind, Limits, ObjectRef, XrefKind};
 use pdf_write::{Dict, Value};
 
-use crate::{check, get, malformed, set, value, Editor};
+use crate::{Editor, check, get, malformed, set, value};
 
 pub(crate) fn startxref(bytes: &[u8]) -> Result<u64, DocError> {
     let base = bytes.len().saturating_sub(1024);
@@ -21,15 +21,14 @@ pub(crate) fn startxref(bytes: &[u8]) -> Result<u64, DocError> {
             continue;
         };
         let mut lexer = Lexer::with_limits(rest, LexerLimits::new(1, 32, 0));
-        if let Some(Ok(token)) = lexer.next() {
-            if !token.bytes().is_empty() && token.bytes().iter().all(u8::is_ascii_digit) {
-                if let Some(offset) = std::str::from_utf8(token.bytes())
-                    .ok()
-                    .and_then(|text| text.parse::<u64>().ok())
-                {
-                    return Ok(offset);
-                }
-            }
+        if let Some(Ok(token)) = lexer.next()
+            && !token.bytes().is_empty()
+            && token.bytes().iter().all(u8::is_ascii_digit)
+            && let Some(offset) = std::str::from_utf8(token.bytes())
+                .ok()
+                .and_then(|text| text.parse::<u64>().ok())
+        {
+            return Ok(offset);
         }
     }
     Err(malformed("startxref"))

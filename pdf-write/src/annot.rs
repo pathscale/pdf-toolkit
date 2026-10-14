@@ -3,7 +3,7 @@
 //! Coordinates use default page user space. No page reference or appearance
 //! reference is allocated here. The caller adds /P and /AP after serialization.
 
-use crate::{serialize_value, Dict, Value};
+use crate::{Dict, Value, serialize_value};
 
 const MAX_POINTS: usize = 65_536;
 const MAX_TEXT_BYTES: usize = 65_536;
@@ -263,15 +263,14 @@ fn free_text(out: &mut Vec<u8>, text: &str, size: f32, rect: [f64; 4]) -> Result
                     break;
                 }
             }
-            if end < encoded.len() && encoded.get(end) != Some(&b' ') {
-                if let Some(space) = encoded
+            if end < encoded.len()
+                && encoded.get(end) != Some(&b' ')
+                && let Some(space) = encoded
                     .get(start..end)
                     .and_then(|line| line.iter().rposition(|byte| *byte == b' '))
-                {
-                    if space > 0 {
-                        end = start.saturating_add(space);
-                    }
-                }
+                && space > 0
+            {
+                end = start.saturating_add(space);
             }
             let line = encoded.get(start..end).ok_or("annotation_text_range")?;
             emit(out, &[1.0, 0.0, 0.0, 1.0, x0 + 2.0, baseline], b"Tm")?;

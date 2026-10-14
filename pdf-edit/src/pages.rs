@@ -4,7 +4,7 @@ use pdf_core::pages::PageWalk;
 use pdf_core::{DocError, Document, LimitKind, ObjectRef};
 use pdf_write::{Dict, Value};
 
-use crate::{check, get, malformed, refused, set, value, wrong, Editor, Pending};
+use crate::{Editor, Pending, check, get, malformed, refused, set, value, wrong};
 
 #[derive(Clone)]
 pub(crate) struct PageEntry {
@@ -56,12 +56,11 @@ pub(crate) fn initial(document: &Document) -> Result<(ObjectRef, Vec<PageEntry>)
             }
             let dict = dictionary(document, id)?;
             for key in ["Resources", "MediaBox", "CropBox", "Rotate"] {
-                if get(&inherited, key).is_none() {
-                    if let Some(found) =
+                if get(&inherited, key).is_none()
+                    && let Some(found) =
                         get(&dict, key).filter(|value| !matches!(value, Value::Null))
-                    {
-                        set(&mut inherited, key, found.clone());
-                    }
+                {
+                    set(&mut inherited, key, found.clone());
                 }
             }
             if inherited.len() == 4 {
