@@ -10,7 +10,23 @@ use std::time::Instant;
 
 use pdf_core::document::{Document, Resolver, XrefEntry, XrefKind};
 use pdf_core::error::{DocError, Warning};
-use pdf_core::file;
+mod file {
+    pub use pdf_core::file::{FileOpenError, open_repair};
+    pub fn open(path: &std::path::Path, maximum: u64) -> Result<pdf_core::source::PdfSource, pdf_core::error::DocError> {
+        crate::app_caps::stage(std::sync::Arc::<str>::from(format!("read PDF {}", path.display())));
+        if let Ok(metadata) = std::fs::metadata(path) { crate::app_caps::check("input-bytes", metadata.len()); }
+        pdf_core::file::open(path, maximum.min(crate::app_caps::hard("input-bytes"))).map_err(|error| match error {
+            FileOpenError::Source(error) => pdf_core::error::DocError::Source(error),
+            FileOpenError::TooLarge { limit, observed } => pdf_core::error::DocError::Refused(pdf_core::limits::Refusal {
+                limit: pdf_core::limits::LimitKind::FileBytes, requested: observed, maximum: limit,
+            }),
+            FileOpenError::Io(error) => {
+                eprintln!("pdf-inspect: {}: {error}", path.display());
+                pdf_core::error::DocError::Malformed { offset: 0, what: "PDF source I/O" }
+            },
+        })
+    }
+}
 use pdf_core::limits::Limits;
 use pdf_core::object::{DictRef, Object};
 use pdf_core::pages::{page_count_hint, Page, PageWalk};
@@ -447,10 +463,13 @@ fn open_source(
     limits: Limits,
     repair: bool,
 ) -> Result<PdfSource, file::FileOpenError> {
+    app_caps::stage(Arc::<str>::from(format!("read PDF {}", path.display())));
+    if let Ok(metadata) = std::fs::metadata(path) { app_caps::check("input-bytes", metadata.len()); }
+    let maximum = limits.max_file_bytes.min(app_caps::hard("input-bytes"));
     if repair {
-        file::open_repair(path, limits.max_file_bytes)
+        pdf_core::file::open_repair(path, maximum)
     } else {
-        file::open(path, limits.max_file_bytes)
+        pdf_core::file::open(path, maximum)
     }
 }
 
