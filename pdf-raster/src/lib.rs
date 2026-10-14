@@ -1,13 +1,17 @@
+use std::collections::HashMap;
+use std::sync::Arc;
+
 use pdf_core::document::Resolver;
 use pdf_core::error::{DocError, Warning};
 use pdf_core::limits::{LimitKind, Refusal};
 use pdf_core::pages::Page;
 use pdf_core::work::ObjectRef;
 use pdf_render::display::{
-    FillRule as PdfFillRule, ImageSource, Item, Paint as PdfPaint, Path as PdfPath, PathEl,
-    Stroke as PdfStroke,
+    display_list_with_budget, FillRule as PdfFillRule, ImageSource, Item, Paint as PdfPaint,
+    Path as PdfPath, PathEl, Stroke as PdfStroke,
 };
-use pdf_render::{display_list, RenderOptions};
+use pdf_render::RenderOptions;
+use pdf_text::images::ImageDecodeBudget;
 use tiny_skia::{
     Color, FillRule as SkFillRule, FilterQuality, GradientStop, IntSize, LineCap, LineJoin,
     LinearGradient, Mask, Paint as SkPaint, Path as SkPath, PathBuilder, Pixmap, PixmapPaint,
@@ -29,15 +33,25 @@ pub struct Raster {
     pub rgba: Vec<u8>,
 }
 
+struct PageImages {
+    budget: ImageDecodeBudget,
+    cache: HashMap<ObjectRef, Option<Arc<Pixmap>>>,
+    cache_bytes: u64,
+    maximum_cache_bytes: u64,
+}
+
 pub fn render_page(
     resolver: &mut Resolver<'_>,
     page: &Page,
     options: &RenderOptions,
     background: [u8; 4],
 ) -> Result<Raster, DocError> {
-    let display = display_list(resolver, page, options)?;
-    let maximum = resolver.document().limits().max_decoded_bytes;
+    let limits = *resolver.document().limits();
+    let mut image_budget = ImageDecodeBudget::new(limits.max_total_decoded_bytes);
+    let display = display_list_with_budget(resolver, page, options, &mut image_budget)?;
+    let maximum = limits.max_decoded_bytes;
     let buffer_len = checked_rgba_len(display.width, display.height, maximum)?;
+    image_budget.charge(buffer_len)?;
     let Some(mut pixmap) = Pixmap::new(display.width, display.height) else {
         return Err(allocation_refusal(maximum));
     };
@@ -49,7 +63,14 @@ pub fn render_page(
     ));
 
     let pixel_count = u64::try_from(buffer_len / 4).unwrap_or(u64::MAX);
-    let limits = *resolver.document().limits();
+    let mut images = PageImages {
+        budget: image_budget,
+        cache: HashMap::new(),
+        cache_bytes: 0,
+        maximum_cache_bytes: limits
+            .max_image_cache_bytes
+            .min(limits.max_total_decoded_bytes),
+    };
     let mut function_work = 0u64;
     let mut texture_bytes = buffer_len as u64;
     let mut clips: Vec<Mask> = Vec::new();
@@ -166,6 +187,7 @@ pub fn render_page(
                     blend,
                     clips.last(),
                     maximum,
+                    &mut images,
                 )?;
             }
             Item::Glyphs {
@@ -679,6 +701,55 @@ fn stroke_to_skia(
     })
 }
 
+fn image_pixmap(
+    width: u32,
+    height: u32,
+    mut rgba: Vec<u8>,
+    maximum: u64,
+) -> Result<Option<Arc<Pixmap>>, DocError> {
+    let expected = checked_rgba_len(width, height, maximum)?;
+    if rgba.len() != expected {
+        return Ok(None);
+    }
+    let Some(size) = IntSize::from_wh(width, height) else {
+        return Ok(None);
+    };
+    premultiply(&mut rgba);
+    Ok(Pixmap::from_vec(rgba, size).map(Arc::new))
+}
+
+fn cached_object_image(
+    resolver: &mut Resolver<'_>,
+    id: ObjectRef,
+    maximum: u64,
+    images: &mut PageImages,
+) -> Result<Option<Arc<Pixmap>>, DocError> {
+    if let Some(image) = images.cache.get(&id) {
+        return Ok(image.clone());
+    }
+    let image = match object_image_rgba(resolver, id, maximum, &mut images.budget)? {
+        Some((width, height, rgba)) => image_pixmap(width, height, rgba, maximum)?,
+        None => None,
+    };
+    let cost = image
+        .as_ref()
+        .map(|pixmap| pixmap.data().len() as u64)
+        .unwrap_or(0);
+    if cost
+        <= images
+            .maximum_cache_bytes
+            .saturating_sub(images.cache_bytes)
+    {
+        images
+            .cache
+            .try_reserve(1)
+            .map_err(|_| allocation_refusal(images.maximum_cache_bytes))?;
+        images.cache.insert(id, image.clone());
+        images.cache_bytes += cost;
+    }
+    Ok(image)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn draw_image(
     resolver: &mut Resolver<'_>,
@@ -689,32 +760,20 @@ fn draw_image(
     blend: tiny_skia::BlendMode,
     mask: Option<&Mask>,
     maximum: u64,
+    images: &mut PageImages,
 ) -> Result<(), DocError> {
-    let (width, height, mut rgba) = match source {
+    let source = match source {
         ImageSource::Inline {
             width,
             height,
             rgba,
-        } => (width, height, rgba),
-        ImageSource::Object(id) => {
-            let Some(image) = object_image_rgba(resolver, id, maximum)? else {
-                return Ok(());
-            };
-            image
-        }
+        } => image_pixmap(width, height, rgba, maximum)?,
+        ImageSource::Object(id) => cached_object_image(resolver, id, maximum, images)?,
     };
-    let expected = checked_rgba_len(width, height, maximum)?;
-    if rgba.len() != expected {
-        return Ok(());
-    }
-    let Some(size) = IntSize::from_wh(width, height) else {
+    let Some(source) = source else {
         return Ok(());
     };
-    let Some(transform) = image_transform(matrix, width, height) else {
-        return Ok(());
-    };
-    premultiply(&mut rgba);
-    let Some(source) = Pixmap::from_vec(rgba, size) else {
+    let Some(transform) = image_transform(matrix, source.width(), source.height()) else {
         return Ok(());
     };
     let paint = PixmapPaint {
@@ -726,7 +785,7 @@ fn draw_image(
             0.0
         },
     };
-    destination.draw_pixmap(0, 0, source.as_ref(), &paint, transform, mask);
+    destination.draw_pixmap(0, 0, source.as_ref().as_ref(), &paint, transform, mask);
     Ok(())
 }
 
@@ -753,9 +812,10 @@ fn object_image_rgba(
     resolver: &mut Resolver<'_>,
     id: ObjectRef,
     maximum: u64,
+    budget: &mut ImageDecodeBudget,
 ) -> Result<Option<(u32, u32, Vec<u8>)>, DocError> {
     let max_pixels = maximum / 4;
-    let image = match pdf_text::images::load_image(resolver, id, max_pixels) {
+    let image = match pdf_text::images::load_image_with_budget(resolver, id, max_pixels, budget) {
         Ok(image) => image,
         Err(error) if is_fatal(&error) => return Err(error),
         Err(_) => {
@@ -771,6 +831,7 @@ fn object_image_rgba(
     let mut rgba = match image.data {
         pdf_text::images::ImageData::Pixels { rgba } => rgba,
         pdf_text::images::ImageData::Jpeg(data) => {
+            budget.charge(checked_rgba_len(image.width, image.height, maximum)?)?;
             let Some(rgba) = decode_jpeg(&data, image.width, image.height, maximum)? else {
                 resolver.warn(Warning {
                     offset: None,
@@ -793,9 +854,15 @@ fn object_image_rgba(
         return Ok(None);
     }
     if is_jpeg && image.has_soft_mask {
-        if let Err(error) =
-            apply_external_soft_mask(resolver, id, image.width, image.height, &mut rgba, maximum)
-        {
+        if let Err(error) = apply_external_soft_mask(
+            resolver,
+            id,
+            image.width,
+            image.height,
+            &mut rgba,
+            maximum,
+            budget,
+        ) {
             if is_fatal(&error) {
                 return Err(error);
             }
@@ -851,6 +918,7 @@ fn apply_external_soft_mask(
     height: u32,
     rgba: &mut [u8],
     maximum: u64,
+    budget: &mut ImageDecodeBudget,
 ) -> Result<(), DocError> {
     let object = resolver.get(image_id)?;
     let Some(dict) = object.dict() else {
@@ -859,11 +927,13 @@ fn apply_external_soft_mask(
     let Some(mask_ref) = dict.get(b"SMask") else {
         return Ok(());
     };
-    let mask_value = resolver.resolve(mask_ref)?;
-    let Some(mask_id) = mask_value.get().as_ref() else {
+    let Some(mask_id) = mask_ref.as_ref() else {
         return Ok(());
     };
-    let mask = pdf_text::images::load_image(resolver, mask_id, maximum / 4)?;
+    if mask_id == image_id {
+        return Ok(());
+    }
+    let mask = pdf_text::images::load_image_with_budget(resolver, mask_id, maximum / 4, budget)?;
     if mask.color_space != pdf_text::images::ColorSpace::Gray || mask.image_mask {
         return Ok(());
     }
@@ -902,7 +972,13 @@ fn apply_external_soft_mask(
 }
 
 fn is_fatal(error: &DocError) -> bool {
-    matches!(error, DocError::Encrypted | DocError::Refused(_))
+    matches!(
+        error,
+        DocError::Encrypted
+            | DocError::Refused(_)
+            | DocError::Filter(pdf_core::filter::FilterError::OutputLimit { .. })
+            | DocError::Filter(pdf_core::filter::FilterError::Refused(_))
+    )
 }
 
 fn premultiply(rgba: &mut [u8]) {

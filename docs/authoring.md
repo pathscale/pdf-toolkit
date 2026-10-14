@@ -226,10 +226,17 @@ for report in sign::verify(Arc::from(signed), Limits::default())? {
 - `verify` reports the byte range digest against the signed messageDigest,
   ECDSA validity with the signer certificate key, the signer subject, the
   signing time, whether the byte range covers a whole revision, and the bytes
-  and revisions appended after it. It does not build or trust certificate
-  chains, check revocation or timestamps, or use the network. RSA and other
-  algorithms are reported as `unsupported_algorithm`.
-- `pdf-inspect signatures FILE` prints the same report.
+  and revisions appended after it. `intact()` means the digest and signature
+  checks pass. `strict_intact()` also requires whole-revision coverage and no
+  later bytes or revisions. Certificate subjects are untrusted because
+  certificate chains are not validated. Verification does not build or trust
+  certificate chains, check revocation or timestamps, or use the network. RSA
+  and other algorithms are reported as `unsupported_algorithm`.
+- `pdf-inspect signatures FILE` prints the same report. Exit 0 requires at
+  least one signature and every report to satisfy `strict_intact()`. Partial
+  coverage or later bytes/revisions produces exit 1. Operational errors
+  produce exit 2. Certificate subjects remain untrusted because certificate
+  chains are not validated.
 
 ## Not supported
 
@@ -238,3 +245,4 @@ for report in sign::verify(Arc::from(signed), Limits::default())? {
 - Interlaced PNG; JPEG 2000, JPEG XL and other codecs on the writing side.
 - Tables (lay them out with `paragraph`, `line` and `fill_rect`).
 - RSA signatures, timestamps (RFC 3161), long-term validation data, DocMDP.
+

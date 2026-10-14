@@ -98,12 +98,12 @@ pub(crate) fn run(path: &Path, limits: Limits) -> u8 {
         }
     };
     println!("signatures={}", reports.len());
-    let mut intact = true;
+    let mut accepted = !reports.is_empty();
     for (index, report) in reports.iter().enumerate() {
-        intact &= report.intact();
+        accepted &= report.strict_intact();
         for (key, value) in values(index, report) {
             println!("{key}={value}");
         }
     }
-    if intact { 0 } else { 1 }
+    if accepted { 0 } else { 1 }
 }

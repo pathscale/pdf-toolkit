@@ -47,11 +47,13 @@ Each string receives its own nonce, including strings nested in arrays,
 dictionaries, and stream dictionaries. Streams are encrypted after their
 declared filters have been applied. Length records the resulting encrypted size.
 
-The security dictionary, cross-reference streams and their dictionaries, and
-trailer identifiers remain plaintext. Writer output uses individual indirect
-objects; encrypted object-stream authoring is refused so every object-level
-string receives separate authentication. Both classic cross-reference tables
-and cross-reference streams are supported.
+The security dictionary, cross-reference streams successfully parsed through
+`startxref`, `/Prev`, or `/XRefStm` and their dictionaries, and trailer
+identifiers remain plaintext. A different stream that claims `/Type /XRef` fails
+PSChaCha authentication. Writer output uses individual indirect objects;
+encrypted object-stream authoring is refused so every object-level string
+receives separate authentication. Both classic cross-reference tables and
+cross-reference streams are supported.
 
 Production salt, initial identifiers and nonces come from `getrandom`.
 The internal house-fixture constructor alone substitutes fixed entropy:
@@ -72,8 +74,10 @@ Document::open_with_password_mode(source, limits, mode, Option<password>)
 Editor::open_with_password(bytes, limits, password)
 ```
 
-`Some(b"")` supplies the empty password; `None` supplies no password.
-The new Document APIs leave standard-handler behavior unchanged.
+`Some(b"")` supplies the empty password; `None` supplies no password. If the
+trailer has no `/Encrypt` entry or a null `/Encrypt` entry, any explicitly
+supplied password, including the empty password, is rejected. The new Document
+APIs leave standard-handler behavior unchanged.
 
 Wrong passwords return `DocError::Malformed` with
 `what = "PSChaCha password authentication"`. Corrupt object payloads return
@@ -87,10 +91,11 @@ This prevents the existing Vec-returning text APIs from hiding a string tag
 failure behind a warning. Authentication scanning observes the cumulative
 decoded-byte limit.
 
-KDF allocation is fallible and bounded before derivation. Memory is capped at
-the lesser of `limits.max_decoded_bytes` and 256 MiB; iterations are capped at
-10 and parallelism at 16. Argon2 also validates its minimum and structural
-parameter requirements. Passwords are bounded by the lesser of
+KDF allocation is fallible and bounded before derivation. Memory is capped by
+the minimum of `limits.max_kdf_memory_bytes`, `limits.max_decoded_bytes`, and
+256 MiB. The `max_kdf_memory_bytes` ceiling defaults to 64 MiB. Iterations are
+capped at 10 and parallelism at 16. Argon2 also validates its minimum and
+structural parameter requirements. Passwords are bounded by the lesser of
 `limits.max_object_bytes` and 1 MiB.
 
 `Document::chacha_key` returns an opaque Arc-backed capability for incremental
@@ -122,3 +127,4 @@ The `pdf-roundtrip` command additionally exercises classic and stream
 cross-references, an empty password, nested and binary strings, stream
 dictionary strings, distinct nonces, corrupt strings and streams, object
 payload swapping, and encrypted incremental metadata, links and content.
+
