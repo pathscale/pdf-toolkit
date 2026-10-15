@@ -12,6 +12,7 @@ use pdf_core::{
 use crate::cmap::{self, CMap};
 use crate::encoding::{BaseEncoding, SimpleEncoding};
 use crate::standard14::{self, Family};
+use read_fonts::ps::cff::CffFontRef;
 
 const DEFAULT_MATRIX: [f64; 6] = [0.001, 0.0, 0.0, 0.001, 0.0, 0.0];
 
@@ -384,7 +385,9 @@ impl Font {
             DEFAULT_MATRIX
         };
 
-        let to_unicode = match loader.key(dict, b"ToUnicode", "tounicode_failed")? {
+        let to_unicode_entry = loader.key(dict, b"ToUnicode", "tounicode_failed")?;
+        let to_unicode_absent = to_unicode_entry.is_none();
+        let to_unicode = match to_unicode_entry {
             Some(value) => loader.cmap(&value, "tounicode_failed")?,
             None => None,
         };
@@ -418,7 +421,13 @@ impl Font {
                 _ if kind == FontKind::TrueType => Some(BaseEncoding::WinAnsi),
                 _ => Some(BaseEncoding::Standard),
             };
-            data.simple = load_simple_encoding(&mut loader, dict, builtin)?;
+            data.simple = load_simple_encoding(
+                &mut loader,
+                dict,
+                builtin,
+                descriptor_dict,
+                to_unicode_absent,
+            )?;
             data.simple_widths = load_simple_widths(&mut loader, dict, &data, missing_width)?;
         }
         let mut cost = (core::mem::size_of::<FontData>() as u64)
@@ -822,40 +831,47 @@ fn load_simple_encoding(
     loader: &mut Loader<'_, '_>,
     dict: DictRef<'_>,
     builtin: Option<BaseEncoding>,
+    descriptor: Option<DictRef<'_>>,
+    to_unicode_absent: bool,
 ) -> Result<SimpleEncoding, DocError> {
     let encoding = loader.key(dict, b"Encoding", "encoding_unknown")?;
-    let Some(encoding) = encoding else {
-        if builtin.is_none() {
-            loader.warn("encoding_unknown");
-        }
-        return Ok(SimpleEncoding::new(builtin));
-    };
-    if let Some(name) = encoding.get().as_name() {
-        let base = BaseEncoding::from_name(name.decoded().as_ref());
-        if base.is_none() {
-            loader.warn("encoding_unknown");
-        }
-        return Ok(SimpleEncoding::new(base.or(builtin)));
-    }
-    let Some(dict) = encoding.get().as_dict() else {
-        loader.warn("encoding_unknown");
-        return Ok(SimpleEncoding::new(builtin));
-    };
     let mut base = builtin;
-    if let Some(value) = loader.key(dict, b"BaseEncoding", "encoding_unknown")? {
-        let named = value
-            .get()
-            .as_name()
-            .and_then(|name| BaseEncoding::from_name(name.decoded().as_ref()));
-        if named.is_none() {
+    let mut encoding_dict = None;
+    if let Some(encoding) = encoding.as_ref() {
+        if let Some(name) = encoding.get().as_name() {
+            let named = BaseEncoding::from_name(name.decoded().as_ref());
+            if named.is_none() {
+                loader.warn("encoding_unknown");
+            }
+            base = named.or(base);
+        } else if let Some(dict) = encoding.get().as_dict() {
+            encoding_dict = Some(dict);
+            if let Some(value) = loader.key(dict, b"BaseEncoding", "encoding_unknown")? {
+                let named = value
+                    .get()
+                    .as_name()
+                    .and_then(|name| BaseEncoding::from_name(name.decoded().as_ref()));
+                if named.is_none() {
+                    loader.warn("encoding_unknown");
+                }
+                base = named.or(base);
+            }
+        } else {
             loader.warn("encoding_unknown");
         }
-        base = named.or(base);
     }
-    if base.is_none() {
+    let embedded = if to_unicode_absent && base.is_none() {
+        load_embedded_cff_encoding(loader, descriptor)?
+    } else {
+        None
+    };
+    if base.is_none() && embedded.is_none() {
         loader.warn("encoding_unknown");
     }
-    let mut map = SimpleEncoding::new(base);
+    let mut map = embedded.unwrap_or_else(|| SimpleEncoding::new(base));
+    let Some(dict) = encoding_dict else {
+        return Ok(map);
+    };
     if let Some(differences) = loader.key(dict, b"Differences", "differences_invalid")? {
         if let Some(array) = differences.get().as_array() {
             let mut code = None;
@@ -890,6 +906,84 @@ fn load_simple_encoding(
     Ok(map)
 }
 
+const MAX_EMBEDDED_CFF_BYTES: u64 = 16 << 20;
+const MAX_EMBEDDED_CFF_GLYPHS: u64 = 65_536;
+
+fn load_embedded_cff_encoding(
+    loader: &mut Loader<'_, '_>,
+    descriptor: Option<DictRef<'_>>,
+) -> Result<Option<SimpleEncoding>, DocError> {
+    let Some(descriptor) = descriptor else {
+        return Ok(None);
+    };
+    let Some(font_file) = loader.key(descriptor, b"FontFile3", "embedded_encoding_failed")? else {
+        return Ok(None);
+    };
+    if !font_file.object().is_stream() || font_file.get().as_dict().is_none() {
+        loader.warn("embedded_encoding_failed");
+        return Ok(None);
+    }
+    let decoded = match loader.resolver.decode_stream(font_file.object()) {
+        Ok(decoded) => decoded,
+        Err(error @ (DocError::Encrypted | DocError::Refused(_))) => return Err(error),
+        Err(_) => {
+            loader.warn("embedded_encoding_failed");
+            return Ok(None);
+        }
+    };
+    if decoded.bytes.len() as u64 > MAX_EMBEDDED_CFF_BYTES {
+        return Err(DocError::Refused(Refusal {
+            limit: LimitKind::DecodedBytes,
+            requested: decoded.bytes.len() as u64,
+            maximum: MAX_EMBEDDED_CFF_BYTES,
+        }));
+    }
+    if decoded.truncated || decoded.image.is_some() {
+        loader.warn("embedded_encoding_failed");
+        return Ok(None);
+    }
+    let font = match CffFontRef::new_cff(&decoded.bytes, 0, None) {
+        Ok(font) => font,
+        Err(_) => {
+            loader.warn("embedded_encoding_failed");
+            return Ok(None);
+        }
+    };
+    let glyph_count = u64::from(font.num_glyphs());
+    let token_limit = u64::from(loader.resolver.document().limits().max_tokens_per_object);
+    let maximum = MAX_EMBEDDED_CFF_GLYPHS.min(token_limit);
+    if glyph_count > maximum {
+        return Err(DocError::Refused(Refusal {
+            limit: LimitKind::Tokens,
+            requested: glyph_count,
+            maximum,
+        }));
+    }
+    let (Some(charset), Some(encoding)) = (font.charset(), font.encoding()) else {
+        loader.warn("embedded_encoding_failed");
+        return Ok(None);
+    };
+    let mut result = SimpleEncoding::new(None);
+    for code in 0..=u8::MAX {
+        let Some(glyph_id) = encoding.map(code) else {
+            continue;
+        };
+        if glyph_id == read_fonts::types::GlyphId::NOTDEF {
+            continue;
+        }
+        let Ok(string_id) = charset.string_id(glyph_id) else {
+            loader.warn("embedded_encoding_failed");
+            continue;
+        };
+        let Some(glyph_name) = font.string(string_id) else {
+            loader.warn("embedded_encoding_failed");
+            continue;
+        };
+        result.set_embedded(code, glyph_name);
+    }
+    Ok(Some(result))
+}
+
 fn load_simple_widths(
     loader: &mut Loader<'_, '_>,
     dict: DictRef<'_>,
@@ -920,11 +1014,40 @@ fn load_simple_widths(
             0
         }
     };
+    let last = match loader.key(dict, b"LastChar", "widths_invalid")? {
+        Some(value) => match value
+            .get()
+            .as_i64()
+            .and_then(|number| u8::try_from(number).ok())
+        {
+            Some(last) => Some(usize::from(last)),
+            None => {
+                loader.warn("widths_invalid");
+                None
+            }
+        },
+        None => {
+            if array.is_some() {
+                loader.warn("widths_invalid");
+            }
+            None
+        }
+    };
+    if last.is_some_and(|last| last < first) {
+        loader.warn("widths_invalid");
+    }
     if array.is_some_and(|array| array.len() > 256usize.saturating_sub(first)) {
         loader.warn("widths_invalid");
     }
 
     let family = standard14::family(data.name.bytes());
+    let declared_end = last
+        .filter(|last| *last >= first)
+        .or_else(|| array.map(|array| first.saturating_add(array.len().saturating_sub(1))))
+        .filter(|last| *last < 256);
+    if array.is_none() && family.is_none() && missing_width == 0.0 {
+        loader.warn("widths_missing");
+    }
     let mut result = [0.0; 256];
     for (code, slot) in result.iter_mut().enumerate() {
         let item = code
@@ -937,9 +1060,10 @@ fn load_simple_widths(
         let width = if let Some(width) = explicit {
             width
         } else {
+            let metric_needed = declared_end.is_some_and(|last| (first..=last).contains(&code));
             // A standard 14 font may omit /Widths: Adobe's metrics are the
             // specified widths then, so only other fonts warn.
-            if family.is_none() {
+            if family.is_none() && metric_needed && missing_width == 0.0 {
                 loader.warn("widths_missing");
             }
             if missing_width != 0.0 {
@@ -952,7 +1076,7 @@ fn load_simple_widths(
                     .unwrap_or('\u{fffd}');
                 match standard14::width(data.name.bytes(), character) {
                     Some(width) => width,
-                    None if family.is_some() => {
+                    None if family.is_some() && metric_needed => {
                         // A glyph the font does not have: half an em keeps text flowing.
                         loader.warn("standard14_glyph_missing");
                         500.0

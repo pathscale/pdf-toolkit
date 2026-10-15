@@ -6,7 +6,8 @@ use crate::interp::{PageText, PositionedGlyph};
 
 const MAX_CUT_DEPTH: u8 = 8;
 const BASELINE_TOLERANCE: f32 = 0.3;
-pub(crate) const SPACE_GAP: f32 = 0.25;
+// Justified two-column text can compress a quarter-em space down to ~0.16 em.
+pub(crate) const SPACE_GAP: f32 = 0.14;
 const COLUMN_GUTTER: f32 = 1.5;
 const SIZE_CHANGE: f32 = 0.15;
 

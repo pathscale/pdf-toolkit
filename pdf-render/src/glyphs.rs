@@ -11,7 +11,7 @@ use skrifa::raw::ps::cff::CffFontRef;
 use skrifa::raw::tables::cmap::PlatformId;
 use skrifa::{GlyphId, GlyphNameSource, MetadataProvider};
 
-use crate::display::{Path, PathEl};
+use crate::display::Path;
 use crate::sfnt::{self, Bytes, Program};
 use crate::type1::{parse_type1, Type1Font};
 
@@ -206,6 +206,7 @@ enum Mapping {
     Cid {
         encoding: Option<CMap>,
         gids: Option<Bytes>,
+        cff_gids: Option<Vec<Option<u16>>>,
     },
     Unicode {
         subtable: u16,
@@ -288,13 +289,10 @@ impl GlyphSource {
                     .and_then(Option::as_ref)
                     .and_then(GlyphName::text);
                 let Some(name) = name else { return Ok(None) };
-                let Some(mut path) = program.outline(name) else {
+                let Some(path) = program.outline(name) else {
                     return Ok(None);
                 };
                 sfnt::validate_path(&path, self.data.maximum_elements, self.data.maximum_bytes)?;
-                // Type1Font applies FontMatrix, yielding em/text-space units.
-                // The renderer's shared outline convention is 1/1000 em.
-                scale_type1(&mut path)?;
                 Ok(Some(path))
             }
             (Backend::Sfnt(program), mapping) => {
@@ -304,13 +302,23 @@ impl GlyphSource {
                         .and_then(|code| gids.get(code))
                         .copied()
                         .flatten(),
-                    Mapping::Cid { encoding, gids } => {
+                    Mapping::Cid {
+                        encoding,
+                        gids,
+                        cff_gids,
+                    } => {
                         let cid = encoding
                             .as_ref()
                             .map(|map| map.cid(glyph.code))
                             .unwrap_or(glyph.code);
                         if cid > u32::from(u16::MAX) {
                             None
+                        } else if let Some(cff_gids) = cff_gids {
+                            usize::try_from(cid)
+                                .ok()
+                                .and_then(|cid| cff_gids.get(cid))
+                                .copied()
+                                .flatten()
                         } else if let Some(gids) = gids {
                             usize::try_from(cid)
                                 .ok()
@@ -509,8 +517,8 @@ fn load_source(
             .resolve_dict_key(metrics, b"Subtype")?
             .ok_or_else(failed)?;
         let subtype = subtype.get().as_name().ok_or_else(failed)?;
-        let gids = if subtype.eq_bytes(b"CIDFontType2") {
-            match resolver
+        let (gids, cff_gids) = if subtype.eq_bytes(b"CIDFontType2") {
+            let gids = match resolver
                 .resolve_dict_key(metrics, b"CIDToGIDMap")?
                 .filter(|value| !value.get().is_null())
             {
@@ -531,14 +539,19 @@ fn load_source(
                     }
                     Some(bytes)
                 }
-            }
+            };
+            (gids, None)
         } else if subtype.eq_bytes(b"CIDFontType0") {
-            // The shared renderer contract uses GID = CID for CID-keyed CFF.
-            None
+            let cff_gids = cff_cid_gids(&program, &mut budget, maximum_bytes)?;
+            (None, cff_gids)
         } else {
             return Err(failed());
         };
-        Mapping::Cid { encoding, gids }
+        Mapping::Cid {
+            encoding,
+            gids,
+            cff_gids,
+        }
     } else {
         let mut names = base_names(default_encoding(font));
         let reference = program.font().ok_or_else(failed)?;
@@ -578,6 +591,51 @@ fn default_encoding(font: &Font) -> BaseEncoding {
         _ if font.kind() == FontKind::TrueType => BaseEncoding::WinAnsi,
         _ => BaseEncoding::Standard,
     }
+}
+
+fn cff_cid_gids(
+    program: &Program,
+    budget: &mut Budget,
+    maximum_bytes: u64,
+) -> Result<Option<Vec<Option<u16>>>, DocError> {
+    let reference = program.font().ok_or_else(failed)?;
+    let Some(cff) = cff(&reference).filter(|cff| cff.is_cid()) else {
+        return Ok(None);
+    };
+    let Some(charset) = cff.charset() else {
+        return Ok(None);
+    };
+    let entry_limit = budget.limits.max_tokens_per_object.min(MAX_CMAP_ENTRIES);
+    let mut count = 0u64;
+    let mut maximum_cid = 0u16;
+    for (gid, cid) in charset.iter() {
+        count = count.saturating_add(1);
+        sfnt::check(LimitKind::Tokens, count, u64::from(entry_limit))?;
+        let gid = usize::try_from(gid.to_u32()).map_err(|_| failed())?;
+        if gid >= usize::from(program.glyph_count()) {
+            break;
+        }
+        maximum_cid = maximum_cid.max(cid.to_u16());
+    }
+    let len = usize::from(maximum_cid).saturating_add(1);
+    let allocation = len
+        .checked_mul(core::mem::size_of::<Option<u16>>())
+        .ok_or_else(failed)?;
+    check_bytes(allocation, maximum_bytes.min(MAX_CID_MAP_BYTES))?;
+    budget.charge(allocation)?;
+    let mut gids = Vec::new();
+    gids.try_reserve_exact(len).map_err(|_| failed())?;
+    gids.resize(len, None);
+    for (gid, cid) in charset.iter() {
+        let gid = usize::try_from(gid.to_u32()).map_err(|_| failed())?;
+        if gid >= usize::from(program.glyph_count()) {
+            break;
+        }
+        if let Some(slot) = gids.get_mut(usize::from(cid.to_u16())) {
+            *slot = u16::try_from(gid).ok();
+        }
+    }
+    Ok(Some(gids))
 }
 
 fn base_names(base: BaseEncoding) -> [Option<GlyphName>; 256] {
@@ -888,35 +946,6 @@ fn length(resolver: &mut Resolver<'_>, dict: DictRef<'_>, key: &[u8]) -> Result<
 
 fn check_bytes(length: usize, maximum: u64) -> Result<(), DocError> {
     sfnt::check(LimitKind::DecodedBytes, length as u64, maximum)
-}
-
-fn scale_type1(path: &mut Path) -> Result<(), DocError> {
-    fn component(value: &mut f32) -> Result<(), DocError> {
-        let scaled = f64::from(*value) * 1000.0;
-        if !scaled.is_finite() || scaled.abs() > f64::from(f32::MAX) {
-            return Err(failed());
-        }
-        *value = scaled as f32;
-        Ok(())
-    }
-    for element in &mut path.els {
-        match element {
-            PathEl::MoveTo(x, y) | PathEl::LineTo(x, y) => {
-                component(x)?;
-                component(y)?;
-            }
-            PathEl::CubicTo(x0, y0, x1, y1, x, y) => {
-                component(x0)?;
-                component(y0)?;
-                component(x1)?;
-                component(y1)?;
-                component(x)?;
-                component(y)?;
-            }
-            PathEl::Close => {}
-        }
-    }
-    Ok(())
 }
 
 fn failed() -> DocError {
