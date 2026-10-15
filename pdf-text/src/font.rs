@@ -992,7 +992,8 @@ fn load_simple_widths(
 ) -> Result<[f64; 256], DocError> {
     let widths = loader.key(dict, b"Widths", "widths_missing")?;
     let array = widths.as_ref().and_then(|value| value.get().as_array());
-    if array.is_none() {
+    let family = standard14::family(data.name.bytes());
+    if array.is_none() && family.is_none() {
         loader.warn("widths_missing");
     }
     let first = match loader.key(dict, b"FirstChar", "widths_invalid")? {
@@ -1040,7 +1041,6 @@ fn load_simple_widths(
         loader.warn("widths_invalid");
     }
 
-    let family = standard14::family(data.name.bytes());
     let declared_end = last
         .filter(|last| *last >= first)
         .or_else(|| array.map(|array| first.saturating_add(array.len().saturating_sub(1))))

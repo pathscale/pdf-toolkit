@@ -8,10 +8,11 @@ use pdf_text::cmap::CMap;
 use pdf_text::encoding::{glyph_name_to_unicode, BaseEncoding};
 use pdf_text::font::{Font, FontKind, Glyph};
 use skrifa::raw::ps::cff::CffFontRef;
-use skrifa::raw::tables::cmap::PlatformId;
+use skrifa::raw::tables::{cmap::PlatformId, head::MacStyle, os2::SelectionFlags};
+use skrifa::raw::TableProvider;
 use skrifa::{GlyphId, GlyphNameSource, MetadataProvider};
 
-use crate::display::Path;
+use crate::display::{transform_path, Matrix, Path};
 use crate::sfnt::{self, Bytes, Program};
 use crate::type1::{parse_type1, Type1Font};
 
@@ -29,6 +30,7 @@ pub struct GlyphSource {
 struct GlyphSourceEntry {
     id: ObjectRef,
     source: GlyphSource,
+    fallback: Option<Weak<[u8]>>,
 }
 
 /// Caller-owned glyph-program cache. The cap includes conservative retained
@@ -39,7 +41,6 @@ pub struct GlyphSourceCache {
     used: u64,
     maximum: u64,
     document: Option<(Weak<[u8]>, Limits)>,
-    fallback: Option<Weak<[u8]>>,
 }
 
 impl Default for GlyphSourceCache {
@@ -55,7 +56,6 @@ impl GlyphSourceCache {
             used: 0,
             maximum: maximum_bytes.min(isize::MAX as u64),
             document: None,
-            fallback: None,
         }
     }
 
@@ -63,7 +63,6 @@ impl GlyphSourceCache {
         self.entries = Vec::new();
         self.used = 0;
         self.document = None;
-        self.fallback = None;
     }
 
     pub fn bytes(&self) -> u64 {
@@ -99,19 +98,13 @@ impl GlyphSourceCache {
         }
         let source = Arc::downgrade(&resolver.document().source().shared());
         let limits = *resolver.document().limits();
-        let same_fallback = match (&self.fallback, fallback) {
-            (None, None) => true,
-            (Some(old), Some(new)) => Weak::ptr_eq(old, &Arc::downgrade(new)),
-            _ => false,
-        };
-        if !same_fallback
-            || !self.document.as_ref().is_some_and(|(old, old_limits)| {
-                Weak::ptr_eq(old, &source) && *old_limits == limits
-            })
+        if !self
+            .document
+            .as_ref()
+            .is_some_and(|(old, old_limits)| Weak::ptr_eq(old, &source) && *old_limits == limits)
         {
             self.clear();
             self.document = Some((source, limits));
-            self.fallback = fallback.map(Arc::downgrade);
         }
         let dict = value.get().as_dict().ok_or_else(failed)?;
         let id = value
@@ -125,21 +118,42 @@ impl GlyphSourceCache {
                 .binary_search_by_key(&key, |entry| (entry.id.number(), entry.id.generation()))
             {
                 if let Some(entry) = self.entries.get(index) {
-                    for warning in &entry.source.data.warnings {
-                        resolver.warn(warning.clone());
+                    let same_fallback = match (&entry.fallback, fallback) {
+                        (None, None) => true,
+                        (Some(old), Some(new)) => Weak::ptr_eq(old, &Arc::downgrade(new)),
+                        _ => false,
+                    };
+                    if !same_fallback {
+                        let old = self.entries.remove(index);
+                        self.used = self.used.saturating_sub(old.source.data.cache_bytes);
+                    } else {
+                        for warning in &entry.source.data.warnings {
+                            resolver.warn(warning.clone());
+                        }
+                        return Ok(Some(entry.source.clone()));
                     }
-                    return Ok(Some(entry.source.clone()));
                 }
             }
         }
         let source = GlyphSource::load(resolver, font, dict, fallback)?;
         if let (Some(id), Some(source)) = (id, source.as_ref()) {
-            self.retain(id, source, self.maximum.min(limits.max_total_decoded_bytes));
+            self.retain(
+                id,
+                source,
+                fallback,
+                self.maximum.min(limits.max_total_decoded_bytes),
+            );
         }
         Ok(source)
     }
 
-    fn retain(&mut self, id: ObjectRef, source: &GlyphSource, maximum: u64) {
+    fn retain(
+        &mut self,
+        id: ObjectRef,
+        source: &GlyphSource,
+        fallback: Option<&Arc<[u8]>>,
+        maximum: u64,
+    ) {
         let cost = source.data.cache_bytes;
         let entry_bytes = core::mem::size_of::<GlyphSourceEntry>() as u64;
         if cost.saturating_add(entry_bytes) > maximum {
@@ -177,6 +191,7 @@ impl GlyphSourceCache {
                 GlyphSourceEntry {
                     id,
                     source: source.clone(),
+                    fallback: fallback.map(Arc::downgrade),
                 },
             );
             self.used = self.used.saturating_add(cost);
@@ -210,6 +225,8 @@ enum Mapping {
     },
     Unicode {
         subtable: u16,
+        bold: bool,
+        italic: bool,
     },
 }
 
@@ -242,6 +259,11 @@ impl GlyphName {
 }
 
 impl GlyphSource {
+    /// Only substitute faces need synthetic weight. Embedded faces are untouched.
+    pub fn synthetic_bold(&self) -> bool {
+        matches!(self.data.mapping, Mapping::Unicode { bold: true, .. })
+    }
+
     pub fn load(
         resolver: &mut Resolver<'_>,
         font: &Font,
@@ -334,7 +356,7 @@ impl GlyphSource {
                             u16::try_from(cid).ok()
                         }
                     }
-                    Mapping::Unicode { subtable } => {
+                    Mapping::Unicode { subtable, .. } => {
                         if !glyph.mapped {
                             None
                         } else {
@@ -351,7 +373,23 @@ impl GlyphSource {
                     Mapping::Type1(_) => None,
                 };
                 match gid.filter(|gid| *gid != 0 && *gid < program.glyph_count()) {
-                    Some(gid) => program.outline_checked(gid),
+                    Some(gid) => {
+                        let mut path = program.outline_checked(gid)?;
+                        if let (Some(path), Mapping::Unicode { italic, .. }) = (&mut path, mapping)
+                        {
+                            // PDF advances position the next glyph; substitute hmtx metrics
+                            // only size this outline within the PDF's character cell.
+                            let advance = program.advance(gid).unwrap_or(0.0);
+                            let scale = if advance > 0.0 && glyph.width > 0.0 {
+                                (glyph.width * 1000.0 / advance) as f32
+                            } else {
+                                1.0
+                            };
+                            let shear = if *italic { 0.2 } else { 0.0 };
+                            transform_path(path, Matrix([scale, 0.0, shear, 1.0, 0.0, 0.0]))?;
+                        }
+                        Ok(path)
+                    }
                     None => Ok(None),
                 }
             }
@@ -434,6 +472,26 @@ fn load_source(
         check_bytes(bytes.len(), maximum_bytes)?;
         let program = Program::new(bytes, maximum_bytes, maximum_elements)?.ok_or_else(failed)?;
         let reference = program.font().ok_or_else(failed)?;
+        let mac_style = reference
+            .head()
+            .ok()
+            .map(|head| head.mac_style())
+            .unwrap_or_default();
+        let selection = reference
+            .os2()
+            .ok()
+            .map(|os2| os2.fs_selection())
+            .unwrap_or_default();
+        let native_bold = mac_style.contains(MacStyle::BOLD)
+            || selection.contains(SelectionFlags::BOLD)
+            || reference
+                .os2()
+                .is_ok_and(|os2| os2.us_weight_class() >= 600);
+        let native_italic = mac_style.contains(MacStyle::ITALIC)
+            || selection.contains(SelectionFlags::ITALIC)
+            || reference
+                .post()
+                .is_ok_and(|post| post.italic_angle().to_f64() != 0.0);
         let subtable = sfnt::cmap_index(&reference, PlatformId::Windows, 1)
             .or_else(|| sfnt::cmap_index(&reference, PlatformId::Windows, 10))
             .or_else(|| sfnt::cmap_index(&reference, PlatformId::Unicode, 4))
@@ -444,7 +502,11 @@ fn load_source(
             cache_bytes: budget.cache_bytes().saturating_add(fallback.len() as u64),
             warnings: budget.warnings,
             backend: Backend::Sfnt(program),
-            mapping: Mapping::Unicode { subtable },
+            mapping: Mapping::Unicode {
+                subtable,
+                bold: font.flags().bold && !native_bold,
+                italic: font.flags().italic && !native_italic,
+            },
             maximum_bytes,
             maximum_elements,
         }));

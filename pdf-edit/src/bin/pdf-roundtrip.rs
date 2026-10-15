@@ -466,6 +466,7 @@ fn snapshot(bytes: Arc<[u8]>, font: Arc<[u8]>) -> CheckResult<Snapshot> {
         pages.push(page.map_err(describe)?);
     }
     let options = RenderOptions {
+        fallback_fonts: Default::default(),
         scale: 1.0,
         fallback_font: Some(font),
     };

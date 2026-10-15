@@ -421,7 +421,7 @@ fn build_page(
                 } else {
                     separator(
                         &mut spans,
-                        if kind == SemanticKind::Paragraph {
+                        if matches!(kind, SemanticKind::Paragraph | SemanticKind::ListItem) {
                             ' '
                         } else {
                             '\n'
@@ -435,6 +435,28 @@ fn build_page(
                     budget.append(&mut last.text, &span.text)?;
                 } else {
                     budget.push(&mut spans, span)?;
+                }
+            }
+        }
+        // List structure supplies the marker in reflowed views. Keeping a
+        // literal bullet as well gives every item two visible bullets.
+        if kind == SemanticKind::ListItem {
+            if let Some(first) = spans.first_mut() {
+                if first
+                    .text
+                    .starts_with(['\u{2022}', '\u{25cf}', '\u{25e6}', '\u{25aa}'])
+                {
+                    let end = first
+                        .text
+                        .char_indices()
+                        .skip(1)
+                        .find(|(_, ch)| !ch.is_whitespace())
+                        .map(|(index, _)| index)
+                        .unwrap_or(first.text.len());
+                    first.text.drain(..end);
+                    if first.text.is_empty() {
+                        spans.remove(0);
+                    }
                 }
             }
         }
@@ -526,12 +548,23 @@ fn line_spans(
         .get(line.glyphs.start as usize..line.glyphs.end as usize)
         .unwrap_or(&[]);
     let mut spans = Vec::new();
+    let table = line.text.contains(" | ");
     let mut previous: Option<(f32, f32, f32)> = None;
     for glyph in ids.iter().filter_map(|id| text.glyphs.get(*id as usize)) {
         let (dx, dy) = glyph_direction(glyph);
         let along = dx * glyph.x + dy * glyph.y;
         let size = glyph.size.abs().max(0.01);
         if let Some((last_along, width, last_size)) = previous {
+            if table && along - last_along - width >= 1.5 * size.max(last_size) {
+                if spans
+                    .last()
+                    .is_some_and(|span: &Span| !span.text.ends_with(' '))
+                {
+                    separator(&mut spans, ' ', budget)?;
+                }
+                separator(&mut spans, '|', budget)?;
+                separator(&mut spans, ' ', budget)?;
+            }
             if along - last_along - width > SPACE_GAP * size.max(last_size)
                 && spans
                     .last()
