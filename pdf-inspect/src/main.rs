@@ -1369,6 +1369,7 @@ fn run_render(
     let options = RenderOptions {
         scale: dpi as f32 / 72.0,
         fallback_font,
+        fallback_fonts: Default::default(),
     };
     let raster = match rasterize_page(&mut resolver, &page, &options, [255, 255, 255, 255]) {
         Ok(raster) => raster,
@@ -1798,6 +1799,7 @@ fn bench_sample(path: &Path, limits: Limits) -> Result<BenchSample, String> {
             let options = RenderOptions {
                 scale: 1.0,
                 fallback_font: None,
+                fallback_fonts: Default::default(),
             };
             if let Err(error) = rasterize_page(&mut resolver, page, &options, [255, 255, 255, 255])
                 && refusal.is_none()
@@ -2469,6 +2471,7 @@ fn run_mutated(bytes: Vec<u8>, limits: Limits) -> MutateCaseReport {
                 let options = RenderOptions {
                     scale,
                     fallback_font: None,
+                    fallback_fonts: Default::default(),
                 };
                 let mut resolver = document.resolver();
                 let raster = rasterize_page(&mut resolver, page, &options, [255, 255, 255, 255])
@@ -2903,6 +2906,7 @@ fn render_fixture_expectations(
         let options = RenderOptions {
             scale: 1.0,
             fallback_font: None,
+            fallback_fonts: Default::default(),
         };
         match rasterize_page(&mut resolver, page, &options, [255, 255, 255, 255]) {
             Ok(raster) => {

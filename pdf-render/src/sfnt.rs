@@ -120,6 +120,14 @@ impl Program {
         self.glyph_count
     }
 
+    /// Native horizontal advance, in the same 1000-em space as the outline.
+    pub(crate) fn advance(&self, gid: u16) -> Option<f64> {
+        let font = self.font()?;
+        let advance = font.hmtx().ok()?.advance(GlyphId::new(u32::from(gid)))?;
+        let upem = font.head().ok()?.units_per_em();
+        (upem != 0).then(|| f64::from(advance) * 1000.0 / f64::from(upem))
+    }
+
     pub(crate) fn outline_checked(&self, gid: u16) -> Result<Option<Path>, DocError> {
         if gid == 0 || gid >= self.glyph_count {
             return Ok(None);

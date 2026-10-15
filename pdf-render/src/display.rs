@@ -180,9 +180,46 @@ pub struct DisplayList {
     pub missing_fonts: u32,
 }
 
+/// Optional family/style substitutes for fonts without embedded programs.
+/// Each family is ordered regular, bold, italic, bold italic. Missing styles
+/// use that family's regular face, then `RenderOptions::fallback_font`.
+#[derive(Clone, Default)]
+pub struct FallbackFonts {
+    pub serif: [Option<Arc<[u8]>>; 4],
+    pub sans: [Option<Arc<[u8]>>; 4],
+    pub monospace: [Option<Arc<[u8]>>; 4],
+}
+
+impl FallbackFonts {
+    fn select(&self, font: &Font) -> Option<&Arc<[u8]>> {
+        let flags = font.flags();
+        let family = if flags.fixed_pitch {
+            &self.monospace
+        } else if flags.serif {
+            &self.serif
+        } else {
+            &self.sans
+        };
+        let style = usize::from(flags.bold) + 2 * usize::from(flags.italic);
+        family[style].as_ref().or(family[0].as_ref())
+    }
+}
+
 pub struct RenderOptions {
     pub scale: f32,
+    /// Last-resort TrueType/OpenType face, width-matched and styled as needed.
     pub fallback_font: Option<Arc<[u8]>>,
+    pub fallback_fonts: FallbackFonts,
+}
+
+impl Default for RenderOptions {
+    fn default() -> Self {
+        Self {
+            scale: 1.0,
+            fallback_font: None,
+            fallback_fonts: FallbackFonts::default(),
+        }
+    }
 }
 
 pub(crate) struct Budget {
@@ -426,7 +463,7 @@ struct Builder<'c> {
     strings: Vec<u8>,
     active: Vec<ObjectRef>,
     ops: u64,
-    fallback: Option<Arc<[u8]>>,
+    options: &'c RenderOptions,
 }
 
 pub fn display_list(
@@ -501,7 +538,7 @@ pub fn display_list_cached(
         strings: Vec::new(),
         active: Vec::new(),
         ops: 0,
-        fallback: options.fallback_font.clone(),
+        options,
     };
     let mut tasks = Vec::new();
     for id in page.contents.iter().copied() {
@@ -1176,7 +1213,19 @@ impl Builder<'_> {
             self.emit(Item::Glyphs {
                 glyphs: core::mem::take(&mut run.paths),
                 paint,
-                stroke: None,
+                stroke: run
+                    .font_index
+                    .and_then(|index| self.fonts.get(index))
+                    .and_then(|entry| entry.source.as_ref())
+                    .filter(|source| source.synthetic_bold())
+                    .map(|_| Stroke {
+                        width: self.graphics.text.size.abs()
+                            * 0.025
+                            * self.graphics.ctm.mean_scale(),
+                        cap: 1,
+                        join: 1,
+                        miter: 10.0,
+                    }),
             })?;
         }
         Ok(())
@@ -1328,10 +1377,12 @@ impl Builder<'_> {
             .as_dict()
             .ok_or_else(|| bad("font_dictionary"))?;
         let font = self.font_cache.load(resolver, &value)?;
-        let source = match self
-            .glyph_cache
-            .load(resolver, &font, &value, self.fallback.as_ref())
-        {
+        let fallback = self
+            .options
+            .fallback_fonts
+            .select(&font)
+            .or(self.options.fallback_font.as_ref());
+        let source = match self.glyph_cache.load(resolver, &font, &value, fallback) {
             Ok(source) => source,
             Err(error) => {
                 recover(resolver, error, value.object().id(), "font_program_failed")?;
@@ -2393,7 +2444,7 @@ fn rect_path(bbox: [f32; 4], matrix: Matrix, budget: &mut Budget) -> Result<Path
     Ok(path)
 }
 
-fn transform_path(path: &mut Path, matrix: Matrix) -> Result<(), DocError> {
+pub(crate) fn transform_path(path: &mut Path, matrix: Matrix) -> Result<(), DocError> {
     if !matrix.is_finite() {
         return Err(bad("text_geometry"));
     }

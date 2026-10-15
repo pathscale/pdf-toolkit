@@ -11,6 +11,6 @@ pub mod sfnt;
 pub mod type1;
 
 pub use display::{
-    display_list, Dash, DisplayList, FillRule, GlyphPath, ImageSource, Item, Matrix, Paint, Path,
-    PathEl, RenderOptions, Rgba, Stroke,
+    display_list, Dash, DisplayList, FallbackFonts, FillRule, GlyphPath, ImageSource, Item, Matrix,
+    Paint, Path, PathEl, RenderOptions, Rgba, Stroke,
 };

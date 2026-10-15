@@ -120,6 +120,7 @@ fn render(document: &Document, page: &Page, font: Arc<[u8]>) -> CheckResult<Rast
         &mut document.resolver(),
         page,
         &RenderOptions {
+            fallback_fonts: Default::default(),
             scale: 1.0,
             fallback_font: Some(font),
         },

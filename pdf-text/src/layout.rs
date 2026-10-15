@@ -106,6 +106,7 @@ struct PendingLine {
     ids: Range<usize>,
     angle: i16,
     bold: bool,
+    table: bool,
 }
 
 fn magnitude(value: f32) -> f32 {
@@ -382,6 +383,7 @@ fn finish_line(
         ids: start..ids.len(),
         angle,
         bold: bold > items.len() / 2,
+        table: false,
     });
 }
 
@@ -501,6 +503,76 @@ fn candidate_lines(
     }
     finish_band(&mut band, text, &mut out, &mut ids, sizes);
     (out, ids)
+}
+
+/// Repeated short cells on aligned baselines are table rows, not newspaper
+/// columns. Keep their glyph ranges together before the XY column cuts.
+fn table_rows(lines: Vec<PendingLine>) -> Vec<PendingLine> {
+    let mut groups = Vec::new();
+    let mut start = 0;
+    while start < lines.len() {
+        let first = &lines[start];
+        let mut end = start + 1;
+        while end < lines.len()
+            && first.angle == 0
+            && lines[end].angle == 0
+            && magnitude(lines[end].line.bbox[3] - first.line.bbox[3])
+                < BASELINE_TOLERANCE * first.line.size.min(lines[end].line.size)
+        {
+            end += 1;
+        }
+        let cells = &lines[start..end];
+        let short = cells.len() >= 3
+            && cells.iter().all(|cell| {
+                cell.line.text.chars().count() <= 32
+                    && cell.line.text.split_whitespace().count() <= 5
+            })
+            && cells
+                .windows(2)
+                .all(|pair| pair[0].ids.end == pair[1].ids.start);
+        groups.push((start..end, short));
+        start = end;
+    }
+    let aligned = |left: usize, right: usize| {
+        let (a, short_a) = &groups[left];
+        let (b, short_b) = &groups[right];
+        *short_a
+            && *short_b
+            && a.len() == b.len()
+            && lines[b.start].line.bbox[1] - lines[a.start].line.bbox[3]
+                <= 2.0 * lines[a.start].line.size
+            && lines[a.clone()]
+                .iter()
+                .zip(&lines[b.clone()])
+                .all(|(a, b)| {
+                    magnitude(a.line.bbox[0] - b.line.bbox[0]) < 0.5 * a.line.size.min(b.line.size)
+                })
+    };
+    let merge: Vec<bool> = (0..groups.len())
+        .map(|i| (i > 0 && aligned(i - 1, i)) || (i + 1 < groups.len() && aligned(i, i + 1)))
+        .collect();
+    let mut output = Vec::with_capacity(lines.len());
+    let mut source = lines.into_iter();
+    for ((range, _), merge) in groups.into_iter().zip(merge) {
+        let Some(mut first) = source.next() else {
+            break;
+        };
+        if merge {
+            first.table = true;
+            for cell in source.by_ref().take(range.len() - 1) {
+                first.line.bbox = union(first.line.bbox, cell.line.bbox);
+                first.line.text.push_str(" | ");
+                first.line.text.push_str(&cell.line.text);
+                first.ids.end = cell.ids.end;
+                first.bold &= cell.bold;
+            }
+            output.push(first);
+        } else {
+            output.push(first);
+            output.extend(source.by_ref().take(range.len() - 1));
+        }
+    }
+    output
 }
 
 struct CutResult {
@@ -680,24 +752,32 @@ struct DraftBlock {
     angle: i16,
     bold: bool,
     words: usize,
+    table: bool,
 }
 
-fn build_blocks(page: &mut PageLayout, metadata: &[(i16, bool, u8)]) {
+fn build_blocks(page: &mut PageLayout, metadata: &[(i16, bool, u8, bool)]) {
     let mut drafts: Vec<DraftBlock> = Vec::new();
     for (index, line) in page.lines.iter().enumerate() {
-        let (angle, bold, column) = metadata.get(index).copied().unwrap_or((0, false, 0));
+        let (angle, bold, column, table) =
+            metadata.get(index).copied().unwrap_or((0, false, 0, false));
         let kind = line_kind(&line.text, line.size, page.body_size);
         let words = line.text.split_whitespace().count();
         let merge = drafts
             .last()
             .map(|last| {
+                let continuation = last.block.kind == BlockKind::ListItem
+                    && kind == BlockKind::Paragraph
+                    && line.bbox[0] > last.block.bbox[0]
+                    && line.bbox[0] - last.block.bbox[0] <= 3.0 * line.size
+                    && line.bbox[1] - last.block.bbox[3] <= 0.6 * line.size;
                 angle == 0
                     && last.angle == 0
-                    && last.bold == bold
+                    && !table
+                    && !last.table
+                    && (last.bold == bold || continuation)
                     && last.block.column == column
-                    && last.block.kind == kind
-                    && kind != BlockKind::ListItem
-                    && magnitude(last.size - line.size) <= SIZE_CHANGE * last.size.min(line.size)
+                    && ((last.block.kind == kind && kind != BlockKind::ListItem) || continuation)
+                    && magnitude(last.size - line.size) <= 0.1 * last.size.min(line.size)
                     && line.bbox[1] - last.block.bbox[3] <= 1.2 * line.size.max(last.size)
             })
             .unwrap_or(false);
@@ -720,6 +800,7 @@ fn build_blocks(page: &mut PageLayout, metadata: &[(i16, bool, u8)]) {
                 angle,
                 bold,
                 words,
+                table,
             });
         }
     }
@@ -733,8 +814,13 @@ fn build_blocks(page: &mut PageLayout, metadata: &[(i16, bool, u8)]) {
                 .unwrap_or(false);
             draft.angle == 0
                 && draft.block.kind == BlockKind::Paragraph
+                && !draft.table
                 && (draft.size >= 1.25 * page.body_size
-                    || (draft.bold && draft.words > 0 && draft.words < 12 && followed_by_body))
+                    || (draft.bold
+                        && draft.size >= 0.95 * page.body_size
+                        && draft.words > 0
+                        && draft.words <= 24
+                        && followed_by_body))
         })
         .collect();
     let mut sizes: Vec<f32> = drafts
@@ -802,7 +888,8 @@ pub fn layout(text: &PageText) -> PageLayout {
     let items = unique_items(items, text);
     let mut sizes: Vec<f32> = items.iter().map(|item| item.size).collect();
     let body_size = median(&mut sizes);
-    let (mut pending, ids) = candidate_lines(items, text, &mut sizes);
+    let (pending, ids) = candidate_lines(items, text, &mut sizes);
+    let mut pending = table_rows(pending);
     // Order rotated lines in their own text frame: "down" is perpendicular to the
     // baseline, so a page turned 90 degrees reads its lines right to left in
     // display space, exactly as it reads top to bottom before the turn.
@@ -855,7 +942,7 @@ pub fn layout(text: &PageText) -> PageLayout {
             size: source.line.size,
             glyphs: start..end,
         });
-        metadata.push((source.angle, source.bold, column));
+        metadata.push((source.angle, source.bold, column, source.table));
     }
     build_blocks(&mut page, &metadata);
     page

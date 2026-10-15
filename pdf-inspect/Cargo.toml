@@ -15,11 +15,11 @@ name = "pdf-inspect"
 path = "src/main.rs"
 
 [dependencies]
-nagoya = { version = "^0.1.12", features = ["reactor"] }
-libc = "^0.2.189"
-rusty_alloc = { package = "ps-rusty_alloc", version = "^2.3.3" }
-pdf-core = { package = "pdf-toolkit-core", version = "0.3.12", path = "../pdf-core", default-features = false, features = ["std"] }
-pdf-text = { package = "pdf-toolkit-text", version = "0.3.12", path = "../pdf-text", features = ["jpx", "jxl"] }
-pdf-raster = { package = "pdf-toolkit-raster", version = "0.3.12", path = "../pdf-raster" }
-pdf-render = { package = "pdf-toolkit-render", version = "0.3.12", path = "../pdf-render", default-features = false }
-pdf-edit = { package = "pdf-toolkit-edit", version = "0.3.12", path = "../pdf-edit" }
+nagoya = { version = "^0.1", features = ["reactor"] }
+libc = "^0.2"
+rusty_alloc = { package = "ps-rusty_alloc", version = "^2.3" }
+pdf-core = { package = "pdf-toolkit-core", version = "^0.3", path = "../pdf-core", default-features = false, features = ["std"] }
+pdf-text = { package = "pdf-toolkit-text", version = "^0.3", path = "../pdf-text", features = ["jpx", "jxl"] }
+pdf-raster = { package = "pdf-toolkit-raster", version = "^0.3", path = "../pdf-raster" }
+pdf-render = { package = "pdf-toolkit-render", version = "^0.3", path = "../pdf-render", default-features = false }
+pdf-edit = { package = "pdf-toolkit-edit", version = "^0.3", path = "../pdf-edit" }
