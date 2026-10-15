@@ -40,9 +40,12 @@ impl Default for KdfParams {
 impl KdfParams {
     fn checked(self, limits: &Limits) -> Result<Params, DocError> {
         check(
-            LimitKind::CodecBytes,
+            LimitKind::KdfMemoryBytes,
             u64::from(self.memory_kib) * 1024,
-            limits.max_decoded_bytes.min(MAX_MEMORY_BYTES),
+            limits
+                .max_kdf_memory_bytes
+                .min(limits.max_decoded_bytes)
+                .min(MAX_MEMORY_BYTES),
         )?;
         check(
             LimitKind::CodecWork,
@@ -249,13 +252,21 @@ impl PrivateCrypt {
     }
 
     pub(crate) fn excluded(&self, object: &Object) -> bool {
-        (self.encrypt_id.is_some() && self.encrypt_id == object.id())
-            || (object.is_stream()
-                && object
-                    .dict()
-                    .and_then(|dict| dict.get(b"Type"))
-                    .and_then(|value| value.as_name())
-                    .is_some_and(|name| name.eq_bytes(b"XRef")))
+        (self.encrypt_id.is_some() && self.encrypt_id == object.id()) || object.is_xref_stream()
+    }
+
+    pub(crate) fn check_xref_claim(&self, object: &Object) -> Result<(), DocError> {
+        if object.is_stream()
+            && !object.is_xref_stream()
+            && object
+                .dict()
+                .and_then(|dict| dict.get(b"Type"))
+                .and_then(|value| value.as_name())
+                .is_some_and(|name| name.eq_bytes(b"XRef"))
+        {
+            return Err(malformed(0, "PSChaCha authentication"));
+        }
+        Ok(())
     }
 
     pub(crate) fn prepare(
@@ -267,6 +278,7 @@ impl PrivateCrypt {
         if object.id() != Some(expected) {
             return Err(malformed(0, "PSChaCha object generation"));
         }
+        self.check_xref_claim(object)?;
         if !self.excluded(object) {
             object.decrypt_private_strings(&self.key, limits)?;
         }

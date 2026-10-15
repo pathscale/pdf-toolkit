@@ -12,6 +12,7 @@ use pdf_text::content::{
 };
 use pdf_text::encoding::BaseEncoding;
 use pdf_text::font::{Font, FontCache, FontKind, Glyph, GlyphText};
+use pdf_text::images::ImageDecodeBudget;
 
 use crate::glyphs::{GlyphSource, GlyphSourceCache};
 use crate::paint::{self, ColorSpace, ColorState};
@@ -426,6 +427,7 @@ struct Builder<'c> {
     strings: Vec<u8>,
     active: Vec<ObjectRef>,
     ops: u64,
+    image_items: u64,
     fallback: Option<Arc<[u8]>>,
 }
 
@@ -451,6 +453,43 @@ pub fn display_list_cached(
     options: &RenderOptions,
     cache: &mut FontCache,
     glyph_cache: &mut GlyphSourceCache,
+) -> Result<DisplayList, DocError> {
+    let mut image_budget =
+        ImageDecodeBudget::new(resolver.document().limits().max_total_decoded_bytes);
+    display_list_cached_with_budget(
+        resolver,
+        page,
+        options,
+        cache,
+        glyph_cache,
+        &mut image_budget,
+    )
+}
+
+/// Builds a display list using the supplied cumulative image decode budget.
+pub fn display_list_with_budget(
+    resolver: &mut Resolver<'_>,
+    page: &Page,
+    options: &RenderOptions,
+    image_budget: &mut ImageDecodeBudget,
+) -> Result<DisplayList, DocError> {
+    display_list_cached_with_budget(
+        resolver,
+        page,
+        options,
+        &mut FontCache::default(),
+        &mut GlyphSourceCache::default(),
+        image_budget,
+    )
+}
+
+fn display_list_cached_with_budget(
+    resolver: &mut Resolver<'_>,
+    page: &Page,
+    options: &RenderOptions,
+    cache: &mut FontCache,
+    glyph_cache: &mut GlyphSourceCache,
+    image_budget: &mut ImageDecodeBudget,
 ) -> Result<DisplayList, DocError> {
     if !resolver.document().decryptable() {
         return Err(DocError::Encrypted);
@@ -479,7 +518,7 @@ pub fn display_list_cached(
         limits,
         budget: Budget {
             used: 0,
-            maximum: limits.max_total_decoded_bytes,
+            maximum: image_budget.remaining(),
         },
         output: DisplayList {
             width,
@@ -501,6 +540,7 @@ pub fn display_list_cached(
         strings: Vec::new(),
         active: Vec::new(),
         ops: 0,
+        image_items: 0,
         fallback: options.fallback_font.clone(),
     };
     let mut tasks = Vec::new();
@@ -553,6 +593,14 @@ pub fn display_list_cached(
     }
     builder.pop_clips(0)?;
     builder.annotations(resolver, page, ctm)?;
+    let used = usize::try_from(builder.budget.used).map_err(|_| {
+        refusal(
+            LimitKind::TotalDecodedBytes,
+            builder.budget.used,
+            isize::MAX as u64,
+        )
+    })?;
+    image_budget.charge(used)?;
     Ok(builder.output)
 }
 
@@ -772,6 +820,15 @@ impl Builder<'_> {
     }
 
     fn emit(&mut self, item: Item) -> Result<(), DocError> {
+        if matches!(&item, Item::Image { .. }) {
+            let maximum = u64::from(self.limits.max_image_items);
+            let requested = self
+                .image_items
+                .checked_add(1)
+                .ok_or_else(|| refusal(LimitKind::ImageItems, u64::MAX, maximum))?;
+            check(LimitKind::ImageItems, requested, maximum)?;
+            self.image_items = requested;
+        }
         let paint = match &item {
             Item::Fill { paint, .. } | Item::Stroke { paint, .. } | Item::Glyphs { paint, .. } => {
                 Some(paint)
@@ -2102,6 +2159,11 @@ impl Builder<'_> {
         let samples = reader.inline_bytes(length)?;
         let capacity = usize::try_from(rgba_length)
             .map_err(|_| refusal(LimitKind::DecodedBytes, rgba_length, isize::MAX as u64))?;
+        check(
+            LimitKind::ImageItems,
+            self.image_items.saturating_add(1),
+            u64::from(self.limits.max_image_items),
+        )?;
         let mut rgba = Vec::new();
         self.budget.reserve(&mut rgba, capacity)?;
         for sample in samples.chunks_exact(channels) {
@@ -2599,7 +2661,10 @@ fn recover(
     what: &'static str,
 ) -> Result<(), DocError> {
     match error {
-        error @ (DocError::Encrypted | DocError::Refused(_)) => Err(error),
+        error @ (DocError::Encrypted
+        | DocError::Refused(_)
+        | DocError::Filter(pdf_core::filter::FilterError::OutputLimit { .. })
+        | DocError::Filter(pdf_core::filter::FilterError::Refused(_))) => Err(error),
         _ => {
             warn(resolver, object, what);
             Ok(())

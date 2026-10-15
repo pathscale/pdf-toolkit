@@ -56,13 +56,21 @@ impl ColorSpec {
     }
 }
 
-struct Budget {
+pub struct ImageDecodeBudget {
     used: u64,
     maximum: u64,
 }
 
-impl Budget {
-    fn charge(&mut self, bytes: usize) -> Result<(), DocError> {
+impl ImageDecodeBudget {
+    pub fn new(maximum: u64) -> Self {
+        Self { used: 0, maximum }
+    }
+
+    pub fn remaining(&self) -> u64 {
+        self.maximum.saturating_sub(self.used)
+    }
+
+    pub fn charge(&mut self, bytes: usize) -> Result<(), DocError> {
         let requested = self
             .used
             .checked_add(bytes as u64)
@@ -80,6 +88,17 @@ pub fn load_image(
     id: ObjectRef,
     max_pixels: u64,
 ) -> Result<Image, DocError> {
+    let mut budget = ImageDecodeBudget::new(resolver.document().limits().max_total_decoded_bytes);
+    load_image_with_budget(resolver, id, max_pixels, &mut budget)
+}
+
+/// Loads an image XObject using the supplied cumulative decode budget.
+pub fn load_image_with_budget(
+    resolver: &mut Resolver<'_>,
+    id: ObjectRef,
+    max_pixels: u64,
+    budget: &mut ImageDecodeBudget,
+) -> Result<Image, DocError> {
     if !resolver.document().decryptable() {
         return Err(DocError::Encrypted);
     }
@@ -87,22 +106,13 @@ pub fn load_image(
     let object = resolver.get(id)?;
     let value = resolver.resolve(object.root())?;
     let object = value.object().clone();
-    let mut budget = Budget {
-        used: 0,
-        maximum: resolver.document().limits().max_total_decoded_bytes,
-    };
-    let (mut image, soft) = read_image(resolver, &object, max_pixels, true, &mut budget)?;
+    let (mut image, soft) = read_image(resolver, &object, max_pixels, true, budget)?;
 
     if matches!(&image.data, ImageData::Pixels { .. }) {
         if let Some(soft) = soft {
-            if let Err(error) = apply_soft_mask(
-                resolver,
-                &object,
-                &mut image,
-                &soft,
-                max_pixels,
-                &mut budget,
-            ) {
+            if let Err(error) =
+                apply_soft_mask(resolver, &object, &mut image, &soft, max_pixels, budget)
+            {
                 recover(resolver, &object, error, "image_soft_mask_failed")?;
             }
         }
@@ -116,7 +126,7 @@ fn read_image(
     object: &Object,
     max_pixels: u64,
     read_soft: bool,
-    budget: &mut Budget,
+    budget: &mut ImageDecodeBudget,
 ) -> Result<(Image, Option<Value>), DocError> {
     if !object.is_stream() {
         return Err(wrong(object.id(), "image stream"));
@@ -444,7 +454,7 @@ fn decode_jxl(
     bytes: &[u8],
     image: &mut Image,
     max_pixels: u64,
-    budget: &mut Budget,
+    budget: &mut ImageDecodeBudget,
 ) -> Result<(), DocError> {
     use jxl_oxide::{EnumColourEncoding, JxlImage, NullCms, RenderingIntent};
 
@@ -609,7 +619,7 @@ fn decode_jpx(
     bytes: &[u8],
     color: &ColorSpec,
     image: &mut Image,
-    budget: &mut Budget,
+    budget: &mut ImageDecodeBudget,
 ) -> Result<bool, DocError> {
     use hayro_jpeg2000::{DecodeSettings, DecoderContext};
 
@@ -1090,7 +1100,7 @@ fn image_params(
     codec: FilterKind,
     width: u32,
     height: u32,
-    budget: &mut Budget,
+    budget: &mut ImageDecodeBudget,
 ) -> Result<ImageParams, DocError> {
     let mut params = ImageParams {
         width,
@@ -1477,7 +1487,7 @@ fn read_lookup(
     resolver: &mut Resolver<'_>,
     value: &Value,
     space: ColorSpace,
-    budget: &mut Budget,
+    budget: &mut ImageDecodeBudget,
 ) -> Result<Vec<u8>, DocError> {
     let ColorSpace::Indexed { base, hival } = space else {
         return Err(wrong(value.object().id(), "Indexed color space"));
@@ -1656,7 +1666,7 @@ fn apply_soft_mask(
     image: &mut Image,
     value: &Value,
     max_pixels: u64,
-    budget: &mut Budget,
+    budget: &mut ImageDecodeBudget,
 ) -> Result<(), DocError> {
     let value = resolver.resolve(value.get())?;
     let mask_object = value.object();
@@ -1716,9 +1726,14 @@ fn apply_soft_mask(
 fn decode(
     resolver: &mut Resolver<'_>,
     object: &Object,
-    budget: &mut Budget,
+    budget: &mut ImageDecodeBudget,
 ) -> Result<Decoded, DocError> {
-    let decoded = resolver.decode_stream(object)?;
+    let maximum = resolver
+        .document()
+        .limits()
+        .max_decoded_bytes
+        .min(budget.remaining());
+    let decoded = resolver.decode_stream_limited(object, maximum)?;
     budget.charge(decoded.bytes.len())?;
     Ok(decoded)
 }
@@ -1749,7 +1764,10 @@ fn recover(
     what: &'static str,
 ) -> Result<(), DocError> {
     match error {
-        error @ (DocError::Encrypted | DocError::Refused(_)) => Err(error),
+        error @ (DocError::Encrypted
+        | DocError::Refused(_)
+        | DocError::Filter(pdf_core::filter::FilterError::OutputLimit { .. })
+        | DocError::Filter(pdf_core::filter::FilterError::Refused(_))) => Err(error),
         _ => {
             warn(resolver, object, what);
             Ok(())

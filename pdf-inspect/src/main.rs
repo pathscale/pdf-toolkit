@@ -126,12 +126,19 @@ unsafe impl GlobalAlloc for CountingAllocator {
 }
 
 fn record_allocation(size: usize) {
-    let current = CURRENT_BYTES
-        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
-            Some(value.saturating_add(size))
-        })
-        .map(|previous| previous.saturating_add(size))
-        .unwrap_or(usize::MAX);
+    let mut previous = CURRENT_BYTES.load(Ordering::Relaxed);
+    let current = loop {
+        let next = previous.saturating_add(size);
+        match CURRENT_BYTES.compare_exchange_weak(
+            previous,
+            next,
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+        ) {
+            Ok(_) => break next,
+            Err(observed) => previous = observed,
+        }
+    };
 
     let mut peak = PEAK_BYTES.load(Ordering::Relaxed);
     while current > peak {
@@ -144,9 +151,18 @@ fn record_allocation(size: usize) {
 }
 
 fn record_free(size: usize) {
-    let _ = CURRENT_BYTES.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
-        Some(value.saturating_sub(size))
-    });
+    let mut previous = CURRENT_BYTES.load(Ordering::Relaxed);
+    while CURRENT_BYTES
+        .compare_exchange_weak(
+            previous,
+            previous.saturating_sub(size),
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+        )
+        .is_err()
+    {
+        previous = CURRENT_BYTES.load(Ordering::Relaxed);
+    }
 }
 
 fn reset_peak_bytes() {

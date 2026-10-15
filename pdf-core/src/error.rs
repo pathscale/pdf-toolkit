@@ -46,6 +46,8 @@ impl DocError {
                 LimitKind::ObjStmMembers => "refused:objstm_members",
                 LimitKind::ContentOps => "refused:content_ops",
                 LimitKind::ImagePixels => "refused:image_pixels",
+                LimitKind::ImageItems => "refused:image_items",
+                LimitKind::KdfMemoryBytes => "refused:kdf_memory_bytes",
                 LimitKind::Jbig2Segments => "refused:jbig2_segments",
                 LimitKind::Jbig2Symbols => "refused:jbig2_symbols",
                 LimitKind::CodecBytes => "refused:codec_bytes",

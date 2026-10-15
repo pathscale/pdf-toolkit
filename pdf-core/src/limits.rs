@@ -14,6 +14,8 @@ pub enum LimitKind {
     ObjStmMembers,
     ContentOps,
     ImagePixels,
+    ImageItems,
+    KdfMemoryBytes,
     Jbig2Segments,
     Jbig2Symbols,
     CodecBytes,
@@ -37,6 +39,8 @@ impl LimitKind {
             Self::ObjStmMembers => "objstm_members",
             Self::ContentOps => "content_ops",
             Self::ImagePixels => "image_pixels",
+            Self::ImageItems => "image_items",
+            Self::KdfMemoryBytes => "kdf_memory_bytes",
             Self::Jbig2Segments => "jbig2_segments",
             Self::Jbig2Symbols => "jbig2_symbols",
             Self::CodecBytes => "codec_bytes",
@@ -68,6 +72,9 @@ pub struct Limits {
     pub max_objstm_members: u32,
     pub max_objstm_cache_bytes: u64,
     pub max_content_ops: u64,
+    pub max_image_items: u32,
+    pub max_image_cache_bytes: u64,
+    pub max_kdf_memory_bytes: u64,
 }
 
 impl Default for Limits {
@@ -87,6 +94,9 @@ impl Default for Limits {
             max_objstm_members: 1_000_000,
             max_objstm_cache_bytes: 64 << 20,
             max_content_ops: 50_000_000,
+            max_image_items: 4096,
+            max_image_cache_bytes: 64 << 20,
+            max_kdf_memory_bytes: 64 << 20,
         }
     }
 }
