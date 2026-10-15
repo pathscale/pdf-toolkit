@@ -113,6 +113,18 @@ fn component_to_unicode(name: &[u8]) -> Option<GlyphText> {
     None
 }
 
+fn zapf_glyph_name_to_unicode(name: &[u8]) -> Option<GlyphText> {
+    (0..=255u16)
+        .map(|code| code as u8)
+        .find(|code| {
+            BaseEncoding::ZapfDingbats
+                .glyph_name(*code)
+                .is_some_and(|candidate| candidate.as_bytes() == name)
+        })
+        .and_then(|code| BaseEncoding::ZapfDingbats.unicode(code))
+        .map(GlyphText::from_char)
+}
+
 fn hex_number(bytes: &[u8]) -> Option<u32> {
     let mut value = 0u32;
     for byte in bytes {
@@ -159,6 +171,15 @@ impl SimpleEncoding {
             *slot = mapped.unwrap_or_default();
         }
         mapped.is_some()
+    }
+
+    pub(crate) fn set_embedded(&mut self, byte: u8, name: &[u8]) {
+        let index = usize::from(byte);
+        if let Some(slot) = self.text.get_mut(index) {
+            *slot = glyph_name_to_unicode(name)
+                .or_else(|| zapf_glyph_name_to_unicode(name))
+                .unwrap_or_default();
+        }
     }
 
     pub(crate) fn unicode(&self, code: u32) -> Option<GlyphText> {

@@ -1099,7 +1099,17 @@ fn run_repair(path: &Path, limits: Limits) -> u8 {
     let document = match Document::open_with(source, limits, pdf_core::OpenMode::Repair) {
         Ok(document) => document,
         Err(error) => {
-            out!("{{\"strict\":{:?},\"repair\":{:?}}}", strict, error.code());
+            let mut json = JsonWriter::new();
+            json.begin_object();
+            json.member("strict");
+            match strict {
+                Some(code) => json.string(code),
+                None => json.null(),
+            }
+            json.member("repair");
+            json.string(error.code());
+            json.end_object();
+            out!("{}", json.finish());
             return 1;
         }
     };
@@ -1124,11 +1134,27 @@ fn run_repair(path: &Path, limits: Limits) -> u8 {
     let resolver_warnings = resolver.take_warnings();
     warnings.extend(resolver_warnings.iter().map(|w| w.what));
     warnings.dedup();
-    out!(
-        "{{\"strict\":{:?},\"pages\":{pages},\"page_errors\":{page_errors},\"glyphs\":{glyphs},\"warnings\":{:?}}}",
-        strict,
-        warnings
-    );
+    let mut json = JsonWriter::new();
+    json.begin_object();
+    json.member("strict");
+    match strict {
+        Some(code) => json.string(code),
+        None => json.null(),
+    }
+    json.member("pages");
+    json.number(u64::from(pages));
+    json.member("page_errors");
+    json.number(u64::from(page_errors));
+    json.member("glyphs");
+    json.number(glyphs as u64);
+    json.member("warnings");
+    json.begin_array();
+    for warning in warnings {
+        json.string(warning);
+    }
+    json.end_array();
+    json.end_object();
+    out!("{}", json.finish());
     0
 }
 
