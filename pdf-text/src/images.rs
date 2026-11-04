@@ -161,6 +161,7 @@ fn read_image(
             .as_bool()
             .ok_or_else(|| wrong(object.id(), "ImageMask boolean"))?,
     };
+    preflight_sample_layout(resolver, dict, width, height, image_mask)?;
     let decoded_result = decode(resolver, object, budget);
     // JPX and JXL carry their own precision. Do not resolve the PDF entry.
     let mut bits_per_component = if matches!(
@@ -434,6 +435,81 @@ fn read_image(
     }
     image.data = ImageData::Pixels { rgba };
     Ok((image, soft))
+}
+
+fn preflight_sample_layout(
+    resolver: &mut Resolver<'_>,
+    dict: DictRef<'_>,
+    width: u32,
+    height: u32,
+    image_mask: bool,
+) -> Result<(), DocError> {
+    if !raw_sample_stream(resolver, dict) {
+        return Ok(());
+    }
+    let bits = resolver
+        .resolve_dict_key(dict, b"BitsPerComponent")?
+        .and_then(|value| value.get().as_i64())
+        .and_then(|number| u8::try_from(number).ok())
+        .unwrap_or(if image_mask { 1 } else { 0 });
+    let space = if image_mask {
+        ColorSpace::Gray
+    } else {
+        match read_color(resolver, dict) {
+            Ok(color) => color.space,
+            Err(error @ (DocError::Encrypted | DocError::Refused(_))) => return Err(error),
+            Err(_) => return Ok(()),
+        }
+    };
+    if channels(space) == 0
+        || !matches!(bits, 1 | 2 | 4 | 8 | 16)
+        || (image_mask && bits != 1)
+    {
+        return Ok(());
+    }
+    SampleLayout::new(
+        width,
+        height,
+        channels(space),
+        bits,
+        resolver.document().limits().max_decoded_bytes,
+    )?;
+    Ok(())
+}
+
+fn raw_sample_stream(resolver: &mut Resolver<'_>, dict: DictRef<'_>) -> bool {
+    let filters = match resolver.resolve_dict_key(dict, b"Filter") {
+        Ok(Some(filters)) => filters,
+        Ok(None) => return true,
+        Err(_) => return false,
+    };
+    if filters.get().is_null() {
+        return true;
+    }
+    if let Some(array) = filters.get().as_array() {
+        for filter in array.iter() {
+            let Ok(filter) = resolver.resolve(filter) else {
+                return false;
+            };
+            let Some(name) = filter.get().as_name() else {
+                return false;
+            };
+            let Some(kind) = FilterKind::from_name(name.decoded().as_ref()) else {
+                return false;
+            };
+            if kind.is_image_codec() {
+                return false;
+            }
+        }
+        true
+    } else if let Some(name) = filters.get().as_name() {
+        match FilterKind::from_name(name.decoded().as_ref()) {
+            Some(kind) => !kind.is_image_codec(),
+            None => false,
+        }
+    } else {
+        false
+    }
 }
 
 #[cfg(feature = "jxl")]

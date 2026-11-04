@@ -757,6 +757,12 @@ fn object_image_rgba(
     let max_pixels = maximum / 4;
     let image = match pdf_text::images::load_image(resolver, id, max_pixels) {
         Ok(image) => image,
+        Err(error)
+            if resolver.document().repair_mode() && is_resource_decode_limit(&error) =>
+        {
+            warn_resource_decode_skipped(resolver, id);
+            return Ok(None);
+        }
         Err(error) if is_fatal(&error) => return Err(error),
         Err(_) => {
             resolver.warn(Warning {
@@ -796,6 +802,10 @@ fn object_image_rgba(
         if let Err(error) =
             apply_external_soft_mask(resolver, id, image.width, image.height, &mut rgba, maximum)
         {
+            if resolver.document().repair_mode() && is_resource_decode_limit(&error) {
+                warn_resource_decode_skipped(resolver, id);
+                return Ok(None);
+            }
             if is_fatal(&error) {
                 return Err(error);
             }
@@ -901,8 +911,30 @@ fn apply_external_soft_mask(
     Ok(())
 }
 
+fn is_resource_decode_limit(error: &DocError) -> bool {
+    matches!(
+        error,
+        DocError::Refused(refusal)
+            if matches!(
+                refusal.limit,
+                LimitKind::DecodedBytes | LimitKind::TotalDecodedBytes
+            )
+    ) || matches!(
+        error,
+        DocError::Filter(pdf_core::filter::FilterError::OutputLimit { .. })
+    )
+}
+
+fn warn_resource_decode_skipped(resolver: &mut Resolver<'_>, id: ObjectRef) {
+    resolver.warn(Warning {
+        offset: None,
+        object: Some(id),
+        what: "resource_decode_skipped",
+    });
+}
+
 fn is_fatal(error: &DocError) -> bool {
-    matches!(error, DocError::Encrypted | DocError::Refused(_))
+    matches!(error, DocError::Encrypted | DocError::Refused(_) | DocError::Source(_))
 }
 
 fn premultiply(rgba: &mut [u8]) {

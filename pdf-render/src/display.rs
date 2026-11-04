@@ -550,8 +550,9 @@ pub fn display_list_cached(
                 continue;
             }
         };
-        let bytes = match builder.decode(resolver, &object) {
-            Ok(bytes) => bytes,
+        let bytes = match builder.decode(resolver, &object, false) {
+            Ok(Some(bytes)) => bytes,
+            Ok(None) => continue,
             Err(error) => {
                 recover(resolver, error, Some(id), "render_content_failed")?;
                 continue;
@@ -796,16 +797,37 @@ impl Builder<'_> {
         &mut self,
         resolver: &mut Resolver<'_>,
         object: &Object,
-    ) -> Result<Arc<[u8]>, DocError> {
-        let decoded = resolver.decode_stream(object)?;
-        self.budget.charge(decoded.bytes.len())?;
+        resource: bool,
+    ) -> Result<Option<Arc<[u8]>>, DocError> {
+        let decoded = match resolver.decode_stream(object) {
+            Ok(decoded) => decoded,
+            Err(error)
+                if resource
+                    && resolver.document().repair_mode()
+                    && resource_decode_limit(&error) =>
+            {
+                warn(resolver, object.id(), "resource_decode_skipped");
+                return Ok(None);
+            }
+            Err(error) => return Err(error),
+        };
+        if let Err(error) = self.budget.charge(decoded.bytes.len()) {
+            if resource
+                && resolver.document().repair_mode()
+                && resource_decode_limit(&error)
+            {
+                warn(resolver, object.id(), "resource_decode_skipped");
+                return Ok(None);
+            }
+            return Err(error);
+        }
         if decoded.image.is_some() {
             return Err(bad("render_content_codec"));
         }
         if decoded.truncated {
             warn(resolver, object.id(), "render_content_truncated");
         }
-        Ok(Arc::from(decoded.bytes))
+        Ok(Some(Arc::from(decoded.bytes)))
     }
 
     fn emit(&mut self, item: Item) -> Result<(), DocError> {
@@ -1265,7 +1287,9 @@ impl Builder<'_> {
             .resolve_dict_key(dict, b"Resources")?
             .filter(|value| value.get().as_dict().is_some())
             .or(invocation.inherited);
-        let bytes = self.decode(resolver, &invocation.object)?;
+        let Some(bytes) = self.decode(resolver, &invocation.object, true)? else {
+            return Ok(());
+        };
         let bbox_path = bbox
             .map(|bbox| rect_path(bbox, ctm, &mut self.budget))
             .transpose()?;
@@ -2643,6 +2667,20 @@ pub(crate) fn warn(resolver: &mut Resolver<'_>, object: Option<ObjectRef>, what:
     });
 }
 
+fn resource_decode_limit(error: &DocError) -> bool {
+    matches!(
+        error,
+        DocError::Refused(refusal)
+            if matches!(
+                refusal.limit,
+                LimitKind::DecodedBytes | LimitKind::TotalDecodedBytes
+            )
+    ) || matches!(
+        error,
+        DocError::Filter(pdf_core::filter::FilterError::OutputLimit { .. })
+    )
+}
+
 fn recover(
     resolver: &mut Resolver<'_>,
     error: DocError,
@@ -2650,7 +2688,7 @@ fn recover(
     what: &'static str,
 ) -> Result<(), DocError> {
     match error {
-        error @ (DocError::Encrypted | DocError::Refused(_)) => Err(error),
+        error @ (DocError::Encrypted | DocError::Refused(_) | DocError::Source(_)) => Err(error),
         _ => {
             warn(resolver, object, what);
             Ok(())
