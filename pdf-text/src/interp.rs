@@ -1460,11 +1460,7 @@ fn push<T>(values: &mut Vec<T>, value: T, limits: Limits) -> Result<(), DocError
 fn resource_decode_limit(error: &DocError) -> bool {
     matches!(
         error,
-        DocError::Refused(refusal)
-            if matches!(
-                refusal.limit,
-                LimitKind::DecodedBytes | LimitKind::TotalDecodedBytes
-            )
+        DocError::Refused(refusal) if refusal.limit == LimitKind::DecodedBytes
     ) || matches!(
         error,
         DocError::Filter(pdf_core::filter::FilterError::OutputLimit { .. })

@@ -2670,11 +2670,7 @@ pub(crate) fn warn(resolver: &mut Resolver<'_>, object: Option<ObjectRef>, what:
 fn resource_decode_limit(error: &DocError) -> bool {
     matches!(
         error,
-        DocError::Refused(refusal)
-            if matches!(
-                refusal.limit,
-                LimitKind::DecodedBytes | LimitKind::TotalDecodedBytes
-            )
+        DocError::Refused(refusal) if refusal.limit == LimitKind::DecodedBytes
     ) || matches!(
         error,
         DocError::Filter(pdf_core::filter::FilterError::OutputLimit { .. })
