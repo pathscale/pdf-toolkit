@@ -3,9 +3,6 @@ name: Publish
 # A version bump on master is the release trigger. Cargo packages, verifies and
 # uploads the crate; crates.io decides whether that version can be published.
 on:
-  push:
-    branches: [master]
-    paths: ['Cargo.toml']
   workflow_dispatch:
 
 concurrency:
