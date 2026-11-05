@@ -461,10 +461,7 @@ fn preflight_sample_layout(
             Err(_) => return Ok(()),
         }
     };
-    if channels(space) == 0
-        || !matches!(bits, 1 | 2 | 4 | 8 | 16)
-        || (image_mask && bits != 1)
-    {
+    if channels(space) == 0 || !matches!(bits, 1 | 2 | 4 | 8 | 16) || (image_mask && bits != 1) {
         return Ok(());
     }
     SampleLayout::new(

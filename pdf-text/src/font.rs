@@ -498,10 +498,7 @@ impl Font {
         self.glyphs_with_width_cache::<false>(bytes)
     }
 
-    pub(crate) fn glyphs_cached<'a>(
-        &'a self,
-        bytes: &'a [u8],
-    ) -> impl Iterator<Item = Glyph> + 'a {
+    pub(crate) fn glyphs_cached<'a>(&'a self, bytes: &'a [u8]) -> impl Iterator<Item = Glyph> + 'a {
         self.glyphs_with_width_cache::<true>(bytes)
     }
 
@@ -527,8 +524,7 @@ impl Font {
             };
             remaining = remaining.get(usize::from(byte_len)..).unwrap_or(&[]);
             let text = if valid {
-                data
-                    .to_unicode
+                data.to_unicode
                     .as_ref()
                     .and_then(|map| map.unicode(code))
                     .or_else(|| {
@@ -593,6 +589,56 @@ impl Font {
                 word_space: byte_len == 1 && code == 32,
             })
         })
+    }
+}
+
+#[cfg(test)]
+mod width_cache_tests {
+    use super::*;
+
+    #[test]
+    fn cached_cid_widths_match_exact_lookup_for_hits_collisions_and_invalid_codes() {
+        let cmap = b"2 begincodespacerange <00> <7F> <80> <BF> endcodespacerange 2 begincidchar <41> 7 <81> 8 endcidchar";
+        let (encoding, warning) = CMap::parse(cmap, 16);
+        assert_eq!(warning, None);
+        let mut simple_widths = [0.0; 256];
+        simple_widths[0x41] = 0.25;
+        let font = Font {
+            data: Arc::new(FontData {
+                kind: FontKind::Type0,
+                name: FontName::default(),
+                flags: FontFlags::default(),
+                matrix: DEFAULT_MATRIX,
+                simple: SimpleEncoding::new(None),
+                simple_widths,
+                encoding: Some(encoding),
+                to_unicode: None,
+                cid_widths: alloc::vec![
+                    CidWidth {
+                        start: 7,
+                        end: 7,
+                        width: 0.5,
+                    },
+                    CidWidth {
+                        start: 8,
+                        end: 8,
+                        width: 0.75,
+                    },
+                ],
+                default_width: 1.0,
+                cache_bytes: 0,
+                warnings: Vec::new(),
+            }),
+        };
+        // Codes 0x41 and 0x81 map to distinct CIDs but collide in the
+        // direct-mapped cache. 0xff is outside both codespaces and maps to CID 0.
+        let bytes = [0x41, 0x81, 0x41, 0xff, 0x41];
+        let exact: Vec<_> = font.glyphs(&bytes).collect();
+        let cached: Vec<_> = font.glyphs_cached(&bytes).collect();
+        assert_eq!(cached, exact);
+        assert_eq!(cached[0].width, 0.5);
+        assert_eq!(cached[1].width, 0.75);
+        assert_eq!(cached[3].width, 1.0);
     }
 }
 

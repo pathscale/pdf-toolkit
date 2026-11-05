@@ -415,10 +415,7 @@ impl Interpreter<'_> {
             total,
             self.limits.max_total_decoded_bytes,
         ) {
-            if resource
-                && resolver.document().repair_mode()
-                && resource_decode_limit(&error)
-            {
+            if resource && resolver.document().repair_mode() && resource_decode_limit(&error) {
                 warn(resolver, object.id(), "resource_decode_skipped");
                 return Ok(None);
             }
