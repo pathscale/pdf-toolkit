@@ -759,7 +759,7 @@ impl Interpreter<'_> {
                 };
                 // A valid glyph consumes at least one byte. This also bounds a
                 // damaged font iterator independently of its implementation.
-                for glyph in font.glyphs(bytes).take(bytes.len()) {
+                for glyph in font.glyphs_cached(bytes).take(bytes.len()) {
                     self.glyph(resolver, glyph, info, vertical, matrix, id)?;
                 }
             } else {

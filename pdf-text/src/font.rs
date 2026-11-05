@@ -495,24 +495,47 @@ impl Font {
     }
 
     pub fn glyphs<'a>(&'a self, bytes: &'a [u8]) -> impl Iterator<Item = Glyph> + 'a {
+        self.glyphs_with_width_cache::<false>(bytes)
+    }
+
+    pub(crate) fn glyphs_cached<'a>(
+        &'a self,
+        bytes: &'a [u8],
+    ) -> impl Iterator<Item = Glyph> + 'a {
+        self.glyphs_with_width_cache::<true>(bytes)
+    }
+
+    fn glyphs_with_width_cache<'a, const CACHE: bool>(
+        &'a self,
+        bytes: &'a [u8],
+    ) -> impl Iterator<Item = Glyph> + 'a {
+        let data = self.data.as_ref();
+        let encoding = data.encoding.as_ref();
+        // Simple widths already have a direct table. CID widths use a bounded,
+        // allocation-free cache owned by this iterator, never by the font.
+        let mut width_cache = if CACHE && encoding.is_some() {
+            Some(([u64::MAX; 64], [0.0; 64]))
+        } else {
+            None
+        };
         let mut remaining = bytes;
         core::iter::from_fn(move || {
             let first = remaining.first().copied()?;
-            let (code, byte_len, valid) = match &self.data.encoding {
+            let (code, byte_len, valid) = match encoding {
                 Some(encoding) => encoding.next_code_checked(remaining),
                 None => (u32::from(first), 1, true),
             };
             remaining = remaining.get(usize::from(byte_len)..).unwrap_or(&[]);
             let text = if valid {
-                self.data
+                data
                     .to_unicode
                     .as_ref()
                     .and_then(|map| map.unicode(code))
                     .or_else(|| {
-                        if self.data.kind == FontKind::Type0 {
+                        if data.kind == FontKind::Type0 {
                             None
                         } else {
-                            self.data.simple.unicode(code)
+                            data.simple.unicode(code)
                         }
                     })
                     .filter(|text| !text.is_empty())
@@ -520,27 +543,44 @@ impl Font {
                 None
             };
 
-            let width = if let Some(encoding) = &self.data.encoding {
-                let cid = if valid { encoding.cid(code) } else { 0 };
-                self.data
-                    .cid_widths
-                    .binary_search_by(|range| {
-                        if range.end < cid {
-                            Ordering::Less
-                        } else if range.start > cid {
-                            Ordering::Greater
-                        } else {
-                            Ordering::Equal
-                        }
-                    })
-                    .ok()
-                    .and_then(|index| self.data.cid_widths.get(index))
-                    .map(|range| range.width)
-                    .unwrap_or(self.data.default_width)
+            let width = if let Some(encoding) = encoding {
+                let lookup = || {
+                    let cid = if valid { encoding.cid(code) } else { 0 };
+                    data.cid_widths
+                        .binary_search_by(|range| {
+                            if range.end < cid {
+                                Ordering::Less
+                            } else if range.start > cid {
+                                Ordering::Greater
+                            } else {
+                                Ordering::Equal
+                            }
+                        })
+                        .ok()
+                        .and_then(|index| data.cid_widths.get(index))
+                        .map(|range| range.width)
+                        .unwrap_or(data.default_width)
+                };
+                if let Some((keys, widths)) = width_cache.as_mut() {
+                    // Invalid codes always use CID zero. Give them a key
+                    // outside the valid u32 code range.
+                    let key = if valid { u64::from(code) } else { 1u64 << 32 };
+                    let slot = (key as usize) & 63;
+                    if keys[slot] == key {
+                        widths[slot]
+                    } else {
+                        let width = lookup();
+                        keys[slot] = key;
+                        widths[slot] = width;
+                        width
+                    }
+                } else {
+                    lookup()
+                }
             } else {
                 usize::try_from(code)
                     .ok()
-                    .and_then(|index| self.data.simple_widths.get(index))
+                    .and_then(|index| data.simple_widths.get(index))
                     .copied()
                     .unwrap_or(0.0)
             };
