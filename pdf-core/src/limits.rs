@@ -9,6 +9,7 @@ pub enum LimitKind {
     ObjectBytes,
     DecodedBytes,
     TotalDecodedBytes,
+    DecodeWorkBytes,
     Pages,
     PageTreeDepth,
     ObjStmMembers,
@@ -16,6 +17,8 @@ pub enum LimitKind {
     ImagePixels,
     ImageItems,
     KdfMemoryBytes,
+    SignatureFields,
+    SignatureWorkBytes,
     Jbig2Segments,
     Jbig2Symbols,
     CodecBytes,
@@ -34,6 +37,7 @@ impl LimitKind {
             Self::ObjectBytes => "object_bytes",
             Self::DecodedBytes => "decoded_bytes",
             Self::TotalDecodedBytes => "total_decoded_bytes",
+            Self::DecodeWorkBytes => "decode_work_bytes",
             Self::Pages => "pages",
             Self::PageTreeDepth => "page_tree_depth",
             Self::ObjStmMembers => "objstm_members",
@@ -41,6 +45,8 @@ impl LimitKind {
             Self::ImagePixels => "image_pixels",
             Self::ImageItems => "image_items",
             Self::KdfMemoryBytes => "kdf_memory_bytes",
+            Self::SignatureFields => "signature_fields",
+            Self::SignatureWorkBytes => "signature_work_bytes",
             Self::Jbig2Segments => "jbig2_segments",
             Self::Jbig2Symbols => "jbig2_symbols",
             Self::CodecBytes => "codec_bytes",
@@ -67,6 +73,7 @@ pub struct Limits {
     pub max_object_bytes: u64,
     pub max_decoded_bytes: u64,
     pub max_total_decoded_bytes: u64,
+    pub max_total_decode_work_bytes: u64,
     pub max_pages: u32,
     pub max_page_tree_depth: u32,
     pub max_objstm_members: u32,
@@ -75,6 +82,8 @@ pub struct Limits {
     pub max_image_items: u32,
     pub max_image_cache_bytes: u64,
     pub max_kdf_memory_bytes: u64,
+    pub max_signature_fields: u32,
+    pub max_signature_work_bytes: u64,
 }
 
 impl Default for Limits {
@@ -89,6 +98,7 @@ impl Default for Limits {
             max_object_bytes: 64 << 20,
             max_decoded_bytes: 256 << 20,
             max_total_decoded_bytes: 4 << 30,
+            max_total_decode_work_bytes: 4 << 30,
             max_pages: 1_000_000,
             max_page_tree_depth: 64,
             max_objstm_members: 1_000_000,
@@ -97,6 +107,8 @@ impl Default for Limits {
             max_image_items: 4096,
             max_image_cache_bytes: 64 << 20,
             max_kdf_memory_bytes: 64 << 20,
+            max_signature_fields: 4096,
+            max_signature_work_bytes: 4 << 30,
         }
     }
 }

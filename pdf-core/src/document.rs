@@ -329,6 +329,8 @@ impl Document {
             document: self,
             cache: Vec::new(),
             cache_bytes: 0,
+            decoded_bytes: 0,
+            decode_work_bytes: 0,
             objstm_decoded_bytes: 0,
             warnings: Vec::new(),
             nesting: 0,
@@ -350,6 +352,8 @@ pub struct Resolver<'d> {
     document: &'d Document,
     cache: Vec<CacheEntry>,
     cache_bytes: u64,
+    decoded_bytes: u64,
+    decode_work_bytes: u64,
     objstm_decoded_bytes: u64,
     warnings: Vec<Warning>,
     /// Nested `get` calls in flight: an indirect /Length or an object stream's
@@ -696,11 +700,101 @@ impl<'d> Resolver<'d> {
         }
     }
 
+    /// Decode a stream while charging cumulative output and byte-work limits to
+    /// this resolver. Reuse one resolver when decoding related streams under a
+    /// shared aggregate budget.
     pub fn decode_stream(&mut self, stream: &Object) -> Result<Decoded, DocError> {
-        let maximum = self.document.limits.max_decoded_bytes;
-        self.decode_stream_limited(stream, maximum)
+        if !self.document.decryptable() {
+            return Err(DocError::Encrypted);
+        }
+        let limits = self.document.limits;
+        let raw = stream.stream_raw().ok_or(DocError::WrongType {
+            id: stream.id(),
+            expected: "stream",
+        })?;
+        let input_bytes = u64::try_from(raw.len()).unwrap_or(u64::MAX).max(1);
+        self.charge_decode_work(input_bytes)?;
+
+        let total_remaining = limits
+            .max_total_decoded_bytes
+            .saturating_sub(self.decoded_bytes);
+        let work_remaining = limits
+            .max_total_decode_work_bytes
+            .saturating_sub(self.decode_work_bytes);
+        let maximum = limits
+            .max_decoded_bytes
+            .min(total_remaining)
+            .min(work_remaining);
+        let limiting_cap =
+            if total_remaining <= work_remaining && total_remaining <= limits.max_decoded_bytes {
+                Some((
+                    LimitKind::TotalDecodedBytes,
+                    self.decoded_bytes,
+                    limits.max_total_decoded_bytes,
+                ))
+            } else if work_remaining <= limits.max_decoded_bytes {
+                Some((
+                    LimitKind::DecodeWorkBytes,
+                    self.decode_work_bytes,
+                    limits.max_total_decode_work_bytes,
+                ))
+            } else {
+                None
+            };
+        let decoded = match self.decode_stream_limited(stream, maximum) {
+            Err(error) if limiting_cap.is_some() && is_stream_output_limit(&error) => {
+                let (limit, used, maximum) = limiting_cap.unwrap_or((
+                    LimitKind::TotalDecodedBytes,
+                    self.decoded_bytes,
+                    limits.max_total_decoded_bytes,
+                ));
+                let requested = used
+                    .checked_add(maximum.saturating_sub(used).saturating_add(1))
+                    .unwrap_or(u64::MAX);
+                return Err(DocError::Refused(Refusal {
+                    limit,
+                    requested,
+                    maximum,
+                }));
+            }
+            result => result?,
+        };
+        let output_bytes = u64::try_from(decoded.bytes.len()).unwrap_or(u64::MAX);
+        self.charge_total_decoded(output_bytes)?;
+        self.charge_decode_work(output_bytes)?;
+        Ok(decoded)
     }
 
+    fn charge_total_decoded(&mut self, bytes: u64) -> Result<(), DocError> {
+        let requested = self.decoded_bytes.checked_add(bytes).unwrap_or(u64::MAX);
+        check(
+            LimitKind::TotalDecodedBytes,
+            requested,
+            self.document.limits.max_total_decoded_bytes,
+        )?;
+        self.decoded_bytes = requested;
+        Ok(())
+    }
+
+    fn charge_decode_work(&mut self, bytes: u64) -> Result<(), DocError> {
+        let requested = self
+            .decode_work_bytes
+            .checked_add(bytes)
+            .unwrap_or(u64::MAX);
+        check(
+            LimitKind::DecodeWorkBytes,
+            requested,
+            self.document.limits.max_total_decode_work_bytes,
+        )?;
+        self.decode_work_bytes = requested;
+        Ok(())
+    }
+
+    /// Decode one stream with a caller-owned output ceiling.
+    ///
+    /// This explicit path does not consume the resolver's cumulative decode
+    /// work budget. Callers that decode multiple streams must carry and charge
+    /// their own cumulative budget, as the image and object-stream paths do.
     pub fn decode_stream_limited(
         &mut self,
         stream: &Object,
@@ -788,6 +882,16 @@ impl<'d> Resolver<'d> {
     pub fn warn(&mut self, warning: Warning) {
         self.warnings.push(warning);
     }
+}
+
+fn is_stream_output_limit(error: &DocError) -> bool {
+    matches!(
+        error,
+        DocError::Filter(crate::filter::FilterError::OutputLimit { .. })
+    ) || matches!(
+        error,
+        DocError::Refused(refusal) if refusal.limit == LimitKind::DecodedBytes
+    )
 }
 
 pub(crate) fn filter_steps<F>(stream: &Object, resolve: F) -> Result<Vec<FilterStep>, DocError>
