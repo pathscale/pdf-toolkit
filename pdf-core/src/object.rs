@@ -56,6 +56,7 @@ struct ObjectData {
     recovered: bool,
     syntax_recovered: bool,
     strings_plain: bool,
+    xref_stream: bool,
 }
 
 struct ParsedData {
@@ -142,6 +143,14 @@ impl Object {
     }
     pub fn is_stream(&self) -> bool {
         self.0.stream_start.is_some()
+    }
+    pub(crate) fn is_xref_stream(&self) -> bool {
+        self.0.xref_stream
+    }
+    pub(crate) fn mark_xref_stream(&mut self) {
+        let data = Arc::make_mut(&mut self.0);
+        data.xref_stream = true;
+        data.strings_plain = true;
     }
     pub fn stream_raw(&self) -> Option<&[u8]> {
         self.0
@@ -688,6 +697,7 @@ pub(crate) fn parse_value_with_scratch(
         recovered: false,
         syntax_recovered: cursor.recovered,
         strings_plain: true,
+        xref_stream: false,
     })))
 }
 
@@ -826,15 +836,8 @@ fn parse_indirect_pending_with_mode(
         recovered: repaired_tail.is_some(),
         syntax_recovered: cursor.recovered,
         strings_plain: false,
+        xref_stream: false,
     }));
-    if object
-        .dict()
-        .and_then(|dict| dict.get(b"Type"))
-        .and_then(|value| value.as_name())
-        .is_some_and(|name| name.eq_bytes(b"XRef"))
-    {
-        Arc::make_mut(&mut object.0).strings_plain = true;
-    }
     if object.is_stream() {
         let length = object.dict().and_then(|dict| dict.get(b"Length"));
         let indirect = length.and_then(|value| value.as_ref()).is_some();

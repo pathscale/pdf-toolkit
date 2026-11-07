@@ -106,7 +106,39 @@ fn twice(directory: &Path) -> CheckResult<()> {
     require(
         reports[0].later_revisions == 1 && !reports[1].modified_after(),
         "revision accounting",
+    )?;
+    require(
+        !reports[0].strict_intact(),
+        "prior signature is not strict-intact",
+    )?;
+    require(
+        reports[1].strict_intact(),
+        "latest signature is strict-intact",
     )
+}
+
+fn signature_limits(directory: &Path) -> CheckResult<()> {
+    let bytes = read_bounded(&directory.join("author-signed.pdf"))?;
+    let mut limits = sign_fixtures::limits();
+    limits.max_signature_fields = 0;
+    match sign::verify(Arc::from(bytes.as_ref()), limits) {
+        Err(pdf_core::DocError::Refused(refusal))
+            if refusal.limit == pdf_core::LimitKind::SignatureFields => {}
+        Err(error) => return Err(format!("unexpected field-limit result: {error:?}")),
+        Ok(_) => return Err("signature field limit silently omitted a field".to_owned()),
+    }
+
+    let mut limits = sign_fixtures::limits();
+    limits.max_signature_work_bytes = 0;
+    match sign::verify(bytes, limits) {
+        Err(pdf_core::DocError::Refused(refusal))
+            if refusal.limit == pdf_core::LimitKind::SignatureWorkBytes =>
+        {
+            Ok(())
+        }
+        Err(error) => Err(format!("unexpected work-limit result: {error:?}")),
+        Ok(_) => Err("signature work limit was not enforced".to_owned()),
+    }
 }
 
 fn tampered(directory: &Path) -> CheckResult<()> {
@@ -236,6 +268,14 @@ fn sign_fixture(bytes: Arc<[u8]>) -> CheckResult<()> {
         "new signatures intact",
     )?;
     require(
+        !ours[0].strict_intact(),
+        "earlier new signature is not strict-intact",
+    )?;
+    require(
+        ours[1].strict_intact(),
+        "latest new signature is strict-intact",
+    )?;
+    require(
         reports.iter().all(SignatureReport::intact),
         "earlier signatures intact",
     )
@@ -265,6 +305,11 @@ pub(super) fn run(report: &mut Report, config: &Config) {
     };
     report.obtain("sign", "fixtures-reproduce", reproducible(&directory));
     report.obtain("sign", "double-signature", twice(&directory));
+    report.obtain(
+        "sign",
+        "signature-work-limits",
+        signature_limits(&directory),
+    );
     report.obtain("sign", "tamper-digest-mismatch", tampered(&directory));
     report.obtain("sign", "corrupt-signature-invalid", corrupted(&directory));
     report.obtain("sign", "rsa-unsupported", rsa_oid(&directory));

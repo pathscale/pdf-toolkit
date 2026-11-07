@@ -1,7 +1,7 @@
 //! Offline signature checks: byte range digest, ECDSA validity, signer
 //! subject and what was appended after each signed revision.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use cms::cert::CertificateChoices;
@@ -10,7 +10,7 @@ use cms::signed_data::{SignedData, SignerIdentifier, SignerInfo};
 use der::asn1::OctetString;
 use der::oid::ObjectIdentifier;
 use der::{Decode, Encode};
-use pdf_core::{DocError, Document, Limits, ObjectRef, PdfSource, Value};
+use pdf_core::{DocError, Document, LimitKind, Limits, ObjectRef, PdfSource, Refusal, Value};
 use x509_cert::Certificate;
 use x509_cert::time::Time;
 
@@ -20,8 +20,6 @@ use super::cms::{
     verify_prehash,
 };
 use super::{Curve, unsupported};
-
-const MAX_FIELDS: usize = 4096;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DigestCheck {
@@ -73,7 +71,8 @@ pub struct SignatureReport {
     pub algorithm: String,
     pub digest: DigestCheck,
     pub signature: SignatureCheck,
-    /// Signer certificate subject, RFC 4514 style.
+    /// Untrusted signer certificate subject, RFC 4514 style. Certificate chains
+    /// are not validated.
     pub signer: Option<String>,
     /// CMS `signingTime` when present, otherwise the `/M` entry.
     pub signing_time: Option<String>,
@@ -93,8 +92,13 @@ impl SignatureReport {
         self.digest == DigestCheck::Match && self.signature == SignatureCheck::Valid
     }
 
+    /// Digest and signature check out, cover a whole revision, and have no later changes.
+    pub fn strict_intact(&self) -> bool {
+        self.intact() && self.covers_revision && !self.modified_after()
+    }
+
     pub fn modified_after(&self) -> bool {
-        self.bytes_after > 0
+        self.bytes_after > 0 || self.later_revisions > 0
     }
 }
 
@@ -123,7 +127,10 @@ fn resolve_dict(
 }
 
 /// Every signature field with a value, in field tree order.
-fn signature_fields(document: &Document) -> Result<Vec<(String, Value)>, DocError> {
+fn signature_fields(
+    document: &Document,
+    maximum_fields: u32,
+) -> Result<Vec<(String, Option<ObjectRef>, Value)>, DocError> {
     let mut resolver = document.resolver();
     let root = document.root_ref().ok_or(DocError::Malformed {
         offset: 0,
@@ -141,17 +148,26 @@ fn signature_fields(document: &Document) -> Result<Vec<(String, Value)>, DocErro
     };
     let fields = resolver.resolve(fields)?;
     let mut stack: Vec<(ObjectRef, String, bool)> = Vec::new();
+    let maximum = u64::from(maximum_fields);
+    let mut scheduled = 0u64;
     if let Some(array) = fields.get().as_array() {
         for index in (0..array.len()).rev() {
             if let Some(id) = array.get(index).and_then(|item| item.as_ref()) {
-                stack.push((id, String::new(), false));
+                enqueue_field(
+                    &mut stack,
+                    &mut scheduled,
+                    id,
+                    String::new(),
+                    false,
+                    maximum,
+                )?;
             }
         }
     }
     let mut seen = BTreeSet::new();
     let mut out = Vec::new();
     while let Some((id, prefix, inherited_sig)) = stack.pop() {
-        if !seen.insert((id.number(), id.generation())) || seen.len() > MAX_FIELDS {
+        if !seen.insert((id.number(), id.generation())) {
             continue;
         }
         let object = resolver.get(id)?;
@@ -174,7 +190,14 @@ fn signature_fields(document: &Document) -> Result<Vec<(String, Value)>, DocErro
             if let Some(array) = kids.get().as_array() {
                 for index in (0..array.len()).rev() {
                     if let Some(kid) = array.get(index).and_then(|item| item.as_ref()) {
-                        stack.push((kid, name.clone(), is_sig));
+                        enqueue_field(
+                            &mut stack,
+                            &mut scheduled,
+                            kid,
+                            name.clone(),
+                            is_sig,
+                            maximum,
+                        )?;
                     }
                 }
             }
@@ -182,11 +205,47 @@ fn signature_fields(document: &Document) -> Result<Vec<(String, Value)>, DocErro
         if !is_sig {
             continue;
         }
+        let signature_id = dict.get(b"V").and_then(|value| value.as_ref());
         if let Some(signature) = resolve_dict(&mut resolver, dict.get(b"V"))? {
-            out.push((name, signature));
+            out.push((name, signature_id, signature));
         }
     }
     Ok(out)
+}
+
+fn enqueue_field(
+    stack: &mut Vec<(ObjectRef, String, bool)>,
+    scheduled: &mut u64,
+    id: ObjectRef,
+    prefix: String,
+    inherited_sig: bool,
+    maximum: u64,
+) -> Result<(), DocError> {
+    let requested = scheduled.checked_add(1).unwrap_or(u64::MAX);
+    if requested > maximum {
+        return Err(DocError::Refused(Refusal {
+            limit: LimitKind::SignatureFields,
+            requested,
+            maximum,
+        }));
+    }
+    *scheduled = requested;
+    stack.push((id, prefix, inherited_sig));
+    Ok(())
+}
+
+fn charge_signature_work(used: &mut u64, bytes: usize, maximum: u64) -> Result<(), DocError> {
+    let bytes = u64::try_from(bytes).unwrap_or(u64::MAX);
+    let requested = used.checked_add(bytes).unwrap_or(u64::MAX);
+    if requested > maximum {
+        return Err(DocError::Refused(Refusal {
+            limit: LimitKind::SignatureWorkBytes,
+            requested,
+            maximum,
+        }));
+    }
+    *used = requested;
+    Ok(())
 }
 
 fn byte_range(dict: pdf_core::DictRef<'_>) -> Option<[u64; 4]> {
@@ -471,8 +530,19 @@ pub fn verify(bytes: Arc<[u8]>, limits: Limits) -> Result<Vec<SignatureReport>, 
         return Err(unsupported("verify:encrypted document"));
     }
     let total_sections = document.xref().sections();
-    let mut reports = Vec::new();
-    for (field, signature) in signature_fields(&document)? {
+    let mut reports: Vec<SignatureReport> = Vec::new();
+    let mut verified: BTreeMap<(u32, u16), SignatureReport> = BTreeMap::new();
+    let mut verification_work_bytes = 0u64;
+    for (field, signature_id, signature) in
+        signature_fields(&document, limits.max_signature_fields)?
+    {
+        let cache_key = signature_id.map(|id| (id.number(), id.generation()));
+        if let Some(cached) = cache_key.and_then(|key| verified.get(&key)) {
+            let mut report = cached.clone();
+            report.field = field;
+            reports.push(report);
+            continue;
+        }
         let Some(dict) = signature.get().as_dict() else {
             continue;
         };
@@ -495,33 +565,65 @@ pub fn verify(bytes: Arc<[u8]>, limits: Limits) -> Result<Vec<SignatureReport>, 
             });
         let range = byte_range(dict);
         let parts = range.and_then(|range| ranges(&bytes, range));
+        let range = range.unwrap_or_default();
+        let end = range[2].checked_add(range[3]);
+        let signed_end = end
+            .and_then(|end| usize::try_from(end).ok())
+            .filter(|end| *end <= bytes.len());
+        let contents_span = dict
+            .get(b"Contents")
+            .filter(|value| value.as_str().is_some())
+            .map(|value| value.span());
+        let gap_is_contents = contents_span.is_some_and(|span| {
+            span.start <= span.end
+                && span.end <= bytes.len()
+                && usize::try_from(range[1]).ok() == Some(span.start)
+                && usize::try_from(range[2]).ok() == Some(span.end)
+                && bytes.get(span).is_some_and(|contents| {
+                    contents.first() == Some(&b'<') && contents.last() == Some(&b'>')
+                })
+        });
+        let prefix = signed_end.and_then(|end| bytes.get(..end));
+        let preliminary_coverage =
+            parts.is_some() && range[0] == 0 && gap_is_contents && prefix.is_some_and(ends_at_eof);
+        let ranged_bytes = match parts {
+            Some([first, second]) => first.len().checked_add(second.len()).unwrap_or(usize::MAX),
+            None => 0,
+        };
+        let work_bytes = ranged_bytes
+            .checked_add(contents.len())
+            .and_then(|bytes| {
+                bytes.checked_add(if preliminary_coverage {
+                    prefix.map(|prefix| prefix.len()).unwrap_or(0)
+                } else {
+                    0
+                })
+            })
+            .unwrap_or(usize::MAX);
+        charge_signature_work(
+            &mut verification_work_bytes,
+            work_bytes,
+            limits.max_signature_work_bytes,
+        )?;
         let mut check = check_cms(&contents, parts);
         if parts.is_none() {
             check.digest = DigestCheck::Malformed;
         }
-        let range = range.unwrap_or_default();
-        let end = range[2].saturating_add(range[3]);
-        let signed_end = usize::try_from(end).ok().filter(|end| *end <= bytes.len());
-        let gap_is_contents = usize::try_from(range[1])
-            .ok()
-            .and_then(|at| bytes.get(at))
-            .is_some_and(|byte| *byte == b'<')
-            && usize::try_from(range[2])
-                .ok()
-                .and_then(|at| at.checked_sub(1))
-                .and_then(|at| bytes.get(at))
-                .is_some_and(|byte| *byte == b'>');
-        let prefix = signed_end.and_then(|end| bytes.get(..end));
-        let covers_revision = range[0] == 0 && gap_is_contents && prefix.is_some_and(ends_at_eof);
-        let later_revisions = match prefix {
-            Some(prefix) if covers_revision => PdfSource::new(Arc::<[u8]>::from(prefix))
-                .ok()
-                .and_then(|source| Document::open(source, limits).ok())
-                .map(|signed| total_sections.saturating_sub(signed.xref().sections()))
-                .unwrap_or(0),
-            _ => 0,
+        let (covers_revision, later_revisions) = if preliminary_coverage {
+            let signed = prefix
+                .and_then(|prefix| PdfSource::new(Arc::<[u8]>::from(prefix)).ok())
+                .and_then(|source| Document::open(source, limits).ok());
+            match signed {
+                Some(signed) => (
+                    true,
+                    total_sections.saturating_sub(signed.xref().sections()),
+                ),
+                None => (false, 0),
+            }
+        } else {
+            (false, 0)
         };
-        reports.push(SignatureReport {
+        let report = SignatureReport {
             field,
             sub_filter,
             algorithm: check.algorithm,
@@ -531,9 +633,15 @@ pub fn verify(bytes: Arc<[u8]>, limits: Limits) -> Result<Vec<SignatureReport>, 
             signing_time: check.signing_time.or(modified),
             byte_range: range,
             covers_revision,
-            bytes_after: (bytes.len() as u64).saturating_sub(end),
+            bytes_after: end
+                .map(|end| (bytes.len() as u64).saturating_sub(end))
+                .unwrap_or(0),
             later_revisions,
-        });
+        };
+        if let Some(key) = cache_key {
+            verified.insert(key, report.clone());
+        }
+        reports.push(report);
     }
     Ok(reports)
 }
