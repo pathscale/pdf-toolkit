@@ -248,7 +248,7 @@ pub fn page_text_cached(
                 continue;
             }
         };
-        let Some(bytes) = interpreter.decode(resolver, &stream)? else {
+        let Some(bytes) = interpreter.decode(resolver, &stream, false)? else {
             continue;
         };
         push(
@@ -392,20 +392,36 @@ impl Interpreter<'_> {
         &mut self,
         resolver: &mut Resolver<'_>,
         object: &Object,
+        resource: bool,
     ) -> Result<Option<Vec<u8>>, DocError> {
         let decoded = match resolver.decode_stream(object) {
             Ok(decoded) => decoded,
+            Err(error)
+                if resource
+                    && resolver.document().repair_mode()
+                    && resource_decode_limit(&error) =>
+            {
+                warn(resolver, object.id(), "resource_decode_skipped");
+                return Ok(None);
+            }
             Err(error) => {
                 recover(resolver, error, object.id(), "content_stream_failed")?;
                 return Ok(None);
             }
         };
-        self.decoded = self.decoded.saturating_add(decoded.bytes.len() as u64);
-        check(
+        let total = self.decoded.saturating_add(decoded.bytes.len() as u64);
+        if let Err(error) = check(
             LimitKind::TotalDecodedBytes,
-            self.decoded,
+            total,
             self.limits.max_total_decoded_bytes,
-        )?;
+        ) {
+            if resource && resolver.document().repair_mode() && resource_decode_limit(&error) {
+                warn(resolver, object.id(), "resource_decode_skipped");
+                return Ok(None);
+            }
+            return Err(error);
+        }
+        self.decoded = total;
         if decoded.image.is_some() {
             warn(resolver, object.id(), "content_stream_failed");
             return Ok(None);
@@ -448,7 +464,7 @@ impl Interpreter<'_> {
                 inherited.cloned()
             }
         };
-        let Some(bytes) = self.decode(resolver, &object)? else {
+        let Some(bytes) = self.decode(resolver, &object, true)? else {
             return Ok(None);
         };
         let id = object.id().ok_or(DocError::WrongType {
@@ -740,7 +756,7 @@ impl Interpreter<'_> {
                 };
                 // A valid glyph consumes at least one byte. This also bounds a
                 // damaged font iterator independently of its implementation.
-                for glyph in font.glyphs(bytes).take(bytes.len()) {
+                for glyph in font.glyphs_cached(bytes).take(bytes.len()) {
                     self.glyph(resolver, glyph, info, vertical, matrix, id)?;
                 }
             } else {
@@ -1438,6 +1454,16 @@ fn push<T>(values: &mut Vec<T>, value: T, limits: Limits) -> Result<(), DocError
     Ok(())
 }
 
+fn resource_decode_limit(error: &DocError) -> bool {
+    matches!(
+        error,
+        DocError::Refused(refusal) if refusal.limit == LimitKind::DecodedBytes
+    ) || matches!(
+        error,
+        DocError::Filter(pdf_core::filter::FilterError::OutputLimit { .. })
+    )
+}
+
 fn recover(
     resolver: &mut Resolver<'_>,
     error: DocError,
@@ -1445,7 +1471,7 @@ fn recover(
     what: &'static str,
 ) -> Result<(), DocError> {
     match error {
-        error @ (DocError::Encrypted | DocError::Refused(_)) => Err(error),
+        error @ (DocError::Encrypted | DocError::Refused(_) | DocError::Source(_)) => Err(error),
         _ => {
             warn(resolver, object, what);
             Ok(())

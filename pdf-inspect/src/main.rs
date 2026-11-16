@@ -126,12 +126,19 @@ unsafe impl GlobalAlloc for CountingAllocator {
 }
 
 fn record_allocation(size: usize) {
-    let current = CURRENT_BYTES
-        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
-            Some(value.saturating_add(size))
-        })
-        .map(|previous| previous.saturating_add(size))
-        .unwrap_or(usize::MAX);
+    let mut previous = CURRENT_BYTES.load(Ordering::Relaxed);
+    let current = loop {
+        let next = previous.saturating_add(size);
+        match CURRENT_BYTES.compare_exchange_weak(
+            previous,
+            next,
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+        ) {
+            Ok(_) => break next,
+            Err(observed) => previous = observed,
+        }
+    };
 
     let mut peak = PEAK_BYTES.load(Ordering::Relaxed);
     while current > peak {
@@ -144,9 +151,18 @@ fn record_allocation(size: usize) {
 }
 
 fn record_free(size: usize) {
-    let _ = CURRENT_BYTES.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
-        Some(value.saturating_sub(size))
-    });
+    let mut previous = CURRENT_BYTES.load(Ordering::Relaxed);
+    while CURRENT_BYTES
+        .compare_exchange_weak(
+            previous,
+            previous.saturating_sub(size),
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+        )
+        .is_err()
+    {
+        previous = CURRENT_BYTES.load(Ordering::Relaxed);
+    }
 }
 
 fn reset_peak_bytes() {
@@ -1119,12 +1135,15 @@ fn run_repair(path: &Path, limits: Limits) -> u8 {
         Ok(walk) => walk.collect(),
         Err(_) => Vec::new(),
     };
+    // One resolver for every page keeps the cumulative decode budgets
+    // document-wide; a page error is counted without discarding it.
     for item in walked {
         match item {
             Ok(page) => {
                 pages += 1;
-                if let Ok(text) = pdf_text::interp::page_text(&mut resolver, &page) {
-                    glyphs += text.glyphs.len();
+                match pdf_text::interp::page_text(&mut resolver, &page) {
+                    Ok(text) => glyphs += text.glyphs.len(),
+                    Err(_) => page_errors += 1,
                 }
             }
             Err(_) => page_errors += 1,
@@ -3066,14 +3085,6 @@ fn actual_fixture_values(
         actuals.insert(
             format!("{prefix}.contents"),
             page.contents.len().to_string(),
-        );
-        let annotation_count = match resolver.get(page.id) {
-            Ok(object) => pdf_text::annots::page_annotations(&mut resolver, &object).len(),
-            Err(_) => 0,
-        };
-        actuals.insert(
-            format!("{prefix}.annotations"),
-            annotation_count.to_string(),
         );
         actuals.insert(
             format!("{prefix}.resource_keys"),

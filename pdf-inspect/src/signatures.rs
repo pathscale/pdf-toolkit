@@ -1,7 +1,7 @@
 //! Signature reports from `pdf_edit::sign::verify`: the `signatures`
 //! subcommand and the `signature.*` check keys.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::sync::Arc;
 
@@ -98,12 +98,25 @@ pub(crate) fn run(path: &Path, limits: Limits) -> u8 {
         }
     };
     println!("signatures={}", reports.len());
-    let mut intact = true;
+    // Every signature must check out over a whole revision, and every
+    // revision from the earliest signed one to the final one must itself be
+    // signed: an unsigned later update fails, even between two signatures.
+    let mut accepted = !reports.is_empty();
+    let mut final_revision_signed = false;
+    let mut signed_revisions = BTreeSet::new();
     for (index, report) in reports.iter().enumerate() {
-        intact &= report.intact();
+        accepted &= report.intact() && report.covers_revision;
+        final_revision_signed |= report.strict_intact();
+        signed_revisions.insert(report.later_revisions);
         for (key, value) in values(index, report) {
             println!("{key}={value}");
         }
     }
-    if intact { 0 } else { 1 }
+    // `later_revisions` is each signed revision's distance from the end, so
+    // the signed revisions are unbroken up to the end exactly when the set
+    // holds every distance from 0 to its largest.
+    let unbroken = signed_revisions
+        .last()
+        .is_some_and(|&earliest| signed_revisions.len() as u64 == u64::from(earliest) + 1);
+    if accepted && final_revision_signed && unbroken { 0 } else { 1 }
 }

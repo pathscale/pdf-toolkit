@@ -38,6 +38,18 @@ pub(crate) struct Crypt {
     filters: Vec<(Vec<u8>, Method)>,
 }
 
+#[derive(Debug)]
+pub(crate) enum StreamDecodeError {
+    Ceiling(DocError),
+    Other(DocError),
+}
+
+impl From<DocError> for StreamDecodeError {
+    fn from(error: DocError) -> Self {
+        Self::Other(error)
+    }
+}
+
 impl Crypt {
     pub(crate) fn open(
         resolver: &mut Resolver<'_>,
@@ -349,15 +361,88 @@ fn equal(left: &[u8], right: &[u8]) -> bool {
             == 0
 }
 
-pub(crate) fn decode_stream(
+pub(crate) fn prepare_crypt_names(
+    resolver: &mut Resolver<'_>,
+    stream: &Object,
+    steps: &[FilterStep],
+) -> Result<Vec<Option<Vec<u8>>>, DocError> {
+    // Image codecs terminate filter decoding, so later Crypt parameters are
+    // unreachable and must not trigger dependency resolution. Keep the complete
+    // step list for decoding and explicit-Crypt policy checks.
+    let reachable_len = steps
+        .iter()
+        .position(|step| step.kind.is_image_codec())
+        .unwrap_or(steps.len());
+    let reachable = &steps[..reachable_len];
+    if !reachable.iter().any(|step| step.kind == FilterKind::Crypt) {
+        return Ok(alloc::vec![None; steps.len()]);
+    }
+    let Some(value) = stream
+        .dict()
+        .ok_or_else(bad_dictionary)?
+        .get(b"DecodeParms")
+    else {
+        return Ok(alloc::vec![None; steps.len()]);
+    };
+    let params = resolver.resolve(value)?;
+    let mut names = Vec::new();
+    names.try_reserve_exact(steps.len()).map_err(|_| {
+        DocError::Refused(Refusal {
+            limit: LimitKind::Objects,
+            requested: steps.len() as u64,
+            maximum: steps.len() as u64,
+        })
+    })?;
+    for (index, step) in reachable.iter().enumerate() {
+        if step.kind != FilterKind::Crypt {
+            names.push(None);
+            continue;
+        }
+        let param = if let Some(array) = params.get().as_array() {
+            array
+                .get(index)
+                .map(|value| resolver.resolve(value))
+                .transpose()?
+        } else if index == 0 {
+            Some(params.clone())
+        } else {
+            None
+        };
+        let name = match param.as_ref() {
+            Some(value) if !value.get().is_null() => {
+                let dict = value.get().as_dict().ok_or_else(bad_dictionary)?;
+                name(resolver, dict, b"Name")?
+            }
+            _ => None,
+        };
+        names.push(name);
+    }
+    names.resize(steps.len(), None);
+    Ok(names)
+}
+
+pub(crate) fn decode_stream_prepared(
     resolver: &mut Resolver<'_>,
     stream: &Object,
     raw: &[u8],
     steps: &[FilterStep],
-) -> Result<Decoded, DocError> {
-    let maximum = resolver.document().limits().max_decoded_bytes;
+    maximum: u64,
+    names: &[Option<Vec<u8>>],
+) -> Result<Decoded, StreamDecodeError> {
+    decode_stream_inner(resolver, stream, raw, steps, maximum, Some(names))
+}
+
+fn decode_stream_inner(
+    resolver: &mut Resolver<'_>,
+    stream: &Object,
+    raw: &[u8],
+    steps: &[FilterStep],
+    maximum: u64,
+    prepared_names: Option<&[Option<Vec<u8>>]>,
+) -> Result<Decoded, StreamDecodeError> {
+    let maximum = maximum.min(resolver.document().limits().max_decoded_bytes);
     let crypt = resolver.document().crypt();
-    let exempt = is_type(stream, b"XRef")
+    let exempt = stream.is_xref_stream()
         || crypt.as_ref().is_some_and(|crypt| {
             crypt.excluded(stream.id()) || (!crypt.metadata && is_type(stream, b"Metadata"))
         });
@@ -379,7 +464,7 @@ pub(crate) fn decode_stream(
             }
         }
     }
-    let params = if explicit {
+    let params = if explicit && prepared_names.is_none() {
         let dict = stream.dict().ok_or_else(bad_dictionary)?;
         resolver.resolve_dict_key(dict, b"DecodeParms")?
     } else {
@@ -387,6 +472,9 @@ pub(crate) fn decode_stream(
     };
     for (index, step) in steps.iter().enumerate() {
         if step.kind == FilterKind::Crypt {
+            let filter_name = if let Some(names) = prepared_names {
+                names.get(index).cloned().flatten()
+            } else {
             let param = if let Some(value) = &params {
                 if let Some(array) = value.get().as_array() {
                     match array.get(index) {
@@ -401,12 +489,13 @@ pub(crate) fn decode_stream(
             } else {
                 None
             };
-            let filter_name = match param.as_ref() {
+            match param.as_ref() {
                 Some(value) if !value.get().is_null() => {
                     let dict = value.get().as_dict().ok_or_else(bad_dictionary)?;
                     name(resolver, dict, b"Name")?
                 }
                 _ => None,
+            }
             };
             let method = match filter_name.as_deref() {
                 None | Some(b"Identity") => Method::Identity,
@@ -424,8 +513,13 @@ pub(crate) fn decode_stream(
                 )?);
             }
         } else {
-            let decoded =
-                crate::filter::decode(data.as_ref(), core::slice::from_ref(step), maximum)?;
+            let decoded = crate::filter::decode(data.as_ref(), core::slice::from_ref(step), maximum)
+                .map_err(|error| match error {
+                    crate::filter::FilterError::OutputLimit { .. } => {
+                        StreamDecodeError::Ceiling(DocError::Filter(error))
+                    }
+                    error => StreamDecodeError::Other(DocError::Filter(error)),
+                })?;
             truncated |= decoded.truncated;
             image = decoded.image;
             data = Cow::Owned(decoded.bytes);
@@ -434,7 +528,8 @@ pub(crate) fn decode_stream(
             }
         }
     }
-    check(LimitKind::DecodedBytes, data.len() as u64, maximum)?;
+    check(LimitKind::DecodedBytes, data.len() as u64, maximum)
+        .map_err(StreamDecodeError::Ceiling)?;
     let bytes = match data {
         Cow::Owned(bytes) => bytes,
         Cow::Borrowed(bytes) => copy(bytes, maximum)?,
@@ -453,11 +548,13 @@ fn decrypt_stream(
     method: Method,
     raw: &[u8],
     maximum: u64,
-) -> Result<Vec<u8>, DocError> {
+) -> Result<Vec<u8>, StreamDecodeError> {
     let id = stream.id().ok_or(DocError::WrongType {
         id: None,
         expected: "indirect encrypted stream",
     })?;
+    check(LimitKind::DecodedBytes, raw.len() as u64, maximum)
+        .map_err(StreamDecodeError::Ceiling)?;
     let (bytes, padding) = crypt.decrypt(id, method, raw, maximum)?;
     if padding {
         resolver.warn(Warning {

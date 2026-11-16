@@ -1,7 +1,7 @@
 //! Offline signature checks: byte range digest, ECDSA validity, signer
 //! subject and what was appended after each signed revision.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use cms::cert::CertificateChoices;
@@ -10,7 +10,10 @@ use cms::signed_data::{SignedData, SignerIdentifier, SignerInfo};
 use der::asn1::OctetString;
 use der::oid::ObjectIdentifier;
 use der::{Decode, Encode};
-use pdf_core::{DocError, Document, Limits, ObjectRef, PdfSource, Value};
+use pdf_core::{
+    DocError, Document, LimitKind, Limits, ObjectRef, PdfSource, Refusal, Value, XrefEntry,
+    XrefKind,
+};
 use x509_cert::Certificate;
 use x509_cert::time::Time;
 
@@ -20,8 +23,6 @@ use super::cms::{
     verify_prehash,
 };
 use super::{Curve, unsupported};
-
-const MAX_FIELDS: usize = 4096;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DigestCheck {
@@ -73,7 +74,8 @@ pub struct SignatureReport {
     pub algorithm: String,
     pub digest: DigestCheck,
     pub signature: SignatureCheck,
-    /// Signer certificate subject, RFC 4514 style.
+    /// Untrusted signer certificate subject, RFC 4514 style. Certificate chains
+    /// are not validated.
     pub signer: Option<String>,
     /// CMS `signingTime` when present, otherwise the `/M` entry.
     pub signing_time: Option<String>,
@@ -93,8 +95,15 @@ impl SignatureReport {
         self.digest == DigestCheck::Match && self.signature == SignatureCheck::Valid
     }
 
+    /// Digest and signature check out, cover a whole revision, and have no later changes.
+    pub fn strict_intact(&self) -> bool {
+        self.intact() && self.covers_revision && !self.modified_after()
+    }
+
+    /// True when bytes follow the signed range or any later revision exists,
+    /// including a legitimate countersignature.
     pub fn modified_after(&self) -> bool {
-        self.bytes_after > 0
+        self.bytes_after > 0 || self.later_revisions > 0
     }
 }
 
@@ -123,7 +132,10 @@ fn resolve_dict(
 }
 
 /// Every signature field with a value, in field tree order.
-fn signature_fields(document: &Document) -> Result<Vec<(String, Value)>, DocError> {
+fn signature_fields(
+    document: &Document,
+    maximum_fields: u32,
+) -> Result<Vec<(String, ObjectRef, Option<ObjectRef>, Value)>, DocError> {
     let mut resolver = document.resolver();
     let root = document.root_ref().ok_or(DocError::Malformed {
         offset: 0,
@@ -141,17 +153,26 @@ fn signature_fields(document: &Document) -> Result<Vec<(String, Value)>, DocErro
     };
     let fields = resolver.resolve(fields)?;
     let mut stack: Vec<(ObjectRef, String, bool)> = Vec::new();
+    let maximum = u64::from(maximum_fields);
+    let mut scheduled = 0u64;
     if let Some(array) = fields.get().as_array() {
         for index in (0..array.len()).rev() {
             if let Some(id) = array.get(index).and_then(|item| item.as_ref()) {
-                stack.push((id, String::new(), false));
+                enqueue_field(
+                    &mut stack,
+                    &mut scheduled,
+                    id,
+                    String::new(),
+                    false,
+                    maximum,
+                )?;
             }
         }
     }
     let mut seen = BTreeSet::new();
     let mut out = Vec::new();
     while let Some((id, prefix, inherited_sig)) = stack.pop() {
-        if !seen.insert((id.number(), id.generation())) || seen.len() > MAX_FIELDS {
+        if !seen.insert((id.number(), id.generation())) {
             continue;
         }
         let object = resolver.get(id)?;
@@ -174,7 +195,14 @@ fn signature_fields(document: &Document) -> Result<Vec<(String, Value)>, DocErro
             if let Some(array) = kids.get().as_array() {
                 for index in (0..array.len()).rev() {
                     if let Some(kid) = array.get(index).and_then(|item| item.as_ref()) {
-                        stack.push((kid, name.clone(), is_sig));
+                        enqueue_field(
+                            &mut stack,
+                            &mut scheduled,
+                            kid,
+                            name.clone(),
+                            is_sig,
+                            maximum,
+                        )?;
                     }
                 }
             }
@@ -182,11 +210,47 @@ fn signature_fields(document: &Document) -> Result<Vec<(String, Value)>, DocErro
         if !is_sig {
             continue;
         }
+        let signature_id = dict.get(b"V").and_then(|value| value.as_ref());
         if let Some(signature) = resolve_dict(&mut resolver, dict.get(b"V"))? {
-            out.push((name, signature));
+            out.push((name, id, signature_id, signature));
         }
     }
     Ok(out)
+}
+
+fn enqueue_field(
+    stack: &mut Vec<(ObjectRef, String, bool)>,
+    scheduled: &mut u64,
+    id: ObjectRef,
+    prefix: String,
+    inherited_sig: bool,
+    maximum: u64,
+) -> Result<(), DocError> {
+    let requested = scheduled.checked_add(1).unwrap_or(u64::MAX);
+    if requested > maximum {
+        return Err(DocError::Refused(Refusal {
+            limit: LimitKind::SignatureFields,
+            requested,
+            maximum,
+        }));
+    }
+    *scheduled = requested;
+    stack.push((id, prefix, inherited_sig));
+    Ok(())
+}
+
+fn charge_signature_work(used: &mut u64, bytes: usize, maximum: u64) -> Result<(), DocError> {
+    let bytes = u64::try_from(bytes).unwrap_or(u64::MAX);
+    let requested = used.checked_add(bytes).unwrap_or(u64::MAX);
+    if requested > maximum {
+        return Err(DocError::Refused(Refusal {
+            limit: LimitKind::SignatureWorkBytes,
+            requested,
+            maximum,
+        }));
+    }
+    *used = requested;
+    Ok(())
 }
 
 fn byte_range(dict: pdf_core::DictRef<'_>) -> Option<[u64; 4]> {
@@ -458,9 +522,181 @@ fn ends_at_eof(bytes: &[u8]) -> bool {
     while end > 0 && matches!(bytes.get(end - 1), Some(b'\r' | b'\n')) {
         end -= 1;
     }
-    bytes
-        .get(..end)
-        .is_some_and(|prefix| prefix.ends_with(b"%%EOF"))
+    bytes.get(..end).is_some_and(|prefix| {
+        prefix.ends_with(b"%%EOF")
+            && (prefix.len() == 5 || matches!(prefix.get(prefix.len() - 6), Some(b'\r' | b'\n')))
+    })
+}
+
+fn pdf_ws(byte: u8) -> bool {
+    matches!(byte, 0 | 9 | 10 | 12 | 13 | 32)
+}
+
+fn skip_trivia(bytes: &[u8], mut pos: usize) -> Option<usize> {
+    loop {
+        while bytes.get(pos).is_some_and(|byte| pdf_ws(*byte)) {
+            pos += 1;
+        }
+        if bytes.get(pos) != Some(&b'%') {
+            return Some(pos);
+        }
+        let end = bytes[pos..]
+            .iter()
+            .position(|byte| matches!(byte, b'\r' | b'\n'))
+            .map(|relative| pos + relative)
+            .unwrap_or(bytes.len());
+        let comment = bytes.get(pos..end)?;
+        if comment.starts_with(b"%%EOF") && comment[5..].iter().all(|byte| pdf_ws(*byte)) {
+            // Leave EOF to the grammar state: only the terminal-marker state
+            // accepts it; every earlier state requires a different token.
+            return Some(pos);
+        }
+        pos = end;
+    }
+}
+
+fn token_at(bytes: &[u8], pos: usize, expected: &[u8]) -> Option<usize> {
+    let end = pos.checked_add(expected.len())?;
+    if bytes.get(pos..end)? != expected {
+        return None;
+    }
+    if bytes.get(end).is_some_and(|byte| {
+        !pdf_ws(*byte)
+            && !matches!(
+                *byte,
+                b'%' | b'<' | b'>' | b'[' | b']' | b'(' | b')' | b'/'
+            )
+    }) {
+        return None;
+    }
+    Some(end)
+}
+
+/// Validate the terminal revision grammar after the primary trailer/stream object.
+/// Comments are allowed as trivia, but a comment containing an EOF marker is not.
+fn terminal_tail(bytes: &[u8], anchor: usize, is_stream: bool) -> Option<usize> {
+    let window_start = bytes.len().saturating_sub(1024);
+    let mut pos = anchor;
+    if is_stream {
+        pos = skip_trivia(bytes, pos)?;
+        pos = token_at(bytes, pos, b"endstream")?;
+        pos = skip_trivia(bytes, pos)?;
+        pos = token_at(bytes, pos, b"endobj")?;
+    }
+    pos = skip_trivia(bytes, pos)?;
+    if pos < window_start {
+        return None;
+    }
+    pos = token_at(bytes, pos, b"startxref")?;
+    pos = skip_trivia(bytes, pos)?;
+    let number_start = pos;
+    while bytes.get(pos).is_some_and(u8::is_ascii_digit) {
+        pos += 1;
+    }
+    if pos == number_start {
+        return None;
+    }
+    let pointer = core::str::from_utf8(bytes.get(number_start..pos)?)
+        .ok()?
+        .parse::<u64>()
+        .ok()?;
+    pos = skip_trivia(bytes, pos)?;
+    let eof_end = token_at(bytes, pos, b"%%EOF")?;
+    if pos != 0 && !matches!(bytes.get(pos - 1), Some(b'\r' | b'\n')) {
+        return None;
+    }
+    let after_eof = match (bytes.get(eof_end), bytes.get(eof_end + 1)) {
+        (Some(b'\r'), Some(b'\n')) => eof_end + 2,
+        (Some(b'\r' | b'\n'), _) => eof_end + 1,
+        (None, _) => eof_end,
+        _ => return None,
+    };
+    let trailing = skip_trivia(bytes, after_eof)?;
+    (trailing == bytes.len()).then_some(usize::try_from(pointer).ok()?)
+}
+
+fn same_live_mapping(live: &Document, signed: &Document, id: ObjectRef) -> bool {
+    let expected = Some(XrefEntry::InUse {
+        offset: match live.xref().get(id.number()) {
+            Some(XrefEntry::InUse { offset, generation }) if generation == id.generation() => offset,
+            _ => return false,
+        },
+        generation: id.generation(),
+    });
+    live.xref().get(id.number()) == expected && signed.xref().get(id.number()) == expected
+}
+
+fn file_backed(value: &Value, document: &Document) -> bool {
+    Arc::ptr_eq(value.object().buffer(), &document.source().shared())
+}
+
+fn contents_span(value: &Value) -> Option<std::ops::Range<usize>> {
+    value
+        .get()
+        .as_dict()?
+        .get(b"Contents")
+        .filter(|contents| contents.as_str().is_some())
+        .map(|contents| contents.span())
+}
+
+fn same_signature_value(
+    live: &Document,
+    signed: &Document,
+    field_id: ObjectRef,
+    signature_id: Option<ObjectRef>,
+    outer: &Value,
+) -> bool {
+    let mut resolver = signed.resolver();
+    let signed_value = if let Some(signature_id) = signature_id {
+        if !same_live_mapping(live, signed, signature_id)
+            || outer.object().id() != Some(signature_id)
+            || !file_backed(outer, live)
+        {
+            return false;
+        }
+        let Ok(object) = resolver.get(signature_id) else { return false };
+        if object.id() != Some(signature_id) {
+            return false;
+        }
+        object.root().to_owned()
+    } else {
+        if !same_live_mapping(live, signed, field_id)
+            || outer.object().id() != Some(field_id)
+            || !file_backed(outer, live)
+        {
+            return false;
+        }
+        let Ok(field) = resolver.get(field_id) else { return false };
+        if field.id() != Some(field_id) {
+            return false;
+        }
+        let Some(value) = field.dict().and_then(|dict| dict.get(b"V")) else { return false };
+        if value.as_ref().is_some() {
+            return false;
+        }
+        value.to_owned()
+    };
+    if !file_backed(&signed_value, signed) || signed_value.get().as_dict().is_none() {
+        return false;
+    }
+    let outer_span = outer.get().span();
+    let signed_span = signed_value.get().span();
+    outer_span == signed_span && contents_span(outer) == contents_span(&signed_value)
+}
+
+fn valid_signed_revision(bytes: &[u8], signed: &Document) -> bool {
+    let (anchor, is_stream) = match signed.xref().kind() {
+        XrefKind::Stream => match signed.trailer().stream_range() {
+            Some(range) => (range.end, true),
+            None => return false,
+        },
+        XrefKind::Table | XrefKind::Hybrid => {
+            (signed.trailer().root().span().end, false)
+        }
+    };
+    terminal_tail(bytes, anchor, is_stream).is_some_and(|offset| {
+        signed.xref().exact_primary_offset() == Some(offset)
+    })
 }
 
 /// Checks every signature field in the file. Encrypted files are refused.
@@ -471,8 +707,19 @@ pub fn verify(bytes: Arc<[u8]>, limits: Limits) -> Result<Vec<SignatureReport>, 
         return Err(unsupported("verify:encrypted document"));
     }
     let total_sections = document.xref().sections();
-    let mut reports = Vec::new();
-    for (field, signature) in signature_fields(&document)? {
+    let mut reports: Vec<SignatureReport> = Vec::new();
+    let mut verified: BTreeMap<(u32, u16), SignatureReport> = BTreeMap::new();
+    let mut verification_work_bytes = 0u64;
+    for (field, field_id, signature_id, signature) in
+        signature_fields(&document, limits.max_signature_fields)?
+    {
+        let cache_key = signature_id.map(|id| (id.number(), id.generation()));
+        if let Some(cached) = cache_key.and_then(|key| verified.get(&key)) {
+            let mut report = cached.clone();
+            report.field = field;
+            reports.push(report);
+            continue;
+        }
         let Some(dict) = signature.get().as_dict() else {
             continue;
         };
@@ -495,33 +742,77 @@ pub fn verify(bytes: Arc<[u8]>, limits: Limits) -> Result<Vec<SignatureReport>, 
             });
         let range = byte_range(dict);
         let parts = range.and_then(|range| ranges(&bytes, range));
+        let range = range.unwrap_or_default();
+        let end = range[2].checked_add(range[3]);
+        let signed_end = end
+            .and_then(|end| usize::try_from(end).ok())
+            .filter(|end| *end <= bytes.len());
+        let contents_span = dict
+            .get(b"Contents")
+            .filter(|value| value.as_str().is_some())
+            .map(|value| value.span());
+        let gap_is_contents = contents_span.is_some_and(|span| {
+            span.start <= span.end
+                && span.end <= bytes.len()
+                && usize::try_from(range[1]).ok() == Some(span.start)
+                && usize::try_from(range[2]).ok() == Some(span.end)
+                && bytes.get(span).is_some_and(|contents| {
+                    contents.first() == Some(&b'<') && contents.last() == Some(&b'>')
+                })
+        });
+        let prefix = signed_end.and_then(|end| bytes.get(..end));
+        let preliminary_coverage =
+            parts.is_some() && range[0] == 0 && gap_is_contents && prefix.is_some_and(ends_at_eof);
+        let ranged_bytes = match parts {
+            Some([first, second]) => first.len().checked_add(second.len()).unwrap_or(usize::MAX),
+            None => 0,
+        };
+        let work_bytes = ranged_bytes
+            .checked_add(contents.len())
+            .and_then(|bytes| {
+                bytes.checked_add(if preliminary_coverage {
+                    prefix.map(|prefix| prefix.len()).unwrap_or(0)
+                } else {
+                    0
+                })
+            })
+            .unwrap_or(usize::MAX);
+        charge_signature_work(
+            &mut verification_work_bytes,
+            work_bytes,
+            limits.max_signature_work_bytes,
+        )?;
         let mut check = check_cms(&contents, parts);
         if parts.is_none() {
             check.digest = DigestCheck::Malformed;
         }
-        let range = range.unwrap_or_default();
-        let end = range[2].saturating_add(range[3]);
-        let signed_end = usize::try_from(end).ok().filter(|end| *end <= bytes.len());
-        let gap_is_contents = usize::try_from(range[1])
-            .ok()
-            .and_then(|at| bytes.get(at))
-            .is_some_and(|byte| *byte == b'<')
-            && usize::try_from(range[2])
-                .ok()
-                .and_then(|at| at.checked_sub(1))
-                .and_then(|at| bytes.get(at))
-                .is_some_and(|byte| *byte == b'>');
-        let prefix = signed_end.and_then(|end| bytes.get(..end));
-        let covers_revision = range[0] == 0 && gap_is_contents && prefix.is_some_and(ends_at_eof);
-        let later_revisions = match prefix {
-            Some(prefix) if covers_revision => PdfSource::new(Arc::<[u8]>::from(prefix))
-                .ok()
-                .and_then(|source| Document::open(source, limits).ok())
-                .map(|signed| total_sections.saturating_sub(signed.xref().sections()))
-                .unwrap_or(0),
-            _ => 0,
+        let (covers_revision, later_revisions) = if preliminary_coverage {
+            let signed = prefix
+                .and_then(|prefix| PdfSource::new(Arc::<[u8]>::from(prefix)).ok())
+                .and_then(|source| Document::open(source, limits).ok());
+            match signed {
+                Some(signed)
+                    if prefix.is_some_and(|prefix| valid_signed_revision(prefix, &signed))
+                        && same_signature_value(
+                            &document,
+                            &signed,
+                            field_id,
+                            signature_id,
+                            &signature,
+                        ) =>
+                {
+                    (
+                        true,
+                        total_sections.saturating_sub(signed.xref().sections()),
+                    )
+                }
+                None => (false, 0),
+                Some(_) => (false, 0),
+            }
+        } else {
+            (false, 0)
         };
-        reports.push(SignatureReport {
+        let report = SignatureReport {
             field,
             sub_filter,
             algorithm: check.algorithm,
@@ -531,9 +822,112 @@ pub fn verify(bytes: Arc<[u8]>, limits: Limits) -> Result<Vec<SignatureReport>, 
             signing_time: check.signing_time.or(modified),
             byte_range: range,
             covers_revision,
-            bytes_after: (bytes.len() as u64).saturating_sub(end),
+            bytes_after: end
+                .map(|end| (bytes.len() as u64).saturating_sub(end))
+                .unwrap_or(0),
             later_revisions,
-        });
+        };
+        if let Some(key) = cache_key {
+            verified.insert(key, report.clone());
+        }
+        reports.push(report);
     }
     Ok(reports)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        DigestCheck, SignatureCheck, ends_at_eof, terminal_tail, verify,
+    };
+    use pdf_core::Limits;
+    use std::sync::Arc;
+
+    #[test]
+    fn terminal_tail_accepts_one_table_tail_and_rejects_extra_eof_or_tail() {
+        let valid = b"xref\ntrailer\n<< /Size 1 >>\nstartxref\n0\n%%EOF\n";
+        let anchor = valid.windows(2).position(|window| window == b">>").unwrap() + 2;
+        assert_eq!(terminal_tail(valid, anchor, false), Some(0));
+
+        let orphan = b"xref\ntrailer\n<< /Size 1 >>\n%%EOF\nstartxref\n0\n%%EOF\n";
+        let anchor = orphan.windows(2).position(|window| window == b">>").unwrap() + 2;
+        assert_eq!(terminal_tail(orphan, anchor, false), None);
+
+        let duplicate = b"xref\ntrailer\n<< /Size 1 >>\nstartxref\n0\n%%EOF\nstartxref\n0\n%%EOF\n";
+        let anchor = duplicate.windows(2).position(|window| window == b">>").unwrap() + 2;
+        assert_eq!(terminal_tail(duplicate, anchor, false), None);
+    }
+
+    #[test]
+    fn terminal_tail_requires_stream_terminators_and_standalone_pointer() {
+        let valid = b"<< /Type /XRef >>\nstream\ndata\nendstream\nendobj\nstartxref\r\n0\r\n%%EOF\r\n";
+        let anchor = valid.windows(4).position(|window| window == b"data").unwrap() + 4;
+        assert_eq!(terminal_tail(valid, anchor, true), Some(0));
+
+        let missing_endobj = b"data\nendstream\nstartxref\n0\n%%EOF\n";
+        assert_eq!(terminal_tail(missing_endobj, 4, true), None);
+
+        let payload = b"xref\ntrailer\n<<>>\npayload\nstartxref\n0\n%%EOF\n";
+        let anchor = payload.windows(2).position(|window| window == b">>").unwrap() + 2;
+        assert_eq!(terminal_tail(payload, anchor, false), None);
+    }
+
+    #[test]
+    fn eof_marker_must_be_a_standalone_line_and_padded_markers_are_not_trivia() {
+        assert!(ends_at_eof(b"body\n%%EOF\n"));
+        assert!(!ends_at_eof(b"body 0%%EOF\n"));
+
+        let crlf_comment = b"xref\ntrailer\n<<>>\n% ordinary note\r\nstartxref\r\n0\r\n%%EOF\r\n";
+        let anchor = crlf_comment.windows(2).position(|window| window == b">>").unwrap() + 2;
+        assert_eq!(terminal_tail(crlf_comment, anchor, false), Some(0));
+
+        let padded = b"xref\ntrailer\n<<>>\n%%EOF \nstartxref\n0\n%%EOF\n";
+        let anchor = padded.windows(2).position(|window| window == b">>").unwrap() + 2;
+        assert_eq!(terminal_tail(padded, anchor, false), None);
+
+        let same_line = b"xref\ntrailer\n<<>>\nstartxref\n0 %%EOF\n";
+        let anchor = same_line.windows(2).position(|window| window == b">>").unwrap() + 2;
+        assert_eq!(terminal_tail(same_line, anchor, false), None);
+
+        let attached = b"xref\ntrailer\n<<>>\nstartxref\n0%%EOF\n";
+        let anchor = attached.windows(2).position(|window| window == b">>").unwrap() + 2;
+        assert_eq!(terminal_tail(attached, anchor, false), None);
+
+        let intervening = b"xref\ntrailer\n<<>>\nstartxref\n0\n%%EOF \t\n%%EOF\n";
+        let anchor = intervening.windows(2).position(|window| window == b">>").unwrap() + 2;
+        assert_eq!(terminal_tail(intervening, anchor, false), None);
+    }
+
+    #[test]
+    fn terminal_parser_accepts_comments_but_still_requires_one_pointer() {
+        let bytes = b"xref\ntrailer\n<<>>\nstartxref\n% startxref 0\n0\n%%EOF\n";
+        let anchor = bytes.windows(2).position(|window| window == b">>").unwrap() + 2;
+        let strict = terminal_tail(bytes, anchor, false).unwrap();
+        assert_eq!(strict, 0);
+
+        let plus_in_comment = b"xref\ntrailer\n<<>>\nstartxref\n% startxref +12\n0\n%%EOF\n";
+        let anchor = plus_in_comment.windows(2).position(|window| window == b">>").unwrap() + 2;
+        assert_eq!(terminal_tail(plus_in_comment, anchor, false), Some(0));
+    }
+
+    #[test]
+    fn public_verifier_keeps_single_and_incremental_signature_controls() {
+        let single = include_bytes!("../../../fixtures/house/author-signed.pdf");
+        let reports = verify(Arc::from(single.as_slice()), Limits::default()).unwrap();
+        assert_eq!(reports.len(), 1);
+        assert_eq!(reports[0].digest, DigestCheck::Match);
+        assert_eq!(reports[0].signature, SignatureCheck::Valid);
+        assert!(reports[0].strict_intact());
+
+        let twice = include_bytes!("../../../fixtures/house/author-signed-twice.pdf");
+        let reports = verify(Arc::from(twice.as_slice()), Limits::default()).unwrap();
+        assert_eq!(reports.len(), 2);
+        assert!(reports.iter().all(|report| {
+            report.digest == DigestCheck::Match && report.signature == SignatureCheck::Valid
+        }));
+        assert!(reports[0].covers_revision);
+        assert_eq!(reports[0].later_revisions, 1);
+        assert!(!reports[0].strict_intact());
+        assert!(reports[1].strict_intact());
+    }
 }
