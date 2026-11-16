@@ -1,6 +1,6 @@
 name: Publish
 
-# A version bump on master is the release trigger. Cargo packages, verifies and
+# Dispatch from master after a reviewed manifest version bump. Cargo packages, verifies and
 # uploads the crate; crates.io decides whether that version can be published.
 on:
   workflow_dispatch:
@@ -18,13 +18,18 @@ jobs:
     runs-on: ubicloud-standard-2
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - name: Require master
+        shell: sh
+        run: test "$GITHUB_REF" = refs/heads/master
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
 
       - name: Publish
-        run: cargo publish --workspace
+        run: cargo publish --workspace --registry crates-io
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}

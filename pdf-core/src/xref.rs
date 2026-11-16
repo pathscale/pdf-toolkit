@@ -13,6 +13,12 @@ use crate::object::{
 use crate::source::PdfSource;
 use crate::work::ObjectRef;
 
+#[derive(Default)]
+struct DecodeBudget {
+    decoded_bytes: u64,
+    work_bytes: u64,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum XrefKind {
     Table,
@@ -39,6 +45,8 @@ pub struct Xref {
     entries: Vec<XrefEntry>,
     kind: XrefKind,
     sections: u32,
+    exact_primary_offset: Option<usize>,
+    parsed_streams: BTreeSet<(u32, u16, usize)>,
 }
 
 impl Xref {
@@ -53,6 +61,24 @@ impl Xref {
     }
     pub fn sections(&self) -> u32 {
         self.sections
+    }
+    /// Absolute source byte offset of the primary xref section when the
+    /// reader's decoded `startxref` pointer resolved without location recovery
+    /// or a header shift. This belongs to the primary trailer of this parse;
+    /// “exact” describes pointer resolution only, not the pointer's lexical
+    /// occurrence or the validity of the surrounding tail.
+    pub fn exact_primary_offset(&self) -> Option<usize> {
+        self.exact_primary_offset
+    }
+    pub(crate) fn parsed_stream(&self, object: &Object) -> bool {
+        object.is_stream()
+            && object.id().is_some_and(|id| {
+                self.parsed_streams.contains(&(
+                    id.number(),
+                    id.generation(),
+                    object.root().span().start,
+                ))
+            })
     }
     pub fn counts(&self) -> XrefCounts {
         let mut counts = XrefCounts::default();
@@ -76,6 +102,8 @@ impl Xref {
             entries,
             kind,
             sections: 1,
+            exact_primary_offset: None,
+            parsed_streams: BTreeSet::new(),
         }
     }
 }
@@ -84,6 +112,7 @@ struct Section {
     entries: Vec<Option<XrefEntry>>,
     trailer: Object,
     kind: XrefKind,
+    parsed_stream: Option<(u32, u16, usize)>,
 }
 
 pub(crate) fn read(
@@ -100,12 +129,17 @@ pub(crate) fn read(
     let original = startxref(bytes)?;
     let header = source.header().offset();
     let mut warnings = Vec::new();
-    let (mut offset, shift) = locate(bytes, original, header, &mut warnings)?;
+    let (located_primary_offset, shift) = locate(bytes, original, header, &mut warnings)?;
+    let exact_primary_offset = (shift == 0 && located_primary_offset == original)
+        .then_some(located_primary_offset);
+    let mut offset = located_primary_offset;
     let mut visited = BTreeSet::new();
+    let mut parsed_streams = BTreeSet::new();
     let mut entries: Vec<Option<XrefEntry>> = Vec::new();
     let mut newest = None;
     let mut kind = XrefKind::Table;
     let mut sections = 0u32;
+    let mut decode_budget = DecodeBudget::default();
     loop {
         if !visited.insert(offset) {
             warnings.push(Warning {
@@ -116,7 +150,10 @@ pub(crate) fn read(
             break;
         }
         count_section(&mut sections, limits)?;
-        let mut section = section(&buf, offset, shift, limits, &mut warnings)?;
+        let mut section = section(&buf, offset, shift, limits, &mut decode_budget, &mut warnings)?;
+        if let Some(parsed_stream) = section.parsed_stream {
+            parsed_streams.insert(parsed_stream);
+        }
         let table = section.kind == XrefKind::Table;
         let dict = section
             .trailer
@@ -139,9 +176,16 @@ pub(crate) fn read(
             } else {
                 // The /XRefStm stream belongs to the same revision as its table:
                 // `sections` counts revisions, so it is not counted again.
-                let supplemental = stream(&buf, hybrid, shift, limits, &mut warnings)?;
+                let supplemental = stream(&buf, hybrid, shift, limits, &mut decode_budget, &mut warnings)?;
+                if let Some(parsed_stream) = supplemental.parsed_stream {
+                    parsed_streams.insert(parsed_stream);
+                }
                 if supplemental.entries.len() > section.entries.len() {
-                    section.entries.resize(supplemental.entries.len(), None);
+                    grow_entries(
+                        &mut section.entries,
+                        supplemental.entries.len(),
+                        allocation_maximum(limits, buf.len()),
+                    )?;
                 }
                 for (number, entry) in supplemental.entries.into_iter().enumerate() {
                     if let Some(slot) = section.entries.get_mut(number) {
@@ -157,9 +201,11 @@ pub(crate) fn read(
             kind = section.kind;
             newest = Some(section.trailer);
         }
-        if section.entries.len() > entries.len() {
-            entries.resize(section.entries.len(), None);
-        }
+        grow_entries(
+            &mut entries,
+            section.entries.len(),
+            allocation_maximum(limits, buf.len()),
+        )?;
         for (number, entry) in section.entries.into_iter().enumerate() {
             if let Some(slot) = entries.get_mut(number) {
                 if slot.is_none() {
@@ -173,15 +219,21 @@ pub(crate) fn read(
         offset = shifted(prev, shift, offset)?;
     }
     let trailer = newest.ok_or_else(|| malformed(original, "xref"))?;
-    let entries = entries
-        .into_iter()
-        .map(|entry| entry.unwrap_or(XrefEntry::Free))
-        .collect();
+    let maximum = allocation_maximum(limits, buf.len());
+    let mut final_entries = Vec::new();
+    final_entries
+        .try_reserve_exact(entries.len())
+        .map_err(|_| allocation_failure(maximum))?;
+    for entry in entries {
+        final_entries.push(entry.unwrap_or(XrefEntry::Free));
+    }
     Ok((
         Xref {
-            entries,
+            entries: final_entries,
             kind,
             sections,
+            exact_primary_offset,
+            parsed_streams,
         },
         trailer,
         warnings,
@@ -303,12 +355,13 @@ fn section(
     offset: usize,
     shift: u64,
     limits: &Limits,
+    budget: &mut DecodeBudget,
     warnings: &mut Vec<Warning>,
 ) -> Result<Section, DocError> {
     if keyword_at(buf, offset, b"xref") {
         table(buf, offset, shift, limits, warnings)
     } else {
-        stream(buf, offset, shift, limits, warnings)
+        stream(buf, offset, shift, limits, budget, warnings)
     }
 }
 
@@ -352,6 +405,17 @@ fn table(
         let allowance =
             u64::from(limits.max_objects).saturating_add(u64::from(first_subsection && start == 1));
         check(LimitKind::Objects, end, allowance)?;
+        let maximum = allocation_maximum(limits, buf.len());
+        let count_usize =
+            usize::try_from(count).map_err(|_| malformed(offset, "xref subsection"))?;
+        let pair_count = pairs
+            .len()
+            .checked_add(count_usize)
+            .ok_or_else(|| allocation_failure(maximum))?;
+        check(LimitKind::Objects, pair_count as u64, maximum)?;
+        pairs
+            .try_reserve_exact(count_usize)
+            .map_err(|_| allocation_failure(maximum))?;
         let first_pair = pairs.len();
         for number in start..end {
             let field = unsigned(required(&mut lexer, offset)?.bytes())
@@ -407,8 +471,9 @@ fn table(
         )?;
     }
     let dict = trailer.dict().ok_or_else(|| malformed(offset, "trailer"))?;
-    let size = size(dict, limits, offset)?;
-    let mut entries = alloc::vec![None; size];
+    let size = size(dict, limits, offset, buf.len())?;
+    let mut entries = Vec::new();
+    grow_entries(&mut entries, size, allocation_maximum(limits, buf.len()))?;
     for (number, entry) in pairs {
         let slot = entries
             .get_mut(number as usize)
@@ -419,6 +484,7 @@ fn table(
         entries,
         trailer,
         kind: XrefKind::Table,
+        parsed_stream: None,
     })
 }
 
@@ -427,11 +493,12 @@ fn stream(
     offset: usize,
     shift: u64,
     limits: &Limits,
+    budget: &mut DecodeBudget,
     warnings: &mut Vec<Warning>,
 ) -> Result<Section, DocError> {
     let id = header_at(buf, offset).ok_or_else(|| malformed(offset, "xref stream header"))?;
     let mut scratch = ParseScratch::default();
-    let trailer = parse_indirect_with_scratch(buf, offset, id, limits, &mut scratch)?;
+    let mut trailer = parse_indirect_with_scratch(buf, offset, id, limits, &mut scratch)?;
     let dict = trailer
         .dict()
         .ok_or_else(|| malformed(offset, "xref stream dictionary"))?;
@@ -443,7 +510,7 @@ fn stream(
     {
         return Err(malformed(offset, "xref stream Type"));
     }
-    let size = size(dict, limits, offset)?;
+    let size = size(dict, limits, offset, buf.len())?;
     let widths = dict
         .get(b"W")
         .and_then(|value| value.as_array())
@@ -505,6 +572,7 @@ fn stream(
     let needed = rows
         .checked_mul(stride)
         .ok_or_else(|| malformed(offset, "xref data size"))?;
+    // Preserve the baseline local row-size refusal before filter metadata lookup.
     check(
         LimitKind::DecodedBytes,
         needed as u64,
@@ -522,8 +590,77 @@ fn stream(
     let raw = trailer
         .stream_raw()
         .ok_or_else(|| malformed(offset, "xref stream data"))?;
-    let decoded =
-        crate::filter::decode(raw, &steps, limits.max_decoded_bytes).map_err(DocError::from)?;
+    let encoded = raw.len() as u64;
+    let work_maximum = limits.max_total_decode_work_bytes;
+    let Some(encoded_requested) = budget.work_bytes.checked_add(encoded) else {
+        return Err(refusal(LimitKind::DecodeWorkBytes, u64::MAX, work_maximum));
+    };
+    if encoded_requested > work_maximum {
+        return Err(refusal(
+            LimitKind::DecodeWorkBytes,
+            encoded_requested,
+            work_maximum,
+        ));
+    }
+    budget.work_bytes = encoded_requested;
+
+    let (output_maximum, output_limit) = output_limit(limits, budget);
+    if needed as u64 > output_maximum {
+        let (limit, requested, maximum) = match output_limit {
+            LimitKind::TotalDecodedBytes => (
+                output_limit,
+                budget.decoded_bytes.checked_add(needed as u64).unwrap_or(u64::MAX),
+                limits.max_total_decoded_bytes,
+            ),
+            LimitKind::DecodeWorkBytes => (
+                output_limit,
+                budget.work_bytes.checked_add(needed as u64).unwrap_or(u64::MAX),
+                work_maximum,
+            ),
+            _ => (LimitKind::DecodedBytes, needed as u64, limits.max_decoded_bytes),
+        };
+        return Err(refusal(limit, requested, maximum));
+    }
+    let decoded = match crate::filter::decode(raw, &steps, output_maximum) {
+        Ok(decoded) => decoded,
+        Err(crate::filter::FilterError::OutputLimit { .. })
+            if matches!(output_limit, LimitKind::TotalDecodedBytes | LimitKind::DecodeWorkBytes) =>
+        {
+            let maximum = match output_limit {
+                LimitKind::TotalDecodedBytes => limits.max_total_decoded_bytes,
+                _ => work_maximum,
+            };
+            return Err(refusal(output_limit, maximum.saturating_add(1), maximum));
+        }
+        Err(error @ crate::filter::FilterError::OutputLimit { .. }) => {
+            // Preserve the established local decoder-cap error contract.
+            return Err(DocError::from(error));
+        }
+        Err(error) => return Err(DocError::from(error)),
+    };
+    let decoded_len = decoded.bytes.len() as u64;
+    let Some(decoded_requested) = budget.decoded_bytes.checked_add(decoded_len) else {
+        return Err(refusal(
+            LimitKind::TotalDecodedBytes,
+            u64::MAX,
+            limits.max_total_decoded_bytes,
+        ));
+    };
+    if decoded_requested > limits.max_total_decoded_bytes {
+        return Err(refusal(
+            LimitKind::TotalDecodedBytes,
+            decoded_requested,
+            limits.max_total_decoded_bytes,
+        ));
+    }
+    let Some(work_requested) = budget.work_bytes.checked_add(decoded_len) else {
+        return Err(refusal(LimitKind::DecodeWorkBytes, u64::MAX, work_maximum));
+    };
+    if work_requested > work_maximum {
+        return Err(refusal(LimitKind::DecodeWorkBytes, work_requested, work_maximum));
+    }
+    budget.decoded_bytes = decoded_requested;
+    budget.work_bytes = work_requested;
     if decoded.image.is_some() || decoded.truncated || decoded.bytes.len() < needed {
         return Err(malformed(offset, "xref stream data"));
     }
@@ -534,7 +671,8 @@ fn stream(
             what: "stream_length_recovered",
         });
     }
-    let mut entries = alloc::vec![None; size];
+    let mut entries = Vec::new();
+    grow_entries(&mut entries, size, allocation_maximum(limits, buf.len()))?;
     let mut position = 0usize;
     for range in ranges {
         for number in range {
@@ -582,16 +720,307 @@ fn stream(
             *slot = entry;
         }
     }
+    let parsed_stream = (id.number(), id.generation(), trailer.root().span().start);
+    trailer.mark_xref_stream();
     Ok(Section {
         entries,
         trailer,
         kind: XrefKind::Stream,
+        parsed_stream: Some(parsed_stream),
     })
 }
 
-fn size(dict: DictRef<'_>, limits: &Limits, offset: usize) -> Result<usize, DocError> {
+fn refusal(limit: LimitKind, requested: u64, maximum: u64) -> DocError {
+    DocError::Refused(crate::limits::Refusal { limit, requested, maximum })
+}
+
+fn output_limit(limits: &Limits, budget: &DecodeBudget) -> (u64, LimitKind) {
+    let total_remaining = limits.max_total_decoded_bytes.saturating_sub(budget.decoded_bytes);
+    let work_remaining = limits.max_total_decode_work_bytes.saturating_sub(budget.work_bytes);
+    let candidates = [
+        (limits.max_decoded_bytes, 2u8, LimitKind::DecodedBytes),
+        (total_remaining, 0u8, LimitKind::TotalDecodedBytes),
+        (work_remaining, 1u8, LimitKind::DecodeWorkBytes),
+    ];
+    candidates
+        .into_iter()
+        .min_by_key(|(maximum, priority, _)| (*maximum, *priority))
+        .map(|(maximum, _, limit)| (maximum, limit))
+        .unwrap_or((limits.max_decoded_bytes, LimitKind::DecodedBytes))
+}
+
+#[cfg(test)]
+mod decode_budget_tests {
+    use alloc::format;
+    use super::*;
+
+    fn stream_bytes(filter: Option<&str>, data: &[u8]) -> Arc<[u8]> {
+        let mut bytes = format!(
+            "1 0 obj\n<< /Type /XRef /Size 4 /W [1 1 0] /Length {}{} >>\nstream\n",
+            data.len(),
+            filter.map(|name| format!(" /Filter /{name}")).unwrap_or_default(),
+        )
+        .into_bytes();
+        bytes.extend_from_slice(data);
+        bytes.extend_from_slice(b"\nendstream\nendobj\n");
+        Arc::from(bytes)
+    }
+
+    fn run_stream(
+        bytes: Arc<[u8]>,
+        limits: &Limits,
+        budget: &mut DecodeBudget,
+    ) -> Result<Section, DocError> {
+        stream(&bytes, 0, 0, limits, budget, &mut Vec::new())
+    }
+
+    fn append_xref_stream(bytes: &mut Vec<u8>, object: u32, prev: Option<usize>) -> usize {
+        let offset = bytes.len();
+        let previous = prev.map(|value| format!(" /Prev {value}")).unwrap_or_default();
+        bytes.extend_from_slice(
+            format!(
+                "{object} 0 obj\n<< /Type /XRef /Size 4 /W [1 1 0] /Length 8{previous} >>\nstream\n"
+            )
+            .as_bytes(),
+        );
+        bytes.extend_from_slice(b"00000000\nendstream\nendobj\n");
+        offset
+    }
+
+    fn two_stream_pdf(hybrid: bool) -> Arc<[u8]> {
+        let mut bytes = b"%PDF-1.7\n".to_vec();
+        let older = append_xref_stream(&mut bytes, 1, None);
+        let supplement = append_xref_stream(&mut bytes, 2, None);
+        if hybrid {
+            let table = bytes.len();
+            bytes.extend_from_slice(
+                format!(
+                    "xref\n0 1\n0000000000 65535 f\ntrailer\n<< /Size 4 /XRefStm {supplement} /Prev {older} >>\n"
+                )
+                .as_bytes(),
+            );
+            bytes.extend_from_slice(format!("startxref\n{table}\n%%EOF\n").as_bytes());
+        } else {
+            let newest = append_xref_stream(&mut bytes, 3, Some(older));
+            bytes.extend_from_slice(format!("startxref\n{newest}\n%%EOF\n").as_bytes());
+        }
+        Arc::from(bytes)
+    }
+
+    fn read_pdf(bytes: Arc<[u8]>, limits: &Limits) -> Result<(Xref, Object, Vec<Warning>), DocError> {
+        let source = PdfSource::new(bytes).expect("synthetic PDF header should parse");
+        read(&source, limits)
+    }
+
+    fn table_pdf(pointer_delta: isize) -> (Arc<[u8]>, usize) {
+        let mut bytes = b"%PDF-1.7\n".to_vec();
+        let offset = bytes.len();
+        bytes.extend_from_slice(
+            b"xref\n0 1\n0000000000 65535 f\ntrailer\n<< /Size 1 >>\n",
+        );
+        let pointer = offset.checked_add_signed(pointer_delta).unwrap();
+        bytes.extend_from_slice(format!("startxref\n{pointer}\n%%EOF\n").as_bytes());
+        (Arc::from(bytes), offset)
+    }
+
+    #[test]
+    fn exact_primary_offset_tracks_unadjusted_pointer_only() {
+        let (bytes, offset) = table_pdf(0);
+        let (xref, _, warnings) = read_pdf(bytes, &Limits::default()).unwrap();
+        assert_eq!(warnings.len(), 0);
+        assert_eq!(xref.exact_primary_offset(), Some(offset));
+
+        let (bytes, _) = table_pdf(1);
+        let (xref, _, warnings) = read_pdf(bytes, &Limits::default()).unwrap();
+        assert!(warnings.iter().any(|warning| warning.what == "startxref_adjusted"));
+        assert_eq!(xref.exact_primary_offset(), None);
+
+        let repaired = Xref::from_repaired(alloc::vec![XrefEntry::Free], XrefKind::Table);
+        assert_eq!(repaired.exact_primary_offset(), None);
+    }
+
+    #[test]
+    fn local_decoder_limit_keeps_decoded_bytes_refusal() {
+        let bytes = stream_bytes(None, b"000000000");
+        let limits = Limits { max_decoded_bytes: 8, ..Limits::default() };
+        let error = run_stream(bytes, &limits, &mut DecodeBudget::default())
+            .err().expect("xref stream should refuse");
+        assert!(matches!(error, DocError::Refused(crate::limits::Refusal {
+            limit: LimitKind::DecodedBytes, requested: 9, maximum: 8,
+        })));
+    }
+
+    #[test]
+    fn required_row_preflight_precedes_filter_metadata() {
+        let bytes = stream_bytes(Some("UnsupportedFilter"), b"000000000");
+        let limits = Limits { max_decoded_bytes: 7, ..Limits::default() };
+        let error = run_stream(bytes, &limits, &mut DecodeBudget::default())
+            .err().expect("xref stream should refuse");
+        assert!(matches!(error, DocError::Refused(crate::limits::Refusal {
+            limit: LimitKind::DecodedBytes, requested: 8, maximum: 7,
+        })));
+    }
+
+    #[test]
+    fn aggregate_equality_succeeds_and_charges_both_counters() {
+        let bytes = stream_bytes(None, b"00000000");
+        let limits = Limits {
+            max_decoded_bytes: 8,
+            max_total_decoded_bytes: 8,
+            max_total_decode_work_bytes: 16,
+            ..Limits::default()
+        };
+        let mut budget = DecodeBudget::default();
+        run_stream(bytes, &limits, &mut budget).expect("exact aggregate limits should pass");
+        assert_eq!(budget.decoded_bytes, 8);
+        assert_eq!(budget.work_bytes, 16);
+    }
+
+    #[test]
+    fn aggregate_row_preflight_reports_binding_budget() {
+        let bytes = stream_bytes(None, b"00000000");
+        let limits = Limits { max_total_decoded_bytes: 7, ..Limits::default() };
+        let error = run_stream(bytes, &limits, &mut DecodeBudget::default())
+            .err().expect("aggregate output budget should refuse");
+        assert!(matches!(error, DocError::Refused(crate::limits::Refusal {
+            limit: LimitKind::TotalDecodedBytes, requested: 8, maximum: 7,
+        })));
+    }
+
+    #[test]
+    fn prev_chain_shares_output_and_work_budgets() {
+        let bytes = two_stream_pdf(false);
+        let output_limited = Limits {
+            max_total_decoded_bytes: 15,
+            ..Limits::default()
+        };
+        let error = read_pdf(Arc::clone(&bytes), &output_limited)
+            .err().expect("two xref streams exceed output budget");
+        assert!(matches!(error, DocError::Refused(crate::limits::Refusal {
+            limit: LimitKind::TotalDecodedBytes, requested: 16, maximum: 15,
+        })));
+
+        let work_limited = Limits {
+            max_total_decode_work_bytes: 31,
+            ..Limits::default()
+        };
+        let error = read_pdf(Arc::clone(&bytes), &work_limited)
+            .err().expect("two xref streams exceed work budget");
+        assert!(matches!(error, DocError::Refused(crate::limits::Refusal {
+            limit: LimitKind::DecodeWorkBytes, requested: 32, maximum: 31,
+        })));
+
+        let exact = Limits {
+            max_total_decoded_bytes: 16,
+            max_total_decode_work_bytes: 32,
+            ..Limits::default()
+        };
+        let (xref, _, _) = read_pdf(bytes, &exact).expect("exact aggregate limits should pass");
+        assert_eq!(xref.sections(), 2);
+    }
+
+    #[test]
+    fn hybrid_supplement_and_prev_share_budgets() {
+        let bytes = two_stream_pdf(true);
+        let output_limited = Limits { max_total_decoded_bytes: 15, ..Limits::default() };
+        let error = read_pdf(Arc::clone(&bytes), &output_limited)
+            .err().expect("hybrid and prior streams exceed output budget");
+        assert!(matches!(error, DocError::Refused(crate::limits::Refusal {
+            limit: LimitKind::TotalDecodedBytes, requested: 16, maximum: 15,
+        })));
+
+        let work_limited = Limits { max_total_decode_work_bytes: 31, ..Limits::default() };
+        let error = read_pdf(Arc::clone(&bytes), &work_limited)
+            .err().expect("hybrid and prior streams exceed work budget");
+        assert!(matches!(error, DocError::Refused(crate::limits::Refusal {
+            limit: LimitKind::DecodeWorkBytes, requested: 32, maximum: 31,
+        })));
+
+        let exact = Limits {
+            max_total_decoded_bytes: 16,
+            max_total_decode_work_bytes: 32,
+            ..Limits::default()
+        };
+        let (xref, _, _) = read_pdf(bytes, &exact).expect("exact hybrid budgets should pass");
+        assert_eq!(xref.kind(), XrefKind::Hybrid);
+        assert_eq!(xref.sections(), 2);
+    }
+
+    #[test]
+    fn table_only_open_does_not_consume_decode_budgets() {
+        let mut bytes = b"%PDF-1.7\n".to_vec();
+        let offset = bytes.len();
+        bytes.extend_from_slice(
+            format!(
+                "xref\n0 1\n0000000000 65535 f\ntrailer\n<< /Size 1 >>\nstartxref\n{offset}\n%%EOF\n"
+            )
+            .as_bytes(),
+        );
+        let limits = Limits {
+            max_total_decoded_bytes: 0,
+            max_total_decode_work_bytes: 0,
+            ..Limits::default()
+        };
+        let (xref, _, _) = read_pdf(Arc::from(bytes), &limits)
+            .expect("table-only xref should not charge decode budgets");
+        assert_eq!(xref.kind(), XrefKind::Table);
+        assert_eq!(xref.sections(), 1);
+    }
+
+    #[test]
+    fn encoded_work_overflow_refuses_before_filter_decode() {
+        let bytes = stream_bytes(Some("FlateDecode"), b"00000000");
+        let limits = Limits { max_total_decode_work_bytes: u64::MAX, ..Limits::default() };
+        let mut budget = DecodeBudget { decoded_bytes: 0, work_bytes: u64::MAX };
+        let error = run_stream(bytes, &limits, &mut budget)
+            .err().expect("encoded work overflow should refuse");
+        assert!(matches!(error, DocError::Refused(crate::limits::Refusal {
+            limit: LimitKind::DecodeWorkBytes, requested: u64::MAX, maximum: u64::MAX,
+        })));
+        assert_eq!(budget.decoded_bytes, 0);
+        assert_eq!(budget.work_bytes, u64::MAX);
+    }
+}
+
+fn allocation_maximum(limits: &Limits, file_len: usize) -> u64 {
+    u64::from(limits.max_objects).min((file_len as u64).saturating_mul(8).saturating_add(1024))
+}
+
+fn allocation_failure(maximum: u64) -> DocError {
+    DocError::Refused(crate::limits::Refusal {
+        limit: LimitKind::Objects,
+        requested: maximum.saturating_add(1),
+        maximum,
+    })
+}
+
+fn grow_entries(
+    entries: &mut Vec<Option<XrefEntry>>,
+    length: usize,
+    maximum: u64,
+) -> Result<(), DocError> {
+    check(LimitKind::Objects, length as u64, maximum)?;
+    if length > entries.len() {
+        entries
+            .try_reserve_exact(length - entries.len())
+            .map_err(|_| allocation_failure(maximum))?;
+        entries.resize(length, None);
+    }
+    Ok(())
+}
+
+fn size(
+    dict: DictRef<'_>,
+    limits: &Limits,
+    offset: usize,
+    file_len: usize,
+) -> Result<usize, DocError> {
     let size = integer(dict, b"Size")?.ok_or_else(|| malformed(offset, "xref Size"))?;
-    check(LimitKind::Objects, size, u64::from(limits.max_objects))?;
+    check(
+        LimitKind::Objects,
+        size,
+        allocation_maximum(limits, file_len),
+    )?;
     usize::try_from(size).map_err(|_| malformed(offset, "xref Size"))
 }
 

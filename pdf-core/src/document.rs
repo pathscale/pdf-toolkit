@@ -132,6 +132,9 @@ impl Document {
             .filter(|value| !value.is_null())
             .map(|value| value.to_owned())
         else {
+            if password.is_some() {
+                return Err(malformed(0, "password supplied for unencrypted document"));
+            }
             return Ok(());
         };
         let mut permissions = None;
@@ -326,6 +329,8 @@ impl Document {
             document: self,
             cache: Vec::new(),
             cache_bytes: 0,
+            decoded_bytes: 0,
+            decode_work_bytes: 0,
             warnings: Vec::new(),
             nesting: 0,
             parse_scratch: ParseScratch::default(),
@@ -346,6 +351,8 @@ pub struct Resolver<'d> {
     document: &'d Document,
     cache: Vec<CacheEntry>,
     cache_bytes: u64,
+    decoded_bytes: u64,
+    decode_work_bytes: u64,
     warnings: Vec<Warning>,
     /// Nested `get` calls in flight: an indirect /Length or an object stream's
     /// indirect filter parameters re-enter `get`; this bounds that recursion.
@@ -462,11 +469,18 @@ impl<'d> Resolver<'d> {
                                 // An unresolvable or non-integer indirect /Length falls back
                                 // to the bounded endstream scan inside finish_stream.
                                 let resolved = match length {
-                                    Some(length) => self
-                                        .get(length)
-                                        .ok()
-                                        .and_then(|target| target.root().as_i64())
-                                        .and_then(|n| u64::try_from(n).ok()),
+                                    Some(length) => match self.get(length) {
+                                        Ok(target) => target
+                                            .root()
+                                            .as_i64()
+                                            .and_then(|n| u64::try_from(n).ok()),
+                                        Err(error @ DocError::Refused(Refusal {
+                                            limit: LimitKind::TotalDecodedBytes
+                                                | LimitKind::DecodeWorkBytes,
+                                            ..
+                                        })) => return Err(error),
+                                        Err(_) => None,
+                                    },
                                     None => None,
                                 };
                                 if self.document.repair_mode {
@@ -474,6 +488,9 @@ impl<'d> Resolver<'d> {
                                 } else {
                                     object.finish_stream(resolved, &self.document.limits)?;
                                 }
+                            }
+                            if self.document.xref.parsed_stream(&object) {
+                                object.mark_xref_stream();
                             }
                             if let Some(crypt) = &self.document.private_crypt {
                                 crypt.prepare(&mut object, id, &self.document.limits)?;
@@ -524,7 +541,13 @@ impl<'d> Resolver<'d> {
                     let container = objects
                         .pop()
                         .ok_or_else(|| malformed(0, "resolver state"))?;
-                    let decoded = self.decode_stream(&container)?;
+                    let limits = self.document.limits;
+                    let decoded = self.decode_stream_accounted(&container, None, true)?;
+                    check(
+                        LimitKind::DecodedBytes,
+                        decoded.bytes.len() as u64,
+                        limits.max_objstm_cache_bytes,
+                    )?;
                     if decoded.image.is_some() || (decoded.truncated && !self.document.repair_mode)
                     {
                         return Err(malformed(0, "object stream decode"));
@@ -547,7 +570,7 @@ impl<'d> Resolver<'d> {
                     };
                     let object =
                         stream.member(index, id, &self.document.limits, &mut self.parse_scratch)?;
-                    self.cache_stream(number, stream);
+                    self.cache_stream(number, stream)?;
                     active.pop();
                     objects.push(object);
                 }
@@ -589,12 +612,10 @@ impl<'d> Resolver<'d> {
         }
     }
 
-    fn cache_stream(&mut self, number: u32, stream: ObjectStream) {
+    fn cache_stream(&mut self, number: u32, stream: ObjectStream) -> Result<(), DocError> {
         let cost = stream.cost();
         let maximum = self.document.limits.max_objstm_cache_bytes;
-        if cost > maximum {
-            return;
-        }
+        check(LimitKind::DecodedBytes, cost, maximum)?;
         if let Some(index) = self.cache.iter().position(|entry| entry.number == number) {
             let removed = self.cache.remove(index);
             self.cache_bytes = self.cache_bytes.saturating_sub(removed.cost);
@@ -609,6 +630,7 @@ impl<'d> Resolver<'d> {
             stream,
             cost,
         });
+        Ok(())
     }
 
     pub fn resolve(&mut self, value: ValueRef<'_>) -> Result<Value, DocError> {
@@ -641,32 +663,144 @@ impl<'d> Resolver<'d> {
         }
     }
 
+    /// Decode a stream while charging cumulative output and byte-work limits to
+    /// this resolver. Reuse one resolver when decoding related streams under a
+    /// shared aggregate budget.
     pub fn decode_stream(&mut self, stream: &Object) -> Result<Decoded, DocError> {
+        self.decode_stream_accounted(stream, None, false)
+    }
+
+    /// Decode a stream under this resolver's cumulative output and byte-work
+    /// limits and an additional caller-owned cumulative output budget.
+    /// The caller must pass `used <= maximum` and charge its own output after
+    /// success; this method only enforces the remaining caller ceiling.
+    pub fn decode_stream_with_total_limit(
+        &mut self,
+        stream: &Object,
+        used: u64,
+        maximum: u64,
+    ) -> Result<Decoded, DocError> {
+        debug_assert!(used <= maximum);
+        self.decode_stream_accounted(stream, Some((used, maximum)), false)
+    }
+
+    fn decode_stream_accounted(
+        &mut self,
+        stream: &Object,
+        caller: Option<(u64, u64)>,
+        object_stream: bool,
+    ) -> Result<Decoded, DocError> {
         if !self.document.decryptable() {
             return Err(DocError::Encrypted);
         }
+        let limits = self.document.limits;
         let raw = stream.stream_raw().ok_or(DocError::WrongType {
             id: stream.id(),
             expected: "stream",
         })?;
+        let input_bytes = u64::try_from(raw.len()).unwrap_or(u64::MAX).max(1);
+        self.charge_decode_work(input_bytes)?;
+
         let steps = filter_steps_for(stream, |value| self.resolve(value), true)?;
         if let Some(crypt) = &self.document.private_crypt {
-            if !crypt.excluded(stream) {
-                if steps.iter().any(|step| step.kind == FilterKind::Crypt) {
-                    return Err(DocError::Unsupported {
-                        feature: "PSChaCha Crypt filter",
-                    });
-                }
-                let id = stream
-                    .id()
-                    .ok_or_else(|| malformed(0, "PSChaCha object ID"))?;
-                let plain = crypt
-                    .key
-                    .open(id, raw, self.document.limits.max_decoded_bytes)?;
-                return crate::crypt::decode_stream(self, stream, &plain, &steps);
+            crypt.check_xref_claim(stream)?;
+            if !crypt.excluded(stream) && steps.iter().any(|step| step.kind == FilterKind::Crypt) {
+                return Err(DocError::Unsupported { feature: "PSChaCha Crypt filter" });
             }
         }
-        crate::crypt::decode_stream(self, stream, raw, &steps)
+        let names = crate::crypt::prepare_crypt_names(self, stream, &steps)?;
+        let caller_remaining = caller.map(|(used, maximum)| maximum.saturating_sub(used));
+        let local_maximum = limits.max_decoded_bytes.min(if object_stream {
+            limits.max_objstm_cache_bytes
+        } else {
+            u64::MAX
+        });
+        let total_before = self.decoded_bytes;
+        let work_before = self.decode_work_bytes;
+        let mut maximum = local_maximum
+            .min(limits.max_total_decoded_bytes.saturating_sub(total_before))
+            .min(limits.max_total_decode_work_bytes.saturating_sub(work_before));
+        if let Some(remaining) = caller_remaining {
+            maximum = maximum.min(remaining);
+        }
+        let private = self.document.private_crypt.as_ref().filter(|crypt| !crypt.excluded(stream));
+        let decoded = if let Some(crypt) = private {
+            let id = stream.id().ok_or_else(|| malformed(0, "PSChaCha object ID"))?;
+            let plain = crypt.key.open(id, raw, maximum).map_err(|error| {
+                match &error {
+                    DocError::Refused(refusal) if refusal.limit == LimitKind::DecodedBytes => {
+                        crate::crypt::StreamDecodeError::Ceiling(error)
+                    }
+                    _ => crate::crypt::StreamDecodeError::Other(error),
+                }
+            });
+            match plain {
+                Ok(plain) => crate::crypt::decode_stream_prepared(
+                    self, stream, &plain, &steps, maximum, &names,
+                ),
+                Err(error) => Err(error),
+            }
+        } else {
+            crate::crypt::decode_stream_prepared(self, stream, raw, &steps, maximum, &names)
+        };
+        let decoded = match decoded {
+            Ok(decoded) => decoded,
+            Err(crate::crypt::StreamDecodeError::Other(error)) => return Err(error),
+            Err(crate::crypt::StreamDecodeError::Ceiling(error)) => {
+                self.decode_work_bytes = self.decode_work_bytes.checked_add(maximum).unwrap_or(u64::MAX);
+                if let Some(refusal) = binding_decode_refusal(
+                    caller,
+                    total_before,
+                    work_before,
+                    limits,
+                    local_maximum,
+                ) {
+                    return Err(DocError::Refused(refusal));
+                }
+                if object_stream
+                    && matches!(
+                        &error,
+                        &DocError::Filter(crate::filter::FilterError::OutputLimit { .. })
+                    )
+                {
+                    return Err(DocError::Refused(Refusal {
+                        limit: LimitKind::DecodedBytes,
+                        requested: local_maximum.saturating_add(1),
+                        maximum: local_maximum,
+                    }));
+                }
+                return Err(error);
+            }
+        };
+        let output_bytes = u64::try_from(decoded.bytes.len()).unwrap_or(u64::MAX);
+        self.charge_total_decoded(output_bytes)?;
+        self.charge_decode_work(output_bytes)?;
+        Ok(decoded)
+    }
+
+    fn charge_total_decoded(&mut self, bytes: u64) -> Result<(), DocError> {
+        let requested = self.decoded_bytes.checked_add(bytes).unwrap_or(u64::MAX);
+        check(
+            LimitKind::TotalDecodedBytes,
+            requested,
+            self.document.limits.max_total_decoded_bytes,
+        )?;
+        self.decoded_bytes = requested;
+        Ok(())
+    }
+
+    fn charge_decode_work(&mut self, bytes: u64) -> Result<(), DocError> {
+        let requested = self
+            .decode_work_bytes
+            .checked_add(bytes)
+            .unwrap_or(u64::MAX);
+        check(
+            LimitKind::DecodeWorkBytes,
+            requested,
+            self.document.limits.max_total_decode_work_bytes,
+        )?;
+        self.decode_work_bytes = requested;
+        Ok(())
     }
 
     /// Decode an object-level string. Content and object-stream strings carry
@@ -723,6 +857,323 @@ impl<'d> Resolver<'d> {
 
     pub fn warn(&mut self, warning: Warning) {
         self.warnings.push(warning);
+    }
+}
+
+fn binding_decode_refusal(
+    caller: Option<(u64, u64)>,
+    total_used: u64,
+    work_used: u64,
+    limits: Limits,
+    local_maximum: u64,
+) -> Option<Refusal> {
+    let total_remaining = limits.max_total_decoded_bytes.saturating_sub(total_used);
+    let work_remaining = limits.max_total_decode_work_bytes.saturating_sub(work_used);
+    let caller_remaining = caller.map(|(used, maximum)| maximum.saturating_sub(used));
+    let effective = caller_remaining
+        .into_iter()
+        .chain([total_remaining, work_remaining])
+        .min()?;
+    if effective > local_maximum {
+        return None;
+    }
+    let (limit, used, maximum) = if caller_remaining == Some(effective) {
+        let (used, maximum) = caller?;
+        (LimitKind::TotalDecodedBytes, used, maximum)
+    } else if total_remaining == effective {
+        (
+            LimitKind::TotalDecodedBytes,
+            total_used,
+            limits.max_total_decoded_bytes,
+        )
+    } else if work_remaining == effective {
+        (
+            LimitKind::DecodeWorkBytes,
+            work_used,
+            limits.max_total_decode_work_bytes,
+        )
+    } else {
+        return None;
+    };
+    let requested = used
+        .checked_add(maximum.saturating_sub(used).saturating_add(1))
+        .unwrap_or(u64::MAX);
+    Some(Refusal {
+        limit,
+        requested,
+        maximum,
+    })
+}
+
+#[cfg(test)]
+mod resolver_accounting_tests {
+    use super::*;
+
+    fn document_with_raw_stream(payload: &[u8], limits: Limits) -> Document {
+        document_with_stream_dictionary(payload, "", limits)
+    }
+
+    fn document_with_stream_dictionary(
+        payload: &[u8],
+        entries: &str,
+        limits: Limits,
+    ) -> Document {
+        let mut bytes = alloc::vec::Vec::from(&b"%PDF-1.7\n"[..]);
+        let object_offset = bytes.len();
+        bytes.extend_from_slice(
+            alloc::format!("1 0 obj\n<< /Length {} {} >>\nstream\n", payload.len(), entries).as_bytes(),
+        );
+        bytes.extend_from_slice(payload);
+        bytes.extend_from_slice(b"\nendstream\nendobj\n");
+        let xref_offset = bytes.len();
+        bytes.extend_from_slice(
+            alloc::format!(
+                "xref\n0 2\n0000000000 65535 f \n{:010} 00000 n \ntrailer\n<< /Size 2 /Root 1 0 R >>\nstartxref\n{}\n%%EOF\n",
+                object_offset, xref_offset
+            )
+            .as_bytes(),
+        );
+        Document::open(PdfSource::new(bytes).unwrap(), limits).unwrap()
+    }
+
+    fn stream(document: &Document) -> Object {
+        document.resolver().get(ObjectRef::new(1, 0)).unwrap()
+    }
+
+    fn zlib_stored(payload: &[u8]) -> alloc::vec::Vec<u8> {
+        let len = u16::try_from(payload.len()).unwrap();
+        let mut encoded = alloc::vec![0x78, 0x01, 0x01];
+        encoded.extend_from_slice(&len.to_le_bytes());
+        encoded.extend_from_slice(&(!len).to_le_bytes());
+        encoded.extend_from_slice(payload);
+        let mut a = 1u32;
+        let mut b = 0u32;
+        for byte in payload {
+            a = (a + u32::from(*byte)) % 65_521;
+            b = (b + a) % 65_521;
+        }
+        encoded.extend_from_slice(&((b << 16) | a).to_be_bytes());
+        encoded
+    }
+
+    fn refusal(error: DocError, expected: LimitKind, requested: u64, maximum: u64) {
+        assert!(matches!(
+            error,
+            DocError::Refused(Refusal { limit, requested: got, maximum: cap })
+                if limit == expected && got == requested && cap == maximum
+        ));
+    }
+
+    #[test]
+    fn terminal_image_does_not_resolve_later_crypt_name() {
+        let document = document_with_stream_dictionary(
+            b"image bytes",
+            "/Filter [/DCTDecode /Crypt] /DecodeParms [null << /Name 999 0 R >>]",
+            Limits::default(),
+        );
+        let object = stream(&document);
+        let decoded = document.resolver().decode_stream(&object).unwrap();
+        assert_eq!(decoded.image, Some(FilterKind::Dct));
+        assert_eq!(decoded.bytes, b"image bytes");
+    }
+
+    #[test]
+    fn object_and_general_raw_decode_share_totals_in_both_orders() {
+        let limits = Limits {
+            max_decoded_bytes: 64,
+            max_objstm_cache_bytes: 64,
+            max_total_decoded_bytes: 20,
+            max_total_decode_work_bytes: 128,
+            ..Limits::default()
+        };
+        for first_is_object_stream in [false, true] {
+            let document = document_with_raw_stream(b"0123456789", limits);
+            let object = stream(&document);
+            let mut resolver = document.resolver();
+            let first = resolver
+                .decode_stream_accounted(&object, None, first_is_object_stream)
+                .unwrap();
+            assert_eq!(first.bytes, b"0123456789");
+            let second = resolver
+                .decode_stream_accounted(&object, None, !first_is_object_stream)
+                .unwrap();
+            assert_eq!(second.bytes, b"0123456789");
+            refusal(
+                resolver
+                    .decode_stream_accounted(&object, None, first_is_object_stream)
+                    .unwrap_err(),
+                LimitKind::TotalDecodedBytes,
+                21,
+                20,
+            );
+        }
+
+        let exact = document_with_raw_stream(
+            b"0123456789",
+            Limits {
+                max_decoded_bytes: 64,
+                max_objstm_cache_bytes: 64,
+                max_total_decoded_bytes: 20,
+                max_total_decode_work_bytes: 128,
+                ..Limits::default()
+            },
+        );
+        let object = stream(&exact);
+        let mut resolver = exact.resolver();
+        resolver.decode_stream_accounted(&object, None, true).unwrap();
+        resolver.decode_stream_accounted(&object, None, false).unwrap();
+    }
+
+    #[test]
+    fn object_stream_flate_limit_keeps_historical_local_fields() {
+        let encoded = zlib_stored(b"0123456789");
+        let document = document_with_stream_dictionary(
+            &encoded,
+            "/Filter /FlateDecode",
+            Limits {
+                max_decoded_bytes: 6,
+                max_objstm_cache_bytes: 64,
+                max_total_decoded_bytes: 128,
+                max_total_decode_work_bytes: 128,
+                ..Limits::default()
+            },
+        );
+        let object = stream(&document);
+        let error = document
+            .resolver()
+            .decode_stream_accounted(&object, None, true)
+            .unwrap_err();
+        refusal(error, LimitKind::DecodedBytes, 7, 6);
+    }
+
+    #[test]
+    fn binding_refusal_ties_follow_caller_total_work_local_order() {
+        let limits = Limits {
+            max_total_decoded_bytes: 15,
+            max_total_decode_work_bytes: 16,
+            ..Limits::default()
+        };
+        let caller_tie = binding_decode_refusal(Some((3, 8)), 10, 0, limits, 8).unwrap();
+        assert_eq!(caller_tie, Refusal {
+            limit: LimitKind::TotalDecodedBytes,
+            requested: 9,
+            maximum: 8,
+        });
+
+        let total_work_tie = binding_decode_refusal(None, 10, 11, limits, 8).unwrap();
+        assert_eq!(total_work_tie, Refusal {
+            limit: LimitKind::TotalDecodedBytes,
+            requested: 16,
+            maximum: 15,
+        });
+
+        let work_local_tie = binding_decode_refusal(
+            None,
+            0,
+            11,
+            Limits {
+                max_total_decoded_bytes: 100,
+                max_total_decode_work_bytes: 16,
+                ..Limits::default()
+            },
+            5,
+        ).unwrap();
+        assert_eq!(work_local_tie.limit, LimitKind::DecodeWorkBytes);
+        assert_eq!(work_local_tie.requested, 17);
+        assert_eq!(work_local_tie.maximum, 16);
+
+        assert!(binding_decode_refusal(
+            None,
+            0,
+            0,
+            Limits {
+                max_total_decoded_bytes: 100,
+                max_total_decode_work_bytes: 100,
+                ..Limits::default()
+            },
+            5,
+        ).is_none());
+    }
+
+    #[test]
+    fn resolver_and_external_output_caps_share_accounted_path() {
+        let limits = Limits {
+            max_total_decoded_bytes: 16,
+            max_total_decode_work_bytes: 128,
+            ..Limits::default()
+        };
+        let document = document_with_raw_stream(b"0123456789", limits);
+        let object = stream(&document);
+        let mut resolver = document.resolver();
+        assert_eq!(resolver.decode_stream(&object).unwrap().bytes.len(), 10);
+        refusal(
+            resolver.decode_stream(&object).unwrap_err(),
+            LimitKind::TotalDecodedBytes,
+            17,
+            16,
+        );
+
+        let document = document_with_raw_stream(b"0123456789", limits);
+        let object = stream(&document);
+        refusal(
+            document
+                .resolver()
+                .decode_stream_with_total_limit(&object, 10, 16)
+                .unwrap_err(),
+            LimitKind::TotalDecodedBytes,
+            17,
+            16,
+        );
+
+        let work_limited = Limits {
+            max_total_decoded_bytes: 128,
+            max_total_decode_work_bytes: 16,
+            ..Limits::default()
+        };
+        let document = document_with_raw_stream(b"0123456789", work_limited);
+        let object = stream(&document);
+        refusal(
+            document.resolver().decode_stream(&object).unwrap_err(),
+            LimitKind::DecodeWorkBytes,
+            17,
+            16,
+        );
+
+        let exact = document_with_raw_stream(
+            b"123456",
+            Limits {
+                max_total_decoded_bytes: 6,
+                max_total_decode_work_bytes: 64,
+                ..Limits::default()
+            },
+        );
+        assert_eq!(
+            exact
+                .resolver()
+                .decode_stream(&stream(&exact))
+                .unwrap()
+                .bytes,
+            b"123456"
+        );
+
+        let local = document_with_raw_stream(
+            b"0123456789",
+            Limits {
+                max_decoded_bytes: 6,
+                max_total_decoded_bytes: 128,
+                max_total_decode_work_bytes: 128,
+                ..Limits::default()
+            },
+        );
+        refusal(
+            local
+                .resolver()
+                .decode_stream(&stream(&local))
+                .unwrap_err(),
+            LimitKind::DecodedBytes,
+            10,
+            6,
+        );
     }
 }
 
@@ -876,3 +1327,15 @@ where
         expected: "integer decode parameter",
     })
 }
+
+#[cfg(test)]
+#[path = "resolver_crypto_tests.rs"]
+mod resolver_crypto_tests;
+
+#[cfg(test)]
+#[path = "resolver_lookup_tests.rs"]
+mod resolver_lookup_tests;
+
+#[cfg(test)]
+#[path = "resolver_dependency_tests.rs"]
+mod resolver_dependency_tests;

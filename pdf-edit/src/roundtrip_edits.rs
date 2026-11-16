@@ -556,6 +556,80 @@ fn expected_refusal(error: &DocError, manifest: &str) -> bool {
     }
 }
 
+fn cumulative_general_stream_decode(path: &Path) -> CheckResult<()> {
+    let bytes = read_bounded(path)?;
+    let document = open(bytes.clone())?;
+    let page = pages(&document)?
+        .into_iter()
+        .next()
+        .ok_or_else(|| "classic fixture has no page".to_owned())?;
+    let stream_id = page
+        .contents
+        .first()
+        .copied()
+        .ok_or_else(|| "classic fixture has no content stream".to_owned())?;
+    let mut resolver = document.resolver();
+    let stream = resolver.get(stream_id).map_err(describe)?;
+    let input_bytes = stream
+        .stream_raw()
+        .ok_or_else(|| "classic content stream has no bytes".to_owned())?
+        .len();
+    let decoded_bytes = resolver
+        .decode_stream(&stream)
+        .map_err(describe)?
+        .bytes
+        .len();
+    if decoded_bytes == 0 {
+        return Err("classic content stream decoded to no bytes".to_owned());
+    }
+
+    let maximum = u64::try_from(decoded_bytes).unwrap_or(u64::MAX);
+    let limits = Limits {
+        max_total_decoded_bytes: maximum,
+        ..edit_limits()
+    };
+    let document = Document::open(PdfSource::new(bytes.clone()).map_err(describe)?, limits)
+        .map_err(describe)?;
+    let mut resolver = document.resolver();
+    let stream = resolver.get(stream_id).map_err(describe)?;
+    resolver.decode_stream(&stream).map_err(describe)?;
+    match resolver.decode_stream(&stream) {
+        Err(DocError::Refused(Refusal {
+            limit: LimitKind::TotalDecodedBytes,
+            ..
+        })) => {}
+        Err(error) => return Err(format!("unexpected repeated decode refusal: {error:?}")),
+        Ok(_) => {
+            return Err("repeated stream decode exceeded its cumulative output budget".to_owned());
+        }
+    }
+
+    let input_bytes = u64::try_from(input_bytes).unwrap_or(u64::MAX);
+    let decoded_bytes = u64::try_from(decoded_bytes).unwrap_or(u64::MAX);
+    let maximum_work = input_bytes
+        .checked_add(decoded_bytes)
+        .ok_or_else(|| "classic stream work size overflow".to_owned())?;
+    let limits = Limits {
+        max_total_decode_work_bytes: maximum_work,
+        ..edit_limits()
+    };
+    let document =
+        Document::open(PdfSource::new(bytes).map_err(describe)?, limits).map_err(describe)?;
+    let mut resolver = document.resolver();
+    let stream = resolver.get(stream_id).map_err(describe)?;
+    resolver.decode_stream(&stream).map_err(describe)?;
+    match resolver.decode_stream(&stream) {
+        Err(DocError::Refused(Refusal {
+            limit: LimitKind::DecodeWorkBytes,
+            ..
+        })) => Ok(()),
+        Err(error) => Err(format!(
+            "unexpected repeated decode-work refusal: {error:?}"
+        )),
+        Ok(_) => Err("repeated stream decode exceeded its cumulative work budget".to_owned()),
+    }
+}
+
 pub(super) fn run(report: &mut Report, config: &Config, font: Arc<[u8]>) {
     let Some(directory) = config.classic.parent() else {
         report.check(
@@ -566,6 +640,11 @@ pub(super) fn run(report: &mut Report, config: &Config, font: Arc<[u8]>) {
         );
         return;
     };
+    report.obtain(
+        "decode-budget",
+        "cumulative-general-stream-budgets",
+        cumulative_general_stream_decode(&config.classic),
+    );
     let result = (|| -> CheckResult<Vec<PathBuf>> {
         let mut paths = Vec::new();
         for entry in fs::read_dir(directory).map_err(describe)? {

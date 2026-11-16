@@ -495,24 +495,43 @@ impl Font {
     }
 
     pub fn glyphs<'a>(&'a self, bytes: &'a [u8]) -> impl Iterator<Item = Glyph> + 'a {
+        self.glyphs_with_width_cache::<false>(bytes)
+    }
+
+    pub(crate) fn glyphs_cached<'a>(&'a self, bytes: &'a [u8]) -> impl Iterator<Item = Glyph> + 'a {
+        self.glyphs_with_width_cache::<true>(bytes)
+    }
+
+    fn glyphs_with_width_cache<'a, const CACHE: bool>(
+        &'a self,
+        bytes: &'a [u8],
+    ) -> impl Iterator<Item = Glyph> + 'a {
+        let data = self.data.as_ref();
+        let encoding = data.encoding.as_ref();
+        // Simple widths already have a direct table. CID widths use a bounded,
+        // allocation-free cache owned by this iterator, never by the font.
+        let mut width_cache = if CACHE && encoding.is_some() {
+            Some(([u64::MAX; 64], [0.0; 64]))
+        } else {
+            None
+        };
         let mut remaining = bytes;
         core::iter::from_fn(move || {
             let first = remaining.first().copied()?;
-            let (code, byte_len, valid) = match &self.data.encoding {
+            let (code, byte_len, valid) = match encoding {
                 Some(encoding) => encoding.next_code_checked(remaining),
                 None => (u32::from(first), 1, true),
             };
             remaining = remaining.get(usize::from(byte_len)..).unwrap_or(&[]);
             let text = if valid {
-                self.data
-                    .to_unicode
+                data.to_unicode
                     .as_ref()
                     .and_then(|map| map.unicode(code))
                     .or_else(|| {
-                        if self.data.kind == FontKind::Type0 {
+                        if data.kind == FontKind::Type0 {
                             None
                         } else {
-                            self.data.simple.unicode(code)
+                            data.simple.unicode(code)
                         }
                     })
                     .filter(|text| !text.is_empty())
@@ -520,27 +539,44 @@ impl Font {
                 None
             };
 
-            let width = if let Some(encoding) = &self.data.encoding {
-                let cid = if valid { encoding.cid(code) } else { 0 };
-                self.data
-                    .cid_widths
-                    .binary_search_by(|range| {
-                        if range.end < cid {
-                            Ordering::Less
-                        } else if range.start > cid {
-                            Ordering::Greater
-                        } else {
-                            Ordering::Equal
-                        }
-                    })
-                    .ok()
-                    .and_then(|index| self.data.cid_widths.get(index))
-                    .map(|range| range.width)
-                    .unwrap_or(self.data.default_width)
+            let width = if let Some(encoding) = encoding {
+                let lookup = || {
+                    let cid = if valid { encoding.cid(code) } else { 0 };
+                    data.cid_widths
+                        .binary_search_by(|range| {
+                            if range.end < cid {
+                                Ordering::Less
+                            } else if range.start > cid {
+                                Ordering::Greater
+                            } else {
+                                Ordering::Equal
+                            }
+                        })
+                        .ok()
+                        .and_then(|index| data.cid_widths.get(index))
+                        .map(|range| range.width)
+                        .unwrap_or(data.default_width)
+                };
+                if let Some((keys, widths)) = width_cache.as_mut() {
+                    // Invalid codes always use CID zero. Give them a key
+                    // outside the valid u32 code range.
+                    let key = if valid { u64::from(code) } else { 1u64 << 32 };
+                    let slot = (key as usize) & 63;
+                    if keys[slot] == key {
+                        widths[slot]
+                    } else {
+                        let width = lookup();
+                        keys[slot] = key;
+                        widths[slot] = width;
+                        width
+                    }
+                } else {
+                    lookup()
+                }
             } else {
                 usize::try_from(code)
                     .ok()
-                    .and_then(|index| self.data.simple_widths.get(index))
+                    .and_then(|index| data.simple_widths.get(index))
                     .copied()
                     .unwrap_or(0.0)
             };
@@ -553,6 +589,56 @@ impl Font {
                 word_space: byte_len == 1 && code == 32,
             })
         })
+    }
+}
+
+#[cfg(test)]
+mod width_cache_tests {
+    use super::*;
+
+    #[test]
+    fn cached_cid_widths_match_exact_lookup_for_hits_collisions_and_invalid_codes() {
+        let cmap = b"2 begincodespacerange <00> <7F> <80> <BF> endcodespacerange 2 begincidchar <41> 7 <81> 8 endcidchar";
+        let (encoding, warning) = CMap::parse(cmap, 16);
+        assert_eq!(warning, None);
+        let mut simple_widths = [0.0; 256];
+        simple_widths[0x41] = 0.25;
+        let font = Font {
+            data: Arc::new(FontData {
+                kind: FontKind::Type0,
+                name: FontName::default(),
+                flags: FontFlags::default(),
+                matrix: DEFAULT_MATRIX,
+                simple: SimpleEncoding::new(None),
+                simple_widths,
+                encoding: Some(encoding),
+                to_unicode: None,
+                cid_widths: alloc::vec![
+                    CidWidth {
+                        start: 7,
+                        end: 7,
+                        width: 0.5,
+                    },
+                    CidWidth {
+                        start: 8,
+                        end: 8,
+                        width: 0.75,
+                    },
+                ],
+                default_width: 1.0,
+                cache_bytes: 0,
+                warnings: Vec::new(),
+            }),
+        };
+        // Codes 0x41 and 0x81 map to distinct CIDs but collide in the
+        // direct-mapped cache. 0xff is outside both codespaces and maps to CID 0.
+        let bytes = [0x41, 0x81, 0x41, 0xff, 0x41];
+        let exact: Vec<_> = font.glyphs(&bytes).collect();
+        let cached: Vec<_> = font.glyphs_cached(&bytes).collect();
+        assert_eq!(cached, exact);
+        assert_eq!(cached[0].width, 0.5);
+        assert_eq!(cached[1].width, 0.75);
+        assert_eq!(cached[3].width, 1.0);
     }
 }
 
